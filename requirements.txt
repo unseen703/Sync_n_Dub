@@ -1,0 +1,54 @@
+# Dubbing Studio — single-env install (Python 3.10).
+# Supports pyannote diarizer by default.
+# DiariZen was dropped from the default env due to dependency conflicts;
+# to add it back, install a separate venv from git+https://github.com/BUTSpeechFIT/DiariZen.git
+
+# -------- core --------
+python-dotenv>=1.0.1
+numpy>=1.26,<2.3
+soundfile>=0.12.1
+tqdm>=4.66
+
+# -------- download / media I/O --------
+yt-dlp>=2025.1.15
+imageio-ffmpeg>=0.5.1
+# PyAV ships ffmpeg 7 shared libs under av.libs/ — the pyannote adapter
+# shims them onto LD_LIBRARY_PATH so torchcodec can dlopen libavutil.so.59,
+# libavcodec.so.61, etc. on boxes without system-installed ffmpeg. Pinned
+# to 14.x because 15+ ships ffmpeg 8 (libavutil.so.60), which torchcodec
+# 0.17 does not have a matching libtorchcodec_core.so for.
+av>=14,<15
+
+# -------- torch stack --------
+# For CUDA, install torch first with:
+#   pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu121
+torch>=2.2
+torchaudio>=2.2
+
+# -------- stem separation --------
+demucs>=4.0.1
+
+# -------- diarization --------
+pyannote.audio>=3.4.0
+
+# -------- face detection / tracking / ASD --------
+# RetinaFace via InsightFace (preferred). onnxruntime-gpu on CUDA boxes.
+insightface>=0.7.3
+onnxruntime>=1.17
+mediapipe>=0.10.14
+opencv-python-headless>=4.9        # cv2 for frame decode; headless avoids GUI deps
+supervision>=0.21                  # pure-python ByteTrack
+scipy>=1.11                        # Hungarian solver (linear_sum_assignment)
+python_speech_features>=0.6        # TalkNet MFCC frontend
+
+# -------- ASR --------
+requests>=2.31                     # Bodhan HTTP client
+# WhisperX (install from PyPI; pulls faster-whisper + ctranslate2)
+whisperx>=3.1 ; python_version < "3.12"
+# IndicConformer — uses NeMo's Conformer-CTC runtime.
+nemo-toolkit[asr]>=2.0.0
+
+# -------- frontend + notebook --------
+gradio>=4.44
+jupyter>=1.0.0
+ipykernel>=6.29

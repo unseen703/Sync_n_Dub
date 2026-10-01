@@ -1,0 +1,45 @@
+# venv
+.venv/
+.venv-diarization/
+venv/
+env/
+
+# python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# secrets
+.env
+.env.local
+
+# data — regenerable pipeline artefacts
+data/videos/
+data/audio/
+data/stems/
+data/diarization/
+data/asd/
+data/asr/
+data/faces/
+outputs/
+runs/
+samples/
+
+# third-party vendored code (large; fetch separately)
+third_party/
+
+# claude code session dir
+.claude/
+
+# model caches
+.cache/
+~/.cache/huggingface/
+
+# editor
+.vscode/
+.idea/
+*.swp
+.DS_Store

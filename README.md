@@ -74,24 +74,40 @@ dubbingstudio/
 
 ## Setup
 
+One-shot (recommended) — creates the venv, installs torch + requirements,
+fetches the TalkNet-ASD repo + checkpoint, and runs a 60-second dry-run
+pipeline on the first reference video:
+
 ```bash
-# 1. system dep — ffmpeg must be on PATH
-sudo apt install ffmpeg           # or: brew install ffmpeg
+sudo apt install ffmpeg           # or: brew install ffmpeg — must be on PATH
+./setup.sh                        # see ./setup.sh --help for flags
 
-# 2. python env
-python3 -m venv .venv
-source .venv/bin/activate
+# useful variants:
+./setup.sh --check-only           # report state, change nothing (doctor mode)
+./setup.sh --no-dry-run           # install + fetch, skip the 60s pipeline run
+./setup.sh --no-talknet           # pyannote-only; skip TalkNet repo+ckpt
+```
+
+The script is idempotent — re-run it any time to re-verify the project
+is still set up correctly. Model-download guidelines (what gets fetched
+automatically, what needs a token, what has to be installed by hand) live
+at the top of [scripts/setup.py](scripts/setup.py).
+
+Credentials still need to be filled in manually in `.env` (the setup
+script copies `.env.example` → `.env` with mode 600 on first run):
+
+- `HF_TOKEN` — accept the gate at https://hf.co/pyannote/speaker-diarization-community-1
+- `BODHAN_*_URL` / `BODHAN_*_KEY` — only needed for the `bodhan` ASR adapter
+
+Manual install (if you prefer step-by-step):
+
+```bash
+python3 -m venv .venv && source .venv/bin/activate
 pip install --upgrade pip
-
-# 3a. install torch first with your CUDA build (adjust cu121 to your driver)
 pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu121
-
-# 3b. the rest
 pip install -r requirements.txt
-
-# 4. credentials
-cp .env.example .env
-# then fill in HF_TOKEN (and accept the pyannote community-1 gate)
+cp .env.example .env && chmod 600 .env   # fill HF_TOKEN
+python scripts/setup.py --no-dry-run     # fetch TalkNet, verify folder structure
 ```
 
 ## Run — three entry points

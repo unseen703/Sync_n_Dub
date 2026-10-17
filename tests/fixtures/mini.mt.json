@@ -1,0 +1,300 @@
+{
+  "_README": [
+    "A hand-built three-segment merged JSON, small enough to reason about by hand and complete enough that every timing producer runs on it with no models and no real audio.",
+    "TIME CONVENTIONS, which are what this fixture exists to pin down (backend/timing.py module docstring):",
+    "  segments[].start/end, segments[].words[].start/end  ABSOLUTE seconds on the source timeline.",
+    "  segments[].tts_words[].start/end                    CLIP-RELATIVE seconds: 0.0 is the first sample of that segment's raw TTS clip.",
+    "They are deliberately NOT interchangeable here: every segment's tts_words[] start at or near 0.0 while its words[] start at the segment's absolute slot offset, so a producer that confuses the two produces placements that are off by whole segments and the test notices.",
+    "tts_duration_s is the length of the raw clip tests/conftest.py synthesises for each segment; tts_words[] span exactly that, and tts_raw_audio/tts_audio are rewritten to the generated files when the fixture is materialised.",
+    "SEG_0000 has two source speech runs split by a 0.70 s pause and a matching gap in tts_words[]: the pause-aware / word-anchored path.",
+    "SEG_0001 has one run (all internal gaps < pause_min_s): the degenerate single-piece path.",
+    "SEG_0002 has three runs and a raw clip LONGER than its speech budget, so the tempo cap gets hit: the overrun path."
+  ],
+  "audio_path": "tests/fixtures/mini.16k.mono.wav",
+  "model_name": "fixture",
+  "language": "en",
+  "text": "mini fixture",
+  "segments": [
+    {
+      "id": "SEG_0000",
+      "start": 0.0,
+      "end": 5.0,
+      "speaker": "SPK_00",
+      "language": "en",
+      "text": "hello world again now",
+      "words": [
+        {
+          "text": "hello",
+          "start": 0.2,
+          "end": 0.6,
+          "score": 0.9
+        },
+        {
+          "text": "world",
+          "start": 0.65,
+          "end": 1.1,
+          "score": 0.9
+        },
+        {
+          "text": "again",
+          "start": 1.8,
+          "end": 2.3,
+          "score": 0.9
+        },
+        {
+          "text": "now",
+          "start": 2.35,
+          "end": 2.9,
+          "score": 0.9
+        }
+      ],
+      "mt_text": "नमस्ते दुनिया फिर अब",
+      "final_text": "नमस्ते दुनिया फिर अब",
+      "mt_target_language": "hi",
+      "mt_target_script": "native",
+      "target_duration_s": 4.9,
+      "tts_duration_s": 5.2,
+      "tts_words": [
+        {
+          "text": "नमस्ते",
+          "start": 0.0,
+          "end": 1.0,
+          "score": 0.9
+        },
+        {
+          "text": "दुनिया",
+          "start": 1.05,
+          "end": 2.2,
+          "score": 0.9
+        },
+        {
+          "text": "फिर",
+          "start": 2.9,
+          "end": 3.9,
+          "score": 0.9
+        },
+        {
+          "text": "अब",
+          "start": 4.0,
+          "end": 5.2,
+          "score": 0.9
+        }
+      ],
+      "tts_raw_audio": "SEG_0000.raw.wav",
+      "tts_audio": "SEG_0000.raw.wav"
+    },
+    {
+      "id": "SEG_0001",
+      "start": 5.0,
+      "end": 9.0,
+      "speaker": "SPK_01",
+      "language": "en",
+      "text": "one continuous run of speech here",
+      "words": [
+        {
+          "text": "one",
+          "start": 5.1,
+          "end": 5.4,
+          "score": 0.9
+        },
+        {
+          "text": "continuous",
+          "start": 5.48,
+          "end": 6.1,
+          "score": 0.9
+        },
+        {
+          "text": "run",
+          "start": 6.18,
+          "end": 6.5,
+          "score": 0.9
+        },
+        {
+          "text": "of",
+          "start": 6.56,
+          "end": 6.7,
+          "score": 0.9
+        },
+        {
+          "text": "speech",
+          "start": 6.8,
+          "end": 7.4,
+          "score": 0.9
+        },
+        {
+          "text": "here",
+          "start": 7.5,
+          "end": 8.5,
+          "score": 0.9
+        }
+      ],
+      "mt_text": "यहाँ भाषण का एक निरंतर दौर",
+      "final_text": "यहाँ भाषण का एक निरंतर दौर",
+      "mt_target_language": "hi",
+      "mt_target_script": "native",
+      "target_duration_s": 3.9,
+      "tts_duration_s": 4.1,
+      "tts_words": [
+        {
+          "text": "यहाँ",
+          "start": 0.0,
+          "end": 0.55,
+          "score": 0.9
+        },
+        {
+          "text": "भाषण",
+          "start": 0.6,
+          "end": 1.25,
+          "score": 0.9
+        },
+        {
+          "text": "का",
+          "start": 1.3,
+          "end": 1.55,
+          "score": 0.9
+        },
+        {
+          "text": "एक",
+          "start": 1.6,
+          "end": 1.8,
+          "score": 0.9
+        },
+        {
+          "text": "निरंतर",
+          "start": 1.88,
+          "end": 2.6,
+          "score": 0.9
+        },
+        {
+          "text": "दौर",
+          "start": 2.7,
+          "end": 4.1,
+          "score": 0.9
+        }
+      ],
+      "tts_raw_audio": "SEG_0001.raw.wav",
+      "tts_audio": "SEG_0001.raw.wav"
+    },
+    {
+      "id": "SEG_0002",
+      "start": 9.0,
+      "end": 14.0,
+      "speaker": "SPK_00",
+      "language": "en",
+      "text": "first bit then second bit then third bit",
+      "words": [
+        {
+          "text": "first",
+          "start": 9.3,
+          "end": 9.7,
+          "score": 0.9
+        },
+        {
+          "text": "bit",
+          "start": 9.75,
+          "end": 10.0,
+          "score": 0.9
+        },
+        {
+          "text": "then",
+          "start": 10.6,
+          "end": 10.9,
+          "score": 0.9
+        },
+        {
+          "text": "second",
+          "start": 10.95,
+          "end": 11.45,
+          "score": 0.9
+        },
+        {
+          "text": "bit",
+          "start": 11.5,
+          "end": 11.75,
+          "score": 0.9
+        },
+        {
+          "text": "then",
+          "start": 12.4,
+          "end": 12.7,
+          "score": 0.9
+        },
+        {
+          "text": "third",
+          "start": 12.76,
+          "end": 13.2,
+          "score": 0.9
+        },
+        {
+          "text": "bit",
+          "start": 13.25,
+          "end": 13.55,
+          "score": 0.9
+        }
+      ],
+      "mt_text": "पहला भाग फिर दूसरा भाग फिर तीसरा भाग",
+      "final_text": "पहला भाग फिर दूसरा भाग फिर तीसरा भाग",
+      "mt_target_language": "hi",
+      "mt_target_script": "native",
+      "target_duration_s": 4.9,
+      "tts_duration_s": 5.5,
+      "tts_words": [
+        {
+          "text": "पहला",
+          "start": 0.0,
+          "end": 0.55,
+          "score": 0.9
+        },
+        {
+          "text": "भाग",
+          "start": 0.6,
+          "end": 1.0,
+          "score": 0.9
+        },
+        {
+          "text": "फिर",
+          "start": 1.75,
+          "end": 2.15,
+          "score": 0.9
+        },
+        {
+          "text": "दूसरा",
+          "start": 2.2,
+          "end": 2.9,
+          "score": 0.9
+        },
+        {
+          "text": "भाग",
+          "start": 2.95,
+          "end": 3.25,
+          "score": 0.9
+        },
+        {
+          "text": "फिर",
+          "start": 4.0,
+          "end": 4.4,
+          "score": 0.9
+        },
+        {
+          "text": "तीसरा",
+          "start": 4.45,
+          "end": 5.0,
+          "score": 0.9
+        },
+        {
+          "text": "भाग",
+          "start": 5.05,
+          "end": 5.5,
+          "score": 0.9
+        }
+      ],
+      "tts_raw_audio": "SEG_0002.raw.wav",
+      "tts_audio": "SEG_0002.raw.wav"
+    }
+  ],
+  "extra": {
+    "mt_model": "fixture",
+    "mt_target_language": "hi",
+    "mt_target_script": "native"
+  }
+}

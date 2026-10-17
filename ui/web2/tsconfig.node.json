@@ -1,0 +1,16 @@
+{
+  "compilerOptions": {
+    // Without an explicit target this defaults to ES5, where String.includes
+    // does not exist — vite.config.ts then fails to typecheck on its own
+    // perfectly ordinary code.
+    "target": "ES2020",
+    "lib": ["ES2020"],
+    "skipLibCheck": true,
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "allowSyntheticDefaultImports": true,
+    "strict": true,
+    "noEmit": true
+  },
+  "include": ["vite.config.ts"]
+}

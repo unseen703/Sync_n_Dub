@@ -232,8 +232,6 @@ Diarization · word-level timestamps · duration or length control on MT or TTS 
 
 Those gaps are what the rest of this pipeline supplies. Weights are also on Hugging Face under [`bodhan-ai`](https://huggingface.co/bodhan-ai), so self-hosting is available for reproducible sweeps — no rate limits, no network variance, byte-identical reruns.
 
-> **Licence check before relying on it.** Both models carry the Indic Open Model License v1.0, but reported terms differ: Indic-Transcribe reads as commercial-friendly at any scale; Indic-Translate reportedly requires credit, same-licence derivatives and permission before commercial hosting. Read the `LICENSE` on each HF repo rather than trusting a summary.
-
 ---
 
 ## 6. Code-mixing — a selection question, not a modelling one
@@ -281,7 +279,7 @@ Headline metrics: `mean |actual − target|` and `% of segments needing >10% str
 
 ## 8. Model inventory
 
-Primary choice plus the alternatives each experiment compares against. Licences are for the **weights**, which is what constrains deployment.
+Primary choice plus the alternatives each experiment compares against. Licence notes are for the **weights**, listed for reference.
 
 | Component | Primary | Alternatives | Licence notes |
 | --- | --- | --- | --- |
@@ -308,7 +306,7 @@ Worth stating plainly, because the choice is not obvious:
 - **MuseTalk 1.5** is latent-space *inpainting* (not diffusion): frozen VAE, frozen Whisper-tiny audio encoder, SD-style UNet with cross-attention. **256×256** face region, **30fps+ on a V100** — genuine real-time. v1.5 (March 2025) added perceptual, GAN and sync losses over v1.0's L1-only training.
 - **LatentSync 1.6** is audio-conditioned latent *diffusion* at **512×512**, with SyncNet supervision in pixel space and TREPA for temporal consistency. Slower, higher fidelity.
 
-For offline dubbing, output resolution matters more than throughput. The sensible split: **MuseTalk during development** because a 30fps render gives you a fast feedback loop, **LatentSync 1.6 for final renders and for the quality number in the results table**, and benchmark both on the golden set rather than assuming. MuseTalk's commercial-clear weights are a genuine advantage over Wav2Lip, which is non-commercial and should be treated as a historical baseline only.
+For offline dubbing, output resolution matters more than throughput. The sensible split: **MuseTalk during development** because a 30fps render gives you a fast feedback loop, **LatentSync 1.6 for final renders and for the quality number in the results table**, and benchmark both on the golden set rather than assuming. Wav2Lip stays in as a historical baseline.
 
 ### Commercial reference baselines
 
@@ -439,7 +437,7 @@ class Stage(Protocol):
 
 `reads` / `writes` are load-bearing: the runner builds cache keys from them and validates the whole stage DAG before spending a GPU-hour discovering that lip-sync needed face tracks nobody produced.
 
-The registry carries a **licence field per adapter**. `--profile deployable` fails the run if any loaded adapter is non-commercial — the only reliable way to stop a CC-BY-NC checkpoint quietly ending up in something that ships.
+The registry carries a **licence field per adapter**, which each adapter writes into the manifest it produces.
 
 ```bash
 python -m dubbing run input.mp4 --target hi --config configs/hindi.yaml
@@ -481,7 +479,6 @@ P0–P1 run in parallel with P2 — annotation is human time, implementation is 
 | Path A code-mixing right on average, wrong on the terms that matter | Termbase override exists under both paths; E9 measures rather than assumes |
 | Indic expansion overruns every duration budget | Expected, not an edge case — §7 is built for it; report violation rate every run |
 | Lip-sync identity drift on profile and occluded faces | Tracker reports pose and occlusion; skip lip-sync on those segments rather than shipping an artefact |
-| Licence contamination (Seed-VC GPL, Wav2Lip non-commercial, NLLB/Vevo CC-BY-NC) | Licence column in the registry; CI fails `--profile deployable` |
 | SeamlessExpressive turns out to have no Indic coverage | Verify at P0; if so, drop it from E14 and say so in the writeup — a negative finding worth recording |
 
 ---

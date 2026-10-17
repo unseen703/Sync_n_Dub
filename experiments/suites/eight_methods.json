@@ -1,0 +1,151 @@
+{
+  "schema_version": 1,
+  "name": "eight_methods",
+  "description": "Timing-alignment sweep: where speech starts and stops, measured against the human Hindi dub. Ten arms = control + shipping baseline + M1, M2, and M3/M4/M7 each paired with and without M5 (post-TTS forced alignment). M5 is a paired factor rather than an arm because it is an INPUT (segments[].tts_words[]) that M3, M4 and M7 all read. Only the two arms that change WHAT IS SYNTHESISED own a TTS pass; the other eight reuse the control's clips, so a clip costs 2 syntheses, not 10.",
+  "base_config": {
+    "pipeline": {
+      "diarization_model": "pyannote",
+      "asr_model": "whisperx",
+      "asr_language": "en",
+      "align_model": "mms_fa",
+      "mt_model": "bodhan",
+      "mt_target_language": "hi",
+      "mt_target_script": "native",
+      "skip_stems": false,
+      "stem_model": "htdemucs",
+      "voice_engine": "edge",
+      "tts_model": "edge",
+      "tts_sample_rate": 24000,
+      "duration_adjust": false,
+      "tts_force_align": false,
+      "tts_apply_stretch": false
+    },
+    "mix": {
+      "strategy": "timing_plan",
+      "clip_source": "raw",
+      "tempo_cap": 1.15,
+      "sample_rate": 48000,
+      "mux_video": true
+    },
+    "timing": {
+      "producer": "naive_slot"
+    }
+  },
+  "notes": {
+    "excluded": {
+      "M6": "Viseme-weighted DP (lambda_phoneme > 0). Measured viseme match_rate is only 0.23-0.31, and a non-zero lambda_phoneme makes plan_dp 23-24x slower for no measurable placement gain. Call site exists (attach_visemes_stage + timing.params.lambda_phoneme) and was run; excluded on evidence, not for want of code.",
+      "M8": "Duration-aware n-best translation (mt_n_best > 1). The n-best pool offers a median of 1 character of shortening where 24 are needed. Also a PREFIX knob: it acts in stage 9a, so it can only be swept from base_config with its own --exp-id, never per arm."
+    },
+    "m5_pairing": "M3 is paired on/off with M5 as well as M4 and M7, because plan_pause_aware calls _cut_points_tts_words too. Pairing only M4 and M7 would mix two different M5 states into the M3-vs-M4 comparison.",
+    "tempo_caps": "Each arm's median applied tempo equals its own cap, so the cap -- not the planner -- decides the result. The control runs at 1.10, the timing planners at 1.15, and the baseline and M2 at 1.50, which is why those two are the only arms that stay inside the slot."
+  },
+  "variants": [
+    {
+      "id": "ctl_naive_slot",
+      "label": "Control - naive per-slot placement",
+      "method": "naive_slot",
+      "config": {
+        "timing": {"producer": "naive_slot"},
+        "mix": {"strategy": "timing_plan", "clip_source": "raw", "tempo_cap": 1.10}
+      }
+    },
+    {
+      "id": "base_global_tempo",
+      "label": "Baseline - one global atempo over the whole dub (what ships)",
+      "method": "global_tempo",
+      "reuse_tts_from": "ctl_naive_slot",
+      "config": {
+        "timing": null,
+        "mix": {"strategy": "global_tempo", "clip_source": "raw", "tempo_cap": 1.50}
+      }
+    },
+    {
+      "id": "m1_engine_speed",
+      "label": "M1 - engine-side speed control during synthesis",
+      "method": "naive_slot",
+      "config": {
+        "pipeline": {
+          "tts_speed_control": "closed_loop",
+          "tts_speed_bounds": [0.8, 1.4],
+          "tts_speed_tolerance": 0.05,
+          "tts_speed_max_rounds": 3
+        },
+        "timing": {"producer": "naive_slot"},
+        "mix": {"strategy": "timing_plan", "clip_source": "raw", "tempo_cap": 1.10}
+      }
+    },
+    {
+      "id": "m2_post_tts_stretch",
+      "label": "M2 - per-segment post-TTS time stretch, naive placement",
+      "method": "naive_slot",
+      "reuse_tts_from": "ctl_naive_slot",
+      "config": {
+        "pipeline": {"tts_apply_stretch": true, "tts_max_stretch": 0.50,
+                     "stretch_backend": "auto"},
+        "timing": {"producer": "naive_slot"},
+        "mix": {"strategy": "timing_plan", "clip_source": "stretched",
+                "tempo_cap": 1.50}
+      }
+    },
+    {
+      "id": "m3_pause_aware",
+      "label": "M3 - pause-aware placement (no M5)",
+      "method": "pause_aware",
+      "reuse_tts_from": "ctl_naive_slot",
+      "config": {
+        "pipeline": {"tts_force_align": false},
+        "timing": {"producer": "pause_aware"}
+      }
+    },
+    {
+      "id": "m3_pause_aware_m5",
+      "label": "M3 + M5 - pause-aware placement on forced-aligned TTS words",
+      "method": "pause_aware",
+      "reuse_tts_from": "ctl_naive_slot",
+      "config": {
+        "pipeline": {"tts_force_align": true, "tts_align_model": "mms_fa"},
+        "timing": {"producer": "pause_aware"}
+      }
+    },
+    {
+      "id": "m4_word_anchored",
+      "label": "M4 - word-anchored placement (no M5)",
+      "method": "word_anchored",
+      "reuse_tts_from": "ctl_naive_slot",
+      "config": {
+        "pipeline": {"tts_force_align": false},
+        "timing": {"producer": "word_anchored"}
+      }
+    },
+    {
+      "id": "m4_word_anchored_m5",
+      "label": "M4 + M5 - word-anchored placement on forced-aligned TTS words",
+      "method": "word_anchored",
+      "reuse_tts_from": "ctl_naive_slot",
+      "config": {
+        "pipeline": {"tts_force_align": true, "tts_align_model": "mms_fa"},
+        "timing": {"producer": "word_anchored"}
+      }
+    },
+    {
+      "id": "m7_dp",
+      "label": "M7 - DP global placement (no M5)",
+      "method": "dp",
+      "reuse_tts_from": "ctl_naive_slot",
+      "config": {
+        "pipeline": {"tts_force_align": false},
+        "timing": {"producer": "dp"}
+      }
+    },
+    {
+      "id": "m7_dp_m5",
+      "label": "M7 + M5 - DP global placement on forced-aligned TTS words",
+      "method": "dp",
+      "reuse_tts_from": "ctl_naive_slot",
+      "config": {
+        "pipeline": {"tts_force_align": true, "tts_align_model": "mms_fa"},
+        "timing": {"producer": "dp"}
+      }
+    }
+  ]
+}

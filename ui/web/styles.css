@@ -1,0 +1,67 @@
+:root {
+  color-scheme: dark;
+}
+
+html, body { height: 100%; }
+body {
+  background:
+    radial-gradient(1200px 600px at 85% -10%, rgba(99,102,241,0.18), transparent 60%),
+    radial-gradient(900px 500px at -10% 110%, rgba(6,182,212,0.14), transparent 60%),
+    #0b0f17;
+}
+
+/* Devanagari / Tamil rendering */
+.lang-hi { font-family: 'Noto Sans Devanagari', 'Inter', sans-serif; }
+.lang-ta { font-family: 'Noto Sans Tamil', 'Inter', sans-serif; }
+
+/* Smooth scrollbars */
+::-webkit-scrollbar        { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb  { background: #273449; border-radius: 10px; }
+::-webkit-scrollbar-track  { background: transparent; }
+
+/* Range input (speed slider) */
+input[type="range"].speed {
+  -webkit-appearance: none;
+  appearance: none;
+  background: transparent;
+  width: 100%;
+  height: 20px;
+}
+input[type="range"].speed::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #6366f1, #06b6d4);
+}
+input[type="range"].speed::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px; height: 14px;
+  border-radius: 50%;
+  background: #e2e8f0;
+  margin-top: -5px;
+  box-shadow: 0 0 0 3px rgba(99,102,241,0.35);
+}
+
+/* Flashcard pulse */
+.pulse-ring {
+  box-shadow: 0 0 0 0 rgba(99,102,241,0.5);
+  animation: pulse-ring 1.6s cubic-bezier(0.4,0,0.6,1) infinite;
+}
+@keyframes pulse-ring {
+  0%,100% { box-shadow: 0 0 0 0 rgba(99,102,241,0.6); }
+  50%     { box-shadow: 0 0 0 10px rgba(99,102,241,0); }
+}
+
+/* Caption overlay */
+.caption-overlay {
+  text-shadow: 0 2px 6px rgba(0,0,0,0.9), 0 0 2px rgba(0,0,0,1);
+}
+
+/* Pretty focus */
+button:focus-visible, select:focus-visible, input:focus-visible {
+  outline: 2px solid #6366f1;
+  outline-offset: 2px;
+}
+
+/* Thin dividers */
+.hr-soft { border-color: rgba(148,163,184,0.12); }

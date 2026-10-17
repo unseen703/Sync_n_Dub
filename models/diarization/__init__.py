@@ -18,6 +18,7 @@ from .base import BaseDiarizer, DiarizationResult, Turn
 _REGISTRY_SPEC: dict[str, tuple[str, str]] = {
     "pyannote": (".pyannote_adapter", "PyannoteDiarizer"),
     "diarizen": (".diarizen_adapter", "DiariZenDiarizer"),
+    "nemotron": (".nemotron_adapter", "NemotronDiarizer"),
 }
 
 

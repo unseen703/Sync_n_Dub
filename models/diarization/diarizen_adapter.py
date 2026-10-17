@@ -2,9 +2,6 @@
 
 Repo: https://github.com/BUTSpeechFIT/DiariZen
 Weights (default): BUT-FIT/diarizen-wavlm-large-s80-md — CC-BY-NC-4.0.
-
-Non-commercial licence — the registry surfaces this via the `.licence` attr so
-`--profile deployable` runs (see plan.md §11) can refuse to load it.
 """
 from __future__ import annotations
 

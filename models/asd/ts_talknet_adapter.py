@@ -20,7 +20,7 @@ import numpy as np
 
 from ..faces.base import FaceTrack, FaceTracks
 from .base import ASDResult, ASDScore, BaseASD
-from .talknet_adapter import _crop_track
+from .talknet_adapter import _crop_all_tracks
 
 log = logging.getLogger(__name__)
 
@@ -129,6 +129,13 @@ class TSTalkNetASD(BaseASD):
         if sr != 16000:
             raise ValueError(f"TS-TalkNet expects 16 kHz; got {sr}.")
 
+        # Same int16 rescale as `talknet_adapter` (fixed there 2026-10-11, and
+        # missed here): the shared MFCC front-end is trained and inferred on
+        # int16-valued PCM, so soundfile's floats in [-1, 1] shift every
+        # log-energy cepstral term by ~log(32768) and pin all scores near zero.
+        # The stage does not error — it just answers "nobody is speaking".
+        audio = audio * 32768.0
+
         # Pre-compute target-speaker embeddings for every provided reference.
         ts_embeds: Dict[str, torch.Tensor] = {}
         if reference_audio:
@@ -137,11 +144,15 @@ class TSTalkNetASD(BaseASD):
                 if emb is not None:
                     ts_embeds[spk_id] = emb
 
+        # One sweep of the video for every track, not one sweep per track.
+        crops_by_track = _crop_all_tracks(
+            tracks.tracks, video_path, self.crop_size, cv2)
+
         per_track: Dict[str, ASDScore] = {}
         for tr in tracks.tracks:
             per_track[tr.track_id] = self._score_track(
-                tr, video_path, audio, tracks.fps,
-                ts_embeds, mfcc_fn, cv2, torch,
+                tr, crops_by_track.get(tr.track_id), audio, tracks.fps,
+                ts_embeds, mfcc_fn, torch,
             )
 
         return ASDResult(
@@ -171,12 +182,11 @@ class TSTalkNetASD(BaseASD):
     def _score_track(
         self,
         track: FaceTrack,
-        video_path: Path,
+        crops: Optional[np.ndarray],
         audio: np.ndarray,
         fps: float,
         ts_embeds,
         mfcc_fn,
-        cv2,
         torch,
     ) -> ASDScore:
         if track.num_frames == 0:
@@ -184,7 +194,10 @@ class TSTalkNetASD(BaseASD):
                             np.zeros((0,), dtype=np.int32),
                             np.zeros((0,), dtype=np.float32))
 
-        crops = _crop_track(track, video_path, self.crop_size, cv2)
+        if crops is None or len(crops) == 0:
+            return ASDScore(track.track_id,
+                            track.frames.copy(),
+                            np.zeros((track.num_frames,), dtype=np.float32))
         n_frames = len(crops)
         samples_per_frame = int(round(16000 / fps))
         s0 = max(0, int(track.frames[0]) * samples_per_frame)

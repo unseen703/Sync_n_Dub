@@ -45,7 +45,8 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 # Pipeline artefact directories (regenerable; all gitignored).
-DATA_SUBDIRS = ("videos", "audio", "stems", "diarization", "faces", "asd", "asr")
+DATA_SUBDIRS = ("videos", "audio", "stems", "diarization", "faces", "asd",
+                "asr", "align", "mt")
 
 # TalkNet-ASD — not pip-installable; cloned under third_party/ (gitignored).
 # Checkpoint ID is published in the TalkNet-ASD README.

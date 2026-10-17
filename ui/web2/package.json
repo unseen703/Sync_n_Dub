@@ -1,0 +1,39 @@
+{
+  "name": "dubbing-studio-ui",
+  "private": true,
+  "version": "2.0.0",
+  "type": "module",
+  "description": "Operator UI for the Dubbing Studio pipeline. Builds to ../web-dist, which ui/server.py prefers over the legacy ui/web inspector.",
+  "scripts": {
+    "dev": "vite",
+    "dev:mock": "VITE_MOCK=1 vite",
+    "build": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.node.json && vite build",
+    "build:nocheck": "vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.node.json",
+    "contrast": "node scripts/contrast.mjs"
+  },
+  "dependencies": {
+    "@radix-ui/react-collapsible": "1.1.1",
+    "@radix-ui/react-dialog": "1.1.2",
+    "@radix-ui/react-popover": "1.1.2",
+    "@radix-ui/react-select": "2.1.2",
+    "@radix-ui/react-toggle-group": "1.1.0",
+    "@radix-ui/react-tooltip": "1.1.3",
+    "clsx": "2.1.1",
+    "framer-motion": "11.11.17",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "zustand": "4.5.5"
+  },
+  "devDependencies": {
+    "@types/react": "18.3.12",
+    "@types/react-dom": "18.3.1",
+    "@vitejs/plugin-react": "4.3.4",
+    "autoprefixer": "10.4.20",
+    "postcss": "8.4.49",
+    "tailwindcss": "3.4.17",
+    "typescript": "5.6.3",
+    "vite": "5.4.11"
+  }
+}

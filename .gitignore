@@ -16,20 +16,45 @@ __pycache__/
 .env
 .env.local
 
-# data — regenerable pipeline artefacts
-data/videos/
-data/audio/
-data/stems/
-data/diarization/
-data/asd/
-data/asr/
-data/faces/
+# data — regenerable pipeline artefacts.
+#
+# Everything under data/ is reproducible output: the per-run job folders, the
+# archive tarballs of the retired per-stage layout, and the pre-archive flat
+# stage dirs (videos/ lipsync/ mix/ clips/) that the 2026-10-11 archive left
+# behind. Listing them one by one is what let ~2.9 GB sit one `git add .` away
+# from the index, so the rule is now "ignore the lot, re-include the prose".
+#
+# It is `data/*` and NOT `data/` on purpose: git cannot re-include a file from
+# underneath an excluded DIRECTORY, so under `data/` the `!` line below would
+# be silently dead and DATA_LAYOUT.md would stay ignored. Keep the glob.
+#
+# Suite definitions are config and live in experiments/, not here.
+data/*
+!data/*.md
 outputs/
 runs/
 samples/
 
-# third-party vendored code (large; fetch separately)
+# third-party vendored code (large; fetch separately).
+# `LatentSync/` at the repo root is a second clone of third_party/LatentSync —
+# identical .py tree, referenced by nothing in backend/ models/ scripts/ ui/.
+# Ignored so it cannot be committed by accident; safe to delete outright.
 third_party/
+LatentSync/
+
+# scratch material dropped in by hand (note the trailing dot in the dir name)
+resourses_for_suggested_edits./
+
+# UI build output. `ui/web2/vite.config.ts` sets outDir to '../web-dist', so
+# the bundle lands OUTSIDE web2/ and the scaffold's own ui/web2/.gitignore
+# cannot reach it — its comment says it is "ignored there", and this is there.
+# Regenerate with: conda run -n dubui npm --prefix ui/web2 run build
+ui/web-dist/
+
+# run logs — every runner here writes logs/<task>_<stamp>.log, and the detached
+# tmux convention in the long-run skill means they accumulate per launch.
+# Regenerable in the sense that matters: they describe runs, not the repo.
+logs/
 
 # claude code session dir
 .claude/
@@ -43,3 +68,7 @@ third_party/
 .idea/
 *.swp
 .DS_Store
+.env.bak*
+
+# repo_checkup.py state (machine-local; README.md is the tracked artifact)
+.repo-state.json

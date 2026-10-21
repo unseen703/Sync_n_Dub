@@ -98,6 +98,25 @@ class BaseASR(ABC):
     """Every ASR adapter subclasses this."""
 
     name: str = "base"
+    # ISO-639 codes this adapter is willing to transcribe, or `None` to mean
+    # "the model is language-agnostic (or auto-detects) and will accept any
+    # code the user asks for". Set to a non-empty set on adapters whose
+    # upstream model only ships with a fixed language inventory — the ASR
+    # registry filters those out of `available_models(language=…)` so the
+    # CLI/UI never offers an adapter that would reject the chosen source
+    # language at run time.
+    supported_languages: Optional[set[str]] = None
+
+    @classmethod
+    def supports_language(cls, language: Optional[str]) -> bool:
+        """True iff `language` is one this adapter will accept.
+
+        None languages pass through unconditionally (language detection or
+        caller-set default) — only an explicit non-matching code is rejected.
+        """
+        if cls.supported_languages is None or not language:
+            return True
+        return language.split("-")[0].lower() in cls.supported_languages
 
     def __init__(self, device: Optional[str] = None, **kwargs):
         from models.diarization.base import _resolve_device

@@ -204,3 +204,67 @@ def assignments_to_jsonable(assignments: List[SegmentAssignment]) -> list:
             "extra": a.extra,
         })
     return out
+
+
+# ---------------------------------------------------------------------------
+# Reading the assignment back
+# ---------------------------------------------------------------------------
+#
+# Written 2026-10-18. `assignments.json` was produced by stage 6 and consumed
+# by nothing, so the one artifact that says WHICH FACE IS THIS SPEAKER sat
+# unused while `backend/gender.py` had no way to look at a speaker's face.
+# This is the reader that closes that loop.
+
+
+def speaker_face_tracks(
+    assignments,                      # List[SegmentAssignment] | list[dict]
+    tracks,                           # FaceTracks
+    *,
+    min_on_screen_s: float = 1.0,
+) -> Dict[str, Tuple[np.ndarray, np.ndarray]]:
+    """`{speaker: (frames, bboxes)}` for the face each speaker owns.
+
+    A speaker's turns can land on more than one track — a cut to a reverse
+    angle starts a new track of the same person — so the winner is the track
+    holding the most ON-SCREEN SECONDS of that speaker, not the most turns.
+    Weighting by turns would let six one-second reaction shots outvote a
+    single forty-second close-up.
+
+    Off-screen turns are skipped outright: `assign_faces_to_turns` already
+    set `face_track=None` for them, and a turn the ASD scored below the
+    on-screen threshold is narration or an off-camera line, where the face in
+    frame belongs to somebody else entirely.
+
+    A speaker whose on-screen total is under `min_on_screen_s` is LEFT OUT
+    rather than given its best guess: a face seen for half a second is the
+    input `predict_gender_face` abstains on anyway, and omitting the speaker
+    says "no face evidence" where an empty track would say "no faces found".
+    """
+    by_id = tracks.by_id() if callable(getattr(tracks, "by_id", None)) \
+        else {t.track_id: t for t in tracks.tracks}
+
+    seconds: Dict[str, Dict[str, float]] = {}
+    for a in assignments:
+        if isinstance(a, dict):
+            spk, trk = a.get("speaker"), a.get("face_track")
+            on, t0, t1 = a.get("on_screen"), a.get("start_s"), a.get("end_s")
+        else:
+            spk, trk, on, t0, t1 = (a.speaker, a.face_track, a.on_screen,
+                                    a.start_s, a.end_s)
+        if not spk or not trk or not on:
+            continue
+        seconds.setdefault(spk, {})
+        seconds[spk][trk] = seconds[spk].get(trk, 0.0) + max(0.0, (t1 or 0) - (t0 or 0))
+
+    out: Dict[str, Tuple[np.ndarray, np.ndarray]] = {}
+    for spk, per_track in seconds.items():
+        trk, secs = max(per_track.items(), key=lambda kv: kv[1])
+        if secs < min_on_screen_s or trk not in by_id:
+            log.info("faces: %s has %.1f s on screen on %s; no face evidence",
+                     spk, secs, trk)
+            continue
+        t = by_id[trk]
+        out[spk] = (np.asarray(t.frames), np.asarray(t.bboxes))
+        log.info("faces: %s → %s (%.1f s on screen, %d frames)",
+                 spk, trk, secs, len(t.frames))
+    return out

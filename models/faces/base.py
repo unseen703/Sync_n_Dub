@@ -13,7 +13,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -64,14 +64,6 @@ class FaceDetections:
     detector: str
     detections: Dict[int, List[FaceBox]] = field(default_factory=dict)
     extra: dict = field(default_factory=dict)
-
-    def iter_boxes(self) -> Iterable[FaceBox]:
-        for frame_boxes in self.detections.values():
-            for b in frame_boxes:
-                yield b
-
-    def num_detections(self) -> int:
-        return sum(len(v) for v in self.detections.values())
 
 
 @dataclass
@@ -137,11 +129,6 @@ class FaceTracks:
     def by_id(self) -> Dict[str, FaceTrack]:
         return {t.track_id: t for t in self.tracks}
 
-    def tracks_in_frame(self, frame_idx: int) -> List[FaceTrack]:
-        """Linear scan — fine for the per-segment aggregation ASD does, not for
-        anything hot. If this becomes a bottleneck, build an inverted index."""
-        return [t for t in self.tracks if frame_idx in t.frames]
-
     def save_npz(self, path: Path) -> Path:
         """Persist a compact binary form. The manifest keeps the summary; this
         file holds the raw per-frame boxes a downstream stage might rescore."""
@@ -163,6 +150,33 @@ class FaceTracks:
             payload[f"{t.track_id}.scores"] = t.scores
         np.savez_compressed(path, **payload)
         return path
+
+    @classmethod
+    def load_npz(cls, path: Path) -> "FaceTracks":
+        """Read back what `save_npz` wrote.
+
+        The writer shipped without a reader, so every consumer that wanted the
+        per-frame boxes had to re-derive this key scheme by hand -- which is
+        how `save_npz`'s own promise ("a downstream stage might rescore") went
+        unkept. Keep the two together.
+        """
+        path = Path(path)
+        d = np.load(path, allow_pickle=True)
+        tracks = []
+        for tid in (str(x) for x in d["track_ids"]):
+            tracks.append(FaceTrack(
+                track_id=tid,
+                frames=d[f"{tid}.frames"],
+                bboxes=d[f"{tid}.bboxes"],
+                scores=d[f"{tid}.scores"],
+            ))
+        return cls(
+            video_path=Path(str(d["video_path"])),
+            fps=float(d["fps"]), width=int(d["width"]), height=int(d["height"]),
+            num_frames=int(d["num_frames"]),
+            detector=str(d["detector"]), tracker=str(d["tracker"]),
+            tracks=tracks,
+        )
 
 
 # ---------------------------------------------------------------------------

@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Dubbing Pipeline Inspector</title>
+    <!-- All vendor assets served from this origin — no CDN at runtime. -->
+    <script src="/vendor/tailwindcss.js"></script>
+    <script>
+      tailwind.config = {
+        darkMode: 'class',
+        theme: {
+          extend: {
+            colors: {
+              surface: '#0b0f17',
+              panel:   '#111826',
+              line:    '#1f2a3b',
+              accent:  '#6366f1',
+              accent2: '#06b6d4',
+            },
+          },
+        },
+      };
+    </script>
+    <link rel="stylesheet" href="/styles.css" />
+    <script src="/vendor/react.production.min.js"></script>
+    <script src="/vendor/react-dom.production.min.js"></script>
+    <script src="/vendor/htm.umd.js"></script>
+  </head>
+  <body class="bg-surface text-slate-100 antialiased min-h-screen">
+    <div id="root"></div>
+    <script src="/app.js"></script>
+  </body>
+</html>

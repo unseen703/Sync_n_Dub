@@ -1,46 +1,56 @@
-"""AI4Bharat IndicConformer adapter (NeMo Conformer-CTC).
+"""AI4Bharat IndicConformer adapter.
 
-HF cards:
-  ai4bharat/indic-conformer-600m-multilingual  (recommended default)
-  ai4bharat/indic-conformer-200m-{lang}        (per-language variants)
+HF: ai4bharat/indic-conformer-600m-multilingual
 
-The 600M multilingual model needs a language code at inference time via the
-NeMo config knob exposed as `set_decoding_strategy` on the model. For the
-per-language 200M checkpoints the code is baked in.
+The repo ships as a HuggingFace "custom code" model (not a NeMo .nemo
+checkpoint): it exposes `IndicASRConfig` + `IndicASRModel` through its own
+`model_onnx.py`, and the actual weights are per-language ONNX files under
+`assets/`. Loading goes through `transformers.AutoModel` with
+`trust_remote_code=True`; the model's `forward(wav, lang, decoding='ctc', ...)`
+runs one clip at a time and returns the transcript string.
 
-Install: `pip install nemo-toolkit[asr]>=2.0.0` (already in requirements for
-the Sortformer diarizer).
+A language code is REQUIRED — the multilingual model uses it to select the
+per-language joint head + vocab mask. Supported codes:
+    as, bn, brx, doi, gu, hi, kn, kok, ks, mai, ml, mni, mr, ne, or, pa,
+    sa, sat, sd, ta, te, ur
 """
 from __future__ import annotations
 
 import logging
-import tempfile
 from pathlib import Path
 from typing import List, Optional
 
 import numpy as np
 
-from .base import ASRResult, ASRSegment, BaseASR, Word
+from .base import ASRResult, ASRSegment, BaseASR
 
 log = logging.getLogger(__name__)
+
+SUPPORTED_LANGS = {
+    "as", "bn", "brx", "doi", "gu", "hi", "kn", "kok", "ks", "mai", "ml",
+    "mni", "mr", "ne", "or", "pa", "sa", "sat", "sd", "ta", "te", "ur",
+}
 
 
 class IndicConformerASR(BaseASR):
     name = "indicconformer"
     default_checkpoint = "ai4bharat/indic-conformer-600m-multilingual"
+    supported_languages = SUPPORTED_LANGS
 
     def __init__(
         self,
         device: Optional[str] = None,
         *,
         checkpoint: Optional[str] = None,
-        batch_size: int = 1,
+        batch_size: int = 1,              # kept for CLI compat; model is per-clip
         language: Optional[str] = None,
+        decoding: str = "ctc",            # "ctc" or "rnnt"
     ):
         super().__init__(device=device)
         self.checkpoint = checkpoint or self.default_checkpoint
         self.batch_size = batch_size
         self.language = language
+        self.decoding = decoding
         self._model = None
 
     # ------------------------------------------------------------------
@@ -51,21 +61,27 @@ class IndicConformerASR(BaseASR):
         if self._loaded:
             return
         try:
-            from nemo.collections.asr.models import ASRModel
+            from transformers import AutoModel
         except ImportError as e:
             raise RuntimeError(
-                "nemo-toolkit[asr] is required for IndicConformer. "
-                "`pip install nemo-toolkit[asr]`."
+                "transformers is required for IndicConformer. "
+                "`pip install transformers huggingface_hub onnxruntime-gpu`."
             ) from e
-        model = ASRModel.from_pretrained(self.checkpoint)
-        if self.device.startswith("cuda"):
-            import torch
-            if torch.cuda.is_available():
-                model = model.cuda()
-        model.eval()
-        self._model = model
+        # This model builds its own onnxruntime sessions inside the bundled
+        # `model_onnx.py` and lets the EPs pick themselves, so the CUDA EP has
+        # to be loadable *before* the model is constructed or it quietly runs
+        # on CPU. See backend.gpu.ensure_onnxruntime_cuda.
+        from backend.gpu import ensure_onnxruntime_cuda
+        ensure_onnxruntime_cuda()
+
+        # The repo bundles `model_onnx.py` — trust_remote_code is required.
+        self._model = AutoModel.from_pretrained(
+            self.checkpoint, trust_remote_code=True,
+        )
+        self._model.eval()
         self._loaded = True
-        log.info("indicconformer: loaded %s on %s", self.checkpoint, self.device)
+        log.info("indicconformer: loaded %s (device picks itself per onnxruntime EPs)",
+                 self.checkpoint)
 
     # ------------------------------------------------------------------
     # transcription
@@ -79,7 +95,15 @@ class IndicConformerASR(BaseASR):
         segments: Optional[List[tuple[str, float, float, Optional[str]]]] = None,
     ) -> ASRResult:
         self._ensure_loaded()
+        lang = (language or self.language or "").lower()
+        if lang not in SUPPORTED_LANGS:
+            raise ValueError(
+                f"IndicConformer requires a supported language code; got {lang!r}. "
+                f"Supported: {sorted(SUPPORTED_LANGS)}"
+            )
+
         import soundfile as sf
+        import torch
 
         audio, sr = sf.read(str(audio_path), dtype="float32", always_2d=False)
         if audio.ndim == 2:
@@ -89,75 +113,33 @@ class IndicConformerASR(BaseASR):
                 f"IndicConformer expects 16 kHz; got {sr}. Resample upstream."
             )
 
-        self._set_language(language or self.language)
-
         if segments is None:
-            # Full-file inference. NeMo's `transcribe` accepts a list of
-            # paths; we give it the one we have.
-            texts = self._model.transcribe([str(audio_path)],
-                                           batch_size=self.batch_size)
-            text = _flatten(texts)
+            text = self._run_clip(audio, lang, torch)
             return ASRResult(
                 audio_path=Path(audio_path),
                 model_name=self.checkpoint,
-                language=language,
+                language=lang,
                 segments=[ASRSegment(
                     id="SEG_0000",
-                    start=0.0, end=len(audio) / sr,
-                    text=text,
-                    language=language,
+                    start=0.0, end=float(len(audio)) / sr,
+                    text=text, language=lang,
                 )],
             )
 
-        # Per-turn: slice to a scratch WAV per window — NeMo wants file paths
-        # or a dataset manifest, so a tempfile per segment is the simplest
-        # route and keeps GPU usage low on short lecture clips.
         out: List[ASRSegment] = []
-        tmp_wavs: List[Path] = []
-        try:
-            for sid, start_s, end_s, speaker in segments:
-                s0 = max(0, int(round(start_s * sr)))
-                s1 = min(len(audio), int(round(end_s * sr)))
-                clip = audio[s0:s1]
-                if clip.size == 0:
-                    out.append(ASRSegment(
-                        id=sid, start=start_s, end=end_s, text="",
-                        speaker=speaker, language=language,
-                    ))
-                    continue
-                tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
-                tmp.close()
-                tmp_wavs.append(Path(tmp.name))
-                sf.write(tmp.name, clip, sr)
-
-            batch_paths = [str(p) for p in tmp_wavs]
-            if batch_paths:
-                texts = self._model.transcribe(batch_paths, batch_size=self.batch_size)
-                flat = [_flatten([t]) for t in texts]
-            else:
-                flat = []
-
-            idx = 0
-            for sid, start_s, end_s, speaker in segments:
-                s0 = max(0, int(round(start_s * sr)))
-                s1 = min(len(audio), int(round(end_s * sr)))
-                if s1 - s0 <= 0:
-                    continue
-                text = flat[idx] if idx < len(flat) else ""
-                idx += 1
-                out.append(ASRSegment(
-                    id=sid, start=start_s, end=end_s, text=text,
-                    speaker=speaker, language=language,
-                ))
-        finally:
-            for p in tmp_wavs:
-                try: p.unlink()
-                except OSError: pass
-
+        for sid, start_s, end_s, speaker in segments:
+            s0 = max(0, int(round(start_s * sr)))
+            s1 = min(len(audio), int(round(end_s * sr)))
+            clip = audio[s0:s1]
+            text = self._run_clip(clip, lang, torch) if clip.size else ""
+            out.append(ASRSegment(
+                id=sid, start=start_s, end=end_s, text=text,
+                speaker=speaker, language=lang,
+            ))
         return ASRResult(
             audio_path=Path(audio_path),
             model_name=self.checkpoint,
-            language=language,
+            language=lang,
             segments=out,
         )
 
@@ -165,35 +147,14 @@ class IndicConformerASR(BaseASR):
     # helpers
     # ------------------------------------------------------------------
 
-    def _set_language(self, language: Optional[str]) -> None:
-        """The 600M multilingual checkpoint exposes `cur_decoder` + a language
-        token through its config; the 200M per-language ones ignore the call.
-        """
-        if not language:
-            return
-        try:
-            # NeMo >=2.0 way
-            self._model.cur_decoder = "ctc"
-            if hasattr(self._model, "change_decoding_strategy"):
-                self._model.change_decoding_strategy(decoding_cfg=None,
-                                                    decoder_type="ctc")
-            # Multilingual IndicConformer accepts a `language_id` kwarg on
-            # transcribe in some releases; others want it baked into the model
-            # cfg. We mutate the cfg if available.
-            cfg = getattr(self._model, "cfg", None)
-            if cfg is not None and hasattr(cfg, "language"):
-                cfg.language = language
-        except Exception as e:  # noqa: BLE001
-            log.warning("indicconformer: could not set language=%s (%s)", language, e)
-
-
-def _flatten(x):
-    """NeMo returns `list[str]` or `list[tuple[str, _]]` depending on version."""
-    if not x:
-        return ""
-    first = x[0]
-    if isinstance(first, tuple):
-        return first[0] or ""
-    if isinstance(first, list):
-        return _flatten(first)
-    return str(first)
+    def _run_clip(self, clip: np.ndarray, lang: str, torch_mod) -> str:
+        if clip.size == 0:
+            return ""
+        wav = torch_mod.from_numpy(np.ascontiguousarray(clip)).unsqueeze(0)
+        with torch_mod.no_grad():
+            out = self._model(wav, lang, decoding=self.decoding)
+        # forward returns a string (CTC) or a (hyp, timestamps) tuple when
+        # compute_timestamps is set. We don't request timestamps.
+        if isinstance(out, tuple):
+            out = out[0]
+        return (out or "").strip()

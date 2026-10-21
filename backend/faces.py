@@ -17,6 +17,43 @@ from models.faces.track import available_trackers, get_tracker
 log = logging.getLogger(__name__)
 
 
+def preimport_face_stack() -> bool:
+    """Load insightface BEFORE anything else claims the shared C libraries.
+
+    Third instance of the import-order trap in CLAUDE.md section 1, and the
+    first one `LD_PRELOAD` does not cover, because the clashing pair is not
+    libstdc++:
+
+        import pyannote.audio
+        from insightface.app import FaceAnalysis
+        ImportError: .../cv2/.../libtiff.so.6: undefined symbol:
+                     jpeg12_write_raw_data, version LIBJPEG_8.0
+
+    `pyannote.audio` pulls in a libjpeg without the 12-bit symbols that cv2's
+    bundled `libtiff.so.6` wants, and whichever lands first wins for the life
+    of the process. Reversing the order fixes it outright — verified both
+    ways on 2026-10-17.
+
+    This hid for weeks because `--lipsync auto` runs the face-size probe
+    *before* diarization, so insightface was already in `sys.modules` by
+    stage 4. Name a lip-sync model explicitly and the probe short-circuits
+    (`ui/runner.py::_probe_and_pick`), diarization imports first, and stage 5
+    dies with "RetinaFace needs either `insightface` ... or `retina-face`" —
+    a message that points at a missing package when the package is installed
+    and imports fine on its own.
+
+    Returns whether the import succeeded. Never raises: a host genuinely
+    without insightface must still reach the adapter's own error, which is
+    the one that explains the fix.
+    """
+    try:
+        import insightface.app                              # noqa: F401
+    except Exception as e:                                  # noqa: BLE001
+        log.debug("face stack pre-import skipped (%s: %s)", type(e).__name__, e)
+        return False
+    return True
+
+
 def detect_faces(
     video: Path,
     *,

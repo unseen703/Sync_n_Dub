@@ -1,0 +1,47 @@
+diff --git a/latentsync/pipelines/lipsync_pipeline.py b/latentsync/pipelines/lipsync_pipeline.py
+index 693155e..45fe98d 100644
+--- a/latentsync/pipelines/lipsync_pipeline.py
++++ b/latentsync/pipelines/lipsync_pipeline.py
+@@ -253,9 +253,28 @@ class LipsyncPipeline(DiffusionPipeline):
+         faces = []
+         boxes = []
+         affine_matrices = []
++        self._face_present_mask = []  # patched: track frames with a detected face
++        last_face = last_box = last_mat = None
+         print(f"Affine transforming {len(video_frames)} faces...")
+         for frame in tqdm.tqdm(video_frames):
+-            face, box, affine_matrix = self.image_processor.affine_transform(frame)
++            try:
++                face, box, affine_matrix = self.image_processor.affine_transform(frame)
++                last_face, last_box, last_mat = face, box, affine_matrix
++                self._face_present_mask.append(True)
++            except RuntimeError as e:
++                if "Face not detected" not in str(e):
++                    raise
++                if last_face is None:
++                    # No face found yet; synthesize a zero face to keep tensor shape
++                    import torch as _t
++                    last_face = _t.zeros(3, self.image_processor.resolution,
++                                         self.image_processor.resolution,
++                                         dtype=_t.uint8)
++                    last_box = [0, 0, self.image_processor.resolution,
++                                self.image_processor.resolution]
++                    last_mat = np.eye(2, 3, dtype=np.float32)
++                face, box, affine_matrix = last_face, last_box, last_mat
++                self._face_present_mask.append(False)
+             faces.append(face)
+             boxes.append(box)
+             affine_matrices.append(affine_matrix)
+@@ -267,7 +286,12 @@ class LipsyncPipeline(DiffusionPipeline):
+         video_frames = video_frames[: len(faces)]
+         out_frames = []
+         print(f"Restoring {len(faces)} faces...")
++        mask = getattr(self, "_face_present_mask", None)
+         for index, face in enumerate(tqdm.tqdm(faces)):
++            if mask is not None and index < len(mask) and not mask[index]:
++                # patched: no face originally; keep source frame unchanged
++                out_frames.append(video_frames[index])
++                continue
+             x1, y1, x2, y2 = boxes[index]
+             height = int(y2 - y1)
+             width = int(x2 - x1)

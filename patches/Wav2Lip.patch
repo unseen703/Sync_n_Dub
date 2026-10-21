@@ -1,0 +1,128 @@
+diff --git a/audio.py b/audio.py
+index 32b20c4..32ab5fa 100644
+--- a/audio.py
++++ b/audio.py
+@@ -97,7 +97,7 @@ def _linear_to_mel(spectogram):
+ 
+ def _build_mel_basis():
+     assert hp.fmax <= hp.sample_rate // 2
+-    return librosa.filters.mel(hp.sample_rate, hp.n_fft, n_mels=hp.num_mels,
++    return librosa.filters.mel(sr=hp.sample_rate, n_fft=hp.n_fft, n_mels=hp.num_mels,
+                                fmin=hp.fmin, fmax=hp.fmax)
+ 
+ def _amp_to_db(x):
+diff --git a/inference.py b/inference.py
+index 9069252..cf6e78a 100644
+--- a/inference.py
++++ b/inference.py
+@@ -1,7 +1,7 @@
+ from os import listdir, path
+ import numpy as np
+ import scipy, cv2, os, sys, argparse, audio
+-import json, subprocess, random, string
++import json, subprocess, random, string, pickle
+ from tqdm import tqdm
+ from glob import glob
+ import torch, face_detection
+@@ -47,6 +47,13 @@ parser.add_argument('--rotate', default=False, action='store_true',
+ 					help='Sometimes videos taken from a phone can be flipped 90deg. If true, will flip video right by 90deg.'
+ 					'Use if you get a flipped result, despite feeding a normal looking video')
+ 
++parser.add_argument('--use_saved_coord', default=False, action='store_true',
++					help='Reuse face boxes from --coord_path instead of re-detecting')
++parser.add_argument('--saved_coord', default=False, action='store_true',
++					help='Write the detected face boxes to --coord_path')
++parser.add_argument('--coord_path', type=str, default=None,
++					help='Where the per-frame face boxes are cached')
++
+ parser.add_argument('--nosmooth', default=False, action='store_true',
+ 					help='Prevent smoothing face detections over a short temporal window')
+ 
+@@ -66,6 +73,36 @@ def get_smoothened_boxes(boxes, T):
+ 	return boxes
+ 
+ def face_detect(images):
++	# PATCHED (dubbingstudio 2026-10-19): per-frame box cache.
++	# Upstream recomputes S3FD over every frame on every run. Re-rendering the
++	# same clip -- which is what changing a voice, a tone or a batch size
++	# actually does -- pays for the whole detection pass again. MuseTalk has
++	# `--use_saved_coord`/`--saved_coord` for this; Wav2Lip had nothing, so
++	# the same two flag names are added here to keep the adapters symmetric.
++	#
++	# Only the SMOOTHED boxes and the face mask are cached (N x 4 ints, a few
++	# KB). The crops are not: they are a slice of `images`, so caching them
++	# would store the whole video a second time.
++	#
++	# A hit skips constructing the detector at all, so it saves the S3FD
++	# weights' VRAM as well as the detection time.
++	global _face_present_mask
++	if getattr(args, 'use_saved_coord', False) and args.coord_path \
++			and os.path.isfile(args.coord_path):
++		with open(args.coord_path, 'rb') as f:
++			blob = pickle.load(f)
++		boxes, mask = blob.get('boxes'), blob.get('mask')
++		if boxes is not None and len(boxes) == len(images):
++			print('Using saved face coordinates ({} frames)'.format(len(boxes)))
++			_face_present_mask = mask if mask is not None else [True] * len(images)
++			return [[image[y1: y2, x1:x2], (y1, y2, x1, x2)]
++					for image, (x1, y1, x2, y2) in zip(images, boxes)]
++		# A length mismatch means these boxes belong to a different clip.
++		# Recompute rather than draw one video's mouths onto another's frames.
++		print('Saved coordinates do not match this clip ({} vs {} frames); '
++			  'recomputing'.format(len(boxes) if boxes is not None else None,
++								   len(images)))
++
+ 	detector = face_detection.FaceAlignment(face_detection.LandmarksType._2D, 
+ 											flip_input=False, device=device)
+ 
+@@ -85,21 +122,47 @@ def face_detect(images):
+ 		break
+ 
+ 	results = []
++	face_mask = []  # True = face found this frame
+ 	pady1, pady2, padx1, padx2 = args.pads
++	last_box = None
+ 	for rect, image in zip(predictions, images):
+ 		if rect is None:
+-			cv2.imwrite('temp/faulty_frame.jpg', image) # check this frame where the face was not detected.
+-			raise ValueError('Face not detected! Ensure the video contains a face in all the frames.')
++			# Patched: no face in this frame; reuse previous box (or a dummy)
++			# and mark the frame so the main loop leaves it unchanged.
++			if last_box is None:
++				h, w = image.shape[:2]
++				last_box = [0, 0, min(96, w), min(96, h)]
++			results.append(list(last_box))
++			face_mask.append(False)
++			continue
+ 
+ 		y1 = max(0, rect[1] - pady1)
+ 		y2 = min(image.shape[0], rect[3] + pady2)
+ 		x1 = max(0, rect[0] - padx1)
+ 		x2 = min(image.shape[1], rect[2] + padx2)
+-		
++
+ 		results.append([x1, y1, x2, y2])
++		last_box = [x1, y1, x2, y2]
++		face_mask.append(True)
++	# expose mask so datagen/main can see which frames lack a face.
++	# No `global` here: it is already declared at the top of this function
++	# for the coord-cache early return, and a second declaration AFTER an
++	# assignment is a SyntaxError -- which made every wav2lip run fail.
++	_face_present_mask = face_mask
+ 
+ 	boxes = np.array(results)
+ 	if not args.nosmooth: boxes = get_smoothened_boxes(boxes, T=5)
++
++	# PATCHED: persist the smoothed boxes for the next run on this clip.
++	if getattr(args, 'saved_coord', False) and args.coord_path:
++		try:
++			with open(args.coord_path, 'wb') as f:
++				pickle.dump({'boxes': boxes, 'mask': face_mask}, f)
++			print('Saved face coordinates to', args.coord_path)
++		except Exception as e:
++			# A cache write must never cost a finished render.
++			print('Could not save face coordinates:', e)
++
+ 	results = [[image[y1: y2, x1:x2], (y1, y2, x1, x2)] for image, (x1, y1, x2, y2) in zip(images, boxes)]
+ 
+ 	del detector

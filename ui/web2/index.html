@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark" />
+    <meta name="theme-color" content="#0A0D13" />
+    <title>Dubbing Studio — voice translation & video editing</title>
+    <meta
+      name="description"
+      content="Dub a video into an Indian language: transcribe it, translate it, cast voices, mix a new soundtrack and lip-sync the speaker to it."
+    />
+    <!-- All vendor assets served from this origin — no CDN at runtime.
+         Fonts live in /fonts/ and are injected per script by src/lib/lang.ts. -->
+
+    <!--
+      First render, part 1: critical CSS for the skeleton only.
+      The real stylesheet arrives with the bundle; this is the ~2 kB that
+      lets the first paint show the shape of the app at the right dimensions,
+      so React arriving causes no layout shift.
+
+      The colour literals here are the same tokens as `src/index.css`.
+      If you change one, change both — this block paints before that file.
+    -->
+    <style>
+      :root {
+        color-scheme: dark;
+        --canvas: #0a0d13;
+        --surface: #121722;
+        --line: #262f41;
+        --ink: #f2f5f9;
+        --ink3: #9facbf;
+        --brand: #4f46e5;
+        --aqua: #22d3ee;
+        --rail: 19rem;
+        --spec: 20rem;
+        --brandbar: 3.25rem;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        height: 100%;
+        margin: 0;
+      }
+      body {
+        background:
+          radial-gradient(1100px 560px at 88% -12%, rgba(79, 70, 229, 0.16), transparent 62%),
+          radial-gradient(820px 480px at -8% 108%, rgba(34, 211, 238, 0.1), transparent 60%),
+          var(--canvas);
+        color: var(--ink);
+        font-family: Inter, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+        font-size: 14px;
+        -webkit-font-smoothing: antialiased;
+      }
+      #root {
+        height: 100%;
+      }
+
+      /* Brand bar across the top, then stage + job rail on the RIGHT. */
+      .bootshell {
+        display: flex;
+        flex-direction: column;
+        height: 100vh;
+      }
+      .bootbar {
+        display: flex;
+        align-items: center;
+        gap: 0.625rem;
+        height: var(--brandbar);
+        flex: none;
+        padding: 0 1rem;
+        border-bottom: 1px solid var(--line);
+      }
+      .bootcols {
+        display: grid;
+        grid-template-columns: 1fr var(--rail);
+        flex: 1;
+        min-height: 0;
+      }
+      html.spec-open .bootcols {
+        grid-template-columns: var(--spec) 1fr var(--rail);
+      }
+      html:not(.spec-open) .boot-spec {
+        display: none;
+      }
+      @media (max-width: 1023px) {
+        .bootcols {
+          grid-template-columns: 1fr;
+        }
+        .boot-rail,
+        .boot-spec {
+          display: none;
+        }
+      }
+      .boot-spec {
+        border-right: 1px solid var(--line);
+        padding: 1rem;
+        overflow: hidden;
+      }
+      .boot-rail {
+        border-left: 1px solid var(--line);
+        padding: 1rem;
+        overflow: hidden;
+      }
+      .boot-stage {
+        padding: 1rem 1.25rem;
+        overflow: hidden;
+      }
+      .sk {
+        position: relative;
+        overflow: hidden;
+        border-radius: 1rem;
+        background: rgba(18, 23, 34, 0.7);
+        border: 1px solid var(--line);
+      }
+      .sk::after {
+        content: '';
+        position: absolute;
+        inset: 0;
+        transform: translateX(-100%);
+        background: linear-gradient(90deg, transparent, rgba(159, 172, 191, 0.1), transparent);
+        animation: sk-shimmer 1.4s infinite;
+      }
+      @keyframes sk-shimmer {
+        100% {
+          transform: translateX(100%);
+        }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .sk::after {
+          animation: none;
+        }
+      }
+      .sk-line {
+        height: 0.625rem;
+        border-radius: 999px;
+        background: rgba(159, 172, 191, 0.18);
+      }
+      .boot-mark {
+        width: 1.5rem;
+        height: 1.5rem;
+        border-radius: 0.5rem;
+        background: linear-gradient(135deg, var(--brand), var(--aqua));
+        flex: none;
+      }
+      .boot-name {
+        font-size: 0.875rem;
+        font-weight: 650;
+        letter-spacing: -0.01em;
+        color: var(--ink);
+      }
+      .boot-tag {
+        font-size: 0.75rem;
+        color: var(--ink3);
+      }
+      @media (max-width: 639px) {
+        .boot-tag {
+          display: none;
+        }
+      }
+    </style>
+
+    <!--
+      First render, part 2: fire the job list before the bundle parses.
+      The store awaits window.__BOOT__, so the request overlaps bundle
+      download + parse + hydrate instead of queueing behind it.
+      The catch matters: an unhandled rejection here would surface as a
+      console error on every cold start where the server is still booting.
+    -->
+    <script>
+      /*
+        Theme, applied BEFORE first paint. Doing this in React instead would
+        paint the dark skeleton, hydrate, then repaint light — a visible
+        flash on every load for anyone who picked light mode. Falls back to
+        the OS preference, then to dark.
+      */
+      (function () {
+        try {
+          var t = localStorage.getItem('ds.theme');
+          if (t !== 'light' && t !== 'dark') {
+            t = window.matchMedia &&
+                window.matchMedia('(prefers-color-scheme: light)').matches
+                  ? 'light' : 'dark';
+          }
+          document.documentElement.setAttribute('data-theme', t);
+        } catch (e) {
+          document.documentElement.setAttribute('data-theme', 'dark');
+        }
+      })();
+
+      window.__BOOT__ = fetch('/api/jobs', { headers: { accept: 'application/json' } })
+        .then(function (r) {
+          return r.ok ? r.json() : null;
+        })
+        .catch(function () {
+          return null;
+        });
+      // The spec panel's open state decides the skeleton's column count, so
+      // it has to be known before first paint or the panel pops in.
+      try {
+        var open = localStorage.getItem('ds.specOpen');
+        if (open === null ? window.innerWidth >= 1536 : open === '1') {
+          document.documentElement.classList.add('spec-open');
+        }
+      } catch (e) {
+        /* private mode: default to closed */
+      }
+    </script>
+  </head>
+  <body>
+    <div id="root">
+      <!-- Inline skeleton: the real layout's dimensions in static HTML. -->
+      <div class="bootshell" aria-hidden="true">
+        <header class="bootbar">
+          <span class="boot-mark"></span>
+          <span class="boot-name">Dubbing Studio</span>
+          <span class="boot-tag">Voice translation &amp; video editing</span>
+        </header>
+        <div class="bootcols">
+          <aside class="boot-spec">
+            <div class="sk" style="height: 7rem; margin-bottom: 0.75rem"></div>
+            <div class="sk-line" style="width: 70%; margin-bottom: 0.75rem"></div>
+            <div class="sk-line" style="width: 85%; margin-bottom: 0.75rem"></div>
+            <div class="sk-line" style="width: 60%; margin-bottom: 0.75rem"></div>
+            <div class="sk-line" style="width: 78%"></div>
+          </aside>
+          <main class="boot-stage">
+            <div class="sk" style="height: 2.75rem; margin-bottom: 0.75rem"></div>
+            <div class="sk" style="height: 4.25rem; margin-bottom: 1rem"></div>
+            <div
+              class="sk"
+              style="aspect-ratio: 16 / 9; max-height: 54vh; max-width: 64rem; margin: 0 auto 1rem"
+            ></div>
+            <div class="sk" style="height: 3.5rem; max-width: 64rem; margin: 0 auto"></div>
+          </main>
+          <aside class="boot-rail">
+            <div class="sk" style="height: 2.25rem; margin-bottom: 0.75rem"></div>
+            <div class="sk" style="height: 5.5rem; margin-bottom: 0.625rem"></div>
+            <div class="sk" style="height: 5.5rem; margin-bottom: 0.625rem"></div>
+            <div class="sk" style="height: 5.5rem; margin-bottom: 0.625rem"></div>
+            <div class="sk" style="height: 5.5rem; opacity: 0.55"></div>
+          </aside>
+        </div>
+      </div>
+    </div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

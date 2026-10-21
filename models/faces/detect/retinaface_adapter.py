@@ -52,6 +52,19 @@ class RetinaFaceDetector(BaseFaceDetector):
         # the industry has standardized on. Fall back only if it is missing.
         try:
             from insightface.app import FaceAnalysis
+
+            # onnxruntime lists CUDAExecutionProvider even when its provider
+            # library cannot dlopen the CUDA runtime, and then falls back to
+            # CPU without raising. This makes the EP genuinely loadable; see
+            # backend.gpu.ensure_onnxruntime_cuda.
+            if self.device.startswith("cuda"):
+                from backend.gpu import ensure_onnxruntime_cuda
+                if not ensure_onnxruntime_cuda():
+                    log.warning(
+                        "retinaface: CUDA requested but onnxruntime cannot "
+                        "provide it; detection will run on CPU."
+                    )
+
             provider = (
                 "CUDAExecutionProvider"
                 if self.device.startswith("cuda")
@@ -70,8 +83,19 @@ class RetinaFaceDetector(BaseFaceDetector):
             self._loaded = True
             log.info("retinaface: loaded insightface pack=%s on %s", self.pack, self.device)
             return
-        except ImportError:
-            log.info("retinaface: insightface unavailable, trying retina-face package")
+        except ImportError as e:
+            # Say WHICH import failed. This used to log a bare "insightface
+            # unavailable", which reads as "not installed" and sent a 2026-10-17
+            # debug session off to `pip install` a package that was already
+            # there and imported fine on its own. The interesting case is an
+            # ImportError raised from INSIDE insightface's own lazy imports,
+            # once torch/cv2/onnxruntime are already loaded — the import-order
+            # trap in CLAUDE.md section 1 — and only the message distinguishes
+            # the two.
+            log.warning("retinaface: insightface did not load (%s: %s); "
+                        "trying the retina-face package",
+                        type(e).__name__, e)
+            log.debug("retinaface: insightface import traceback", exc_info=True)
 
         try:
             from retinaface import RetinaFace    # type: ignore

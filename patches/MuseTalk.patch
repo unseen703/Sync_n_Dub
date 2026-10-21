@@ -1,0 +1,345 @@
+diff --git a/musetalk/models/unet.py b/musetalk/models/unet.py
+index 575e79a..7c2edb0 100755
+--- a/musetalk/models/unet.py
++++ b/musetalk/models/unet.py
+@@ -41,7 +41,7 @@ class UNet():
+             self.device = device
+         else:
+             self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+-        weights = torch.load(model_path) if torch.cuda.is_available() else torch.load(model_path, map_location=self.device)
++        weights = torch.load(model_path, weights_only=False) if torch.cuda.is_available() else torch.load(model_path, map_location=self.device, weights_only=False)
+         self.model.load_state_dict(weights)
+         if use_float16:
+             self.model = self.model.half()
+diff --git a/musetalk/utils/face_detection/detection/sfd/sfd_detector.py b/musetalk/utils/face_detection/detection/sfd/sfd_detector.py
+index 8fbce15..5a92c8f 100755
+--- a/musetalk/utils/face_detection/detection/sfd/sfd_detector.py
++++ b/musetalk/utils/face_detection/detection/sfd/sfd_detector.py
+@@ -21,7 +21,7 @@ class SFDDetector(FaceDetector):
+         if not os.path.isfile(path_to_detector):
+             model_weights = load_url(models_urls['s3fd'])
+         else:
+-            model_weights = torch.load(path_to_detector)
++            model_weights = torch.load(path_to_detector, weights_only=False)
+ 
+         self.face_detector = s3fd()
+         self.face_detector.load_state_dict(model_weights)
+diff --git a/musetalk/utils/face_parsing/__init__.py b/musetalk/utils/face_parsing/__init__.py
+index 09c1c02..7801a76 100755
+--- a/musetalk/utils/face_parsing/__init__.py
++++ b/musetalk/utils/face_parsing/__init__.py
+@@ -62,9 +62,9 @@ class FaceParsing():
+         net = BiSeNet(resnet_path)
+         if torch.cuda.is_available():
+             net.cuda()
+-            net.load_state_dict(torch.load(model_pth)) 
++            net.load_state_dict(torch.load(model_pth, weights_only=False)) 
+         else:
+-            net.load_state_dict(torch.load(model_pth, map_location=torch.device('cpu')))
++            net.load_state_dict(torch.load(model_pth, map_location=torch.device('cpu'), weights_only=False))
+         net.eval()
+         return net
+ 
+diff --git a/musetalk/utils/face_parsing/resnet.py b/musetalk/utils/face_parsing/resnet.py
+index e2e5d87..a306abb 100755
+--- a/musetalk/utils/face_parsing/resnet.py
++++ b/musetalk/utils/face_parsing/resnet.py
+@@ -80,7 +80,7 @@ class Resnet18(nn.Module):
+         return feat8, feat16, feat32
+ 
+     def init_weight(self, model_path):
+-        state_dict = torch.load(model_path) #modelzoo.load_url(resnet18_url)
++        state_dict = torch.load(model_path, weights_only=False) #modelzoo.load_url(resnet18_url)
+         self_state_dict = self.state_dict()
+         for k, v in state_dict.items():
+             if 'fc' in k: continue
+diff --git a/musetalk/whisper/whisper/__init__.py b/musetalk/whisper/whisper/__init__.py
+index b925553..b47a6d3 100755
+--- a/musetalk/whisper/whisper/__init__.py
++++ b/musetalk/whisper/whisper/__init__.py
+@@ -106,7 +106,7 @@ def load_model(name: str, device: Optional[Union[str, torch.device]] = None, dow
+         raise RuntimeError(f"Model {name} not found; available models = {available_models()}")
+ 
+     with (io.BytesIO(checkpoint_file) if in_memory else open(checkpoint_file, "rb")) as fp:
+-        checkpoint = torch.load(fp, map_location=device)
++        checkpoint = torch.load(fp, map_location=device, weights_only=False)
+     del checkpoint_file
+ 
+     dims = ModelDimensions(**checkpoint["dims"])
+diff --git a/scripts/inference.py b/scripts/inference.py
+index 428afb9..7d4baa1 100644
+--- a/scripts/inference.py
++++ b/scripts/inference.py
+@@ -13,6 +13,7 @@ from tqdm import tqdm
+ from omegaconf import OmegaConf
+ from transformers import WhisperModel
+ import sys
++import time
+ 
+ from musetalk.utils.blending import get_image
+ from musetalk.utils.face_parsing import FaceParsing
+@@ -27,6 +28,130 @@ def fast_check_ffmpeg():
+     except:
+         return False
+ 
++
++# PATCHED (dubbingstudio 2026-10-20): check system memory before each batch.
++#
++# This file holds one decoded uint8 frame per source frame for the whole
++# clip (`read_imgs()` above), so resident memory is frames x w x h x 3 --
++# measured 5.87 GiB + 6.14 MiB/frame at 1080p on the host this runs on,
++# which has 62 GiB. The caller segments the clip to bound that, and this is
++# the in-render backstop for pressure the caller cannot see.
++#
++# Self-contained ON PURPOSE: MuseTalk runs in its own conda env with its own
++# sys.path, so `backend.memguard` is not importable here. Both read
++# DUBBING_MEM_GUARD_PCT so the two halves cannot disagree.
++#
++# MemAvailable, not MemFree: this very script writes every frame to disk as
++# PNG and reads it back, leaving ~10 GB of page cache on a 2-minute 1080p
++# segment. Page cache is reclaimable, so MemFree would read a healthy host
++# as full and stall every run.
++# PATCHED (dubbingstudio 2026-10-20): optional lazy frame access.
++#
++# `read_imgs()` loads EVERY frame into a Python list, so resident memory is
++# frames x w x h x 3 -- measured 6.14 MiB/frame at 1080p against a 5.93 MiB
++# theoretical frame, i.e. it is purely the pixels. The frames are already on
++# disk: this script extracted them to PNG a few lines earlier and then reads
++# them straight back, so the list is a redundant in-memory duplicate.
++#
++# `_LazyFrames` is a drop-in sequence that reads each PNG on access instead.
++# It has to support exactly what the two consumers do:
++#   pass A  `for bbox, frame in zip(coord_list, frame_list)`      -> __iter__
++#   cycle   `frame_list + frame_list[::-1]`                        -> slice, __add__
++#   pass B  `frame_list_cycle[i % len(frame_list_cycle)]`          -> __getitem__, __len__
++#
++# The cost is one EXTRA decode per frame: today read_imgs decodes N times and
++# both passes read RAM for free; lazily, each pass decodes N. Measured warm
++# PNG decode on this host is 26.44 ms/frame, so ~+N x 26 ms.
++#
++# Off by default. `MUSETALK_LAZY_FRAMES=1` turns it on.
++_LAZY_FRAMES = os.environ.get("MUSETALK_LAZY_FRAMES", "0") == "1"
++
++
++class _LazyFrames:
++    """A list-like view over image paths that decodes on access."""
++
++    __slots__ = ("_paths",)
++
++    def __init__(self, paths):
++        self._paths = list(paths)
++
++    def __len__(self):
++        return len(self._paths)
++
++    def __getitem__(self, idx):
++        if isinstance(idx, slice):
++            return _LazyFrames(self._paths[idx])
++        return cv2.imread(self._paths[idx])
++
++    def __iter__(self):
++        for p in self._paths:
++            yield cv2.imread(p)
++
++    def __add__(self, other):
++        other_paths = getattr(other, "_paths", None)
++        if other_paths is None:
++            return NotImplemented
++        return _LazyFrames(self._paths + other_paths)
++
++
++_MEM_LIMIT_PCT = float(os.environ.get("DUBBING_MEM_GUARD_PCT", "95") or 95)
++_MEM_WAIT_S = float(os.environ.get("DUBBING_MEM_WAIT_S", "180") or 180)
++_MEM_POLL_S = 5.0
++
++
++def _system_mem_used_pct():
++    """Share of system RAM in use, or None if it cannot be read."""
++    try:
++        total = avail = None
++        with open("/proc/meminfo") as fh:
++            for line in fh:
++                key, _, rest = line.partition(":")
++                if key == "MemTotal":
++                    total = float(rest.split()[0])
++                elif key == "MemAvailable":
++                    avail = float(rest.split()[0])
++                if total is not None and avail is not None:
++                    break
++        if not total:
++            return None
++        return 100.0 * (total - avail) / total
++    except Exception:
++        return None
++
++
++def _wait_for_memory(where):
++    """Pause before `where` while system RAM is past the limit.
++
++    Pausing only helps when something ELSE is holding the memory -- another
++    tenant, or page cache the kernel can drop. When THIS render is the
++    consumer, waiting cannot free anything, so the wait is bounded and then
++    raises instead of hanging a GPU job forever. The exception surfaces
++    through the adapter's stderr tail with the numbers in it.
++    """
++    if _MEM_LIMIT_PCT <= 0:
++        return
++    pct = _system_mem_used_pct()
++    if pct is None or pct < _MEM_LIMIT_PCT:
++        return
++    print("[memguard] %s: system RAM %.1f%% >= %.0f%% -- pausing up to %.0fs"
++          % (where, pct, _MEM_LIMIT_PCT, _MEM_WAIT_S), flush=True)
++    waited = 0.0
++    while waited < _MEM_WAIT_S:
++        time.sleep(_MEM_POLL_S)
++        waited += _MEM_POLL_S
++        pct = _system_mem_used_pct()
++        if pct is None or pct < _MEM_LIMIT_PCT:
++            print("[memguard] %s: resumed after %.0fs at %.1f%%"
++                  % (where, waited, pct if pct is not None else -1),
++                  flush=True)
++            return
++    raise MemoryError(
++        "[memguard] %s: system RAM still %.1f%% after waiting %.0fs "
++        "(limit %.0f%%). Nothing freed up, so this render is stopping "
++        "rather than taking the host down. Use a shorter segment, a lower "
++        "resolution, or raise DUBBING_MEM_GUARD_PCT."
++        % (where, pct if pct is not None else -1, waited, _MEM_LIMIT_PCT))
++
+ @torch.no_grad()
+ def main(args):
+     # Configure ffmpeg path
+@@ -89,11 +214,11 @@ def main(args):
+             if "result_name" in inference_config[task_id]:
+                 args.output_vid_name = inference_config[task_id]["result_name"]
+             
+-            # Set bbox_shift based on version
+-            if args.version == "v15":
+-                bbox_shift = 0  # v15 uses fixed bbox_shift
+-            else:
+-                bbox_shift = inference_config[task_id].get("bbox_shift", args.bbox_shift)  # v1 uses config or default
++            # Honor the per-task bbox_shift for BOTH v1 and v15. Upstream v15 force-set
++            # this to 0 which made the whole knob dead for the newer model; we need it
++            # to raise/lower the inpainting-bbox top edge (positive -> pivot moves down
++            # the face -> top edge drops toward the lips).
++            bbox_shift = inference_config[task_id].get("bbox_shift", args.bbox_shift)
+             
+             # Set output paths
+             input_basename = os.path.basename(video_path).split('.')[0]
+@@ -152,20 +277,63 @@ def main(args):
+                 print("Using saved coordinates")
+                 with open(crop_coord_save_path, 'rb') as f:
+                     coord_list = pickle.load(f)
+-                frame_list = read_imgs(input_img_list)
++                # PATCHED (dubbingstudio 2026-10-20): skip the eager load
++                # OUTRIGHT when lazy, rather than loading and discarding
++                # below -- a load-then-drop still pays the full peak, which
++                # is the only thing this is trying to avoid. This is the
++                # branch that matters: the adapter passes --use_saved_coord
++                # whenever it has a cached pickle, so it is the normal path.
++                frame_list = (_LazyFrames(input_img_list) if _LAZY_FRAMES
++                              else read_imgs(input_img_list))
+             else:
+                 print("Extracting landmarks... time-consuming operation")
+                 coord_list, frame_list = get_landmark_and_bbox(input_img_list, bbox_shift)
+                 with open(crop_coord_save_path, 'wb') as f:
+                     pickle.dump(coord_list, f)
+-            
+-            print(f"Number of frames: {len(frame_list)}")         
++
++            # PATCHED (dubbingstudio 2026-10-20): see _LazyFrames. Replacing
++            # the list AFTER both branches covers each of them -- including
++            # the else branch, where `get_landmark_and_bbox` has already
++            # loaded every frame, so the eager list is dropped here and its
++            # memory returned. That still leaves a transient peak inside
++            # that call, which is why the win is largest on the
++            # `--use_saved_coord` path this repo normally takes.
++            if _LAZY_FRAMES:
++                frame_list = _LazyFrames(input_img_list)
++                print("[lazy] frame_list -> on-demand PNG reads (%d frames)"
++                      % len(frame_list), flush=True)
++
++            print(f"Number of frames: {len(frame_list)}")
+             
+             # Process each frame
++            # PATCHED (dubbingstudio 2026-10-18) -- see the note at the blend
++            # loop below. Upstream `continue`d here on a placeholder bbox,
++            # which made `input_latent_list` SHORTER than `frame_list`. The
++            # three *_cycle lists built right after then had different
++            # lengths (2N vs 2(N-k)), so the generator indexed latents by
++            # i % 2(N-k) while the blend loop indexed frames by i % 2N --
++            # every mouth after the first missing face landed on the wrong
++            # frame, silently. We now emit one latent per frame, reusing the
++            # nearest valid bbox purely to keep the index alignment. The
++            # generated pixels for a placeholder frame are DISCARDED below,
++            # so the reused bbox never affects the output.
+             input_latent_list = []
++            is_placeholder = []
++            _last_valid_bbox = next((b for b in coord_list
++                                     if b != coord_placeholder), None)
+             for bbox, frame in zip(coord_list, frame_list):
+-                if bbox == coord_placeholder:
+-                    continue
++                placeholder = (bbox == coord_placeholder)
++                is_placeholder.append(placeholder)
++                if placeholder:
++                    if _last_valid_bbox is None:
++                        # No face anywhere in this clip: nothing to lip-sync.
++                        # Emit a centre crop so the list length still matches.
++                        h, w = frame.shape[:2]
++                        bbox = (w // 4, h // 4, w * 3 // 4, h * 3 // 4)
++                    else:
++                        bbox = _last_valid_bbox
++                else:
++                    _last_valid_bbox = bbox
+                 x1, y1, x2, y2 = bbox
+                 if args.version == "v15":
+                     y2 = y2 + args.extra_margin
+@@ -179,6 +347,8 @@ def main(args):
+             frame_list_cycle = frame_list + frame_list[::-1]
+             coord_list_cycle = coord_list + coord_list[::-1]
+             input_latent_list_cycle = input_latent_list + input_latent_list[::-1]
++            # PATCHED: cycled identically so `i` means the same thing in all four.
++            is_placeholder_cycle = is_placeholder + is_placeholder[::-1]
+             
+             # Batch inference
+             print("Starting inference")
+@@ -197,6 +367,10 @@ def main(args):
+             
+             # Execute inference
+             for i, (whisper_batch, latent_batch) in enumerate(tqdm(gen, total=total)):
++                # PATCHED (dubbingstudio 2026-10-20): see _wait_for_memory.
++                # Before the batch, not after: the allocation that would
++                # tip the host over happens inside this iteration.
++                _wait_for_memory("batch %d/%d" % (i + 1, total))
+                 audio_feature_batch = pe(whisper_batch)
+                 latent_batch = latent_batch.to(dtype=unet.model.dtype)
+                 
+@@ -214,10 +388,24 @@ def main(args):
+                 if args.version == "v15":
+                     y2 = y2 + args.extra_margin
+                     y2 = min(y2, frame.shape[0])
+-                try:
+-                    res_frame = cv2.resize(res_frame.astype(np.uint8), (x2-x1, y2-y1))
+-                except:
++                # PATCHED (dubbingstudio 2026-10-18). Upstream skipped this
++                # index entirely when the bbox was a placeholder: the bare
++                # `except: continue` below swallowed the (0,0) resize error
++                # and NO png was written for `i`. `ffmpeg -f image2 -i
++                # %08d.png` stops at the first gap in the numbering, so a
++                # SINGLE faceless frame truncated the rest of the render --
++                # measured 2026-10-18, shard 0 of a 40 s clip encoded 255 of
++                # 480 frames, its video stream ending at 10.64 s while the
++                # audio ran to 20.02 s, which players show as a ~9 s freeze.
++                # A frame we cannot lip-sync must still be WRITTEN, unchanged.
++                if is_placeholder_cycle[i % len(is_placeholder_cycle)]:
++                    cv2.imwrite(f"{result_img_save_path}/{str(i).zfill(8)}.png",
++                                ori_frame)
+                     continue
++                # No bare `except` here any more: a resize failure on a frame
++                # that DOES have a face is a real error and must not be
++                # silently dropped into a truncated video.
++                res_frame = cv2.resize(res_frame.astype(np.uint8), (x2-x1, y2-y1))
+                 
+                 # Merge results with version-specific parameters
+                 if args.version == "v15":

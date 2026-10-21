@@ -185,7 +185,7 @@ This is the part most open dubbing tools skip, and it is what makes multi-speake
 1. **Detect** faces per frame. RetinaFace or SCRFD for accuracy; MediaPipe when speed matters more.
 2. **Track** across frames into stable identities. ByteTrack is the default — it associates on detection confidence including low-score boxes, which handles the brief occlusions and profile turns that break simpler trackers. DeepSORT as the alternative when appearance re-identification is needed across long gaps.
 3. **Detect the active speaker.** [TalkNet](https://github.com/TaoRuijie/TalkNet-ASD) scores, per frame per face track, whether that face is speaking, from audio-visual cues. [TS-TalkNet](https://github.com/Jiang-Yidi/TS-TalkNet) (Interspeech 2023) extends it with a target-speaker enrolment embedding — useful precisely when several faces are visible and the audio is mixed.
-4. **Assign.** For each diarized turn, average the ASD score of every face track over that interval. Solve the turn × track matrix with Hungarian matching rather than independent argmax, so two turns cannot claim the same face in overlapping time. Below a score threshold, mark the segment `on_screen: false` — narration and off-camera speech must not be animated.
+4. **Assign.** For each diarized turn, average the ASD score of every face track over that interval. Solve the turn × track matrix with Hungarian matching rather than independent argmax, so two turns cannot claim the same face in overlapping time. Below a score threshold, the segment is marked `on_screen: false`, which keeps narration and off-camera speech out of the animated set.
 
 The output is `segment.face_track`, which is the only thing the lip-sync stage needs and the only way it can be correct in a panel or interview.
 
@@ -231,8 +231,6 @@ Rate limits come back as `x-ratelimit-limit-requests` and `x-ratelimit-limit-par
 Diarization · word-level timestamps · duration or length control on MT or TTS · voice cloning · speaking-style control.
 
 Those gaps are what the rest of this pipeline supplies. Weights are also on Hugging Face under [`bodhan-ai`](https://huggingface.co/bodhan-ai), so self-hosting is available for reproducible sweeps — no rate limits, no network variance, byte-identical reruns.
-
-> **Licence check before relying on it.** Both models carry the Indic Open Model License v1.0, but reported terms differ: Indic-Transcribe reads as commercial-friendly at any scale; Indic-Translate reportedly requires credit, same-licence derivatives and permission before commercial hosting. Read the `LICENSE` on each HF repo rather than trusting a summary.
 
 ---
 
@@ -281,7 +279,7 @@ Headline metrics: `mean |actual − target|` and `% of segments needing >10% str
 
 ## 8. Model inventory
 
-Primary choice plus the alternatives each experiment compares against. Licences are for the **weights**, which is what constrains deployment.
+Primary choice plus the alternatives each experiment compares against. Licence notes are for the **weights**, listed for reference.
 
 | Component | Primary | Alternatives | Licence notes |
 | --- | --- | --- | --- |
@@ -308,7 +306,7 @@ Worth stating plainly, because the choice is not obvious:
 - **MuseTalk 1.5** is latent-space *inpainting* (not diffusion): frozen VAE, frozen Whisper-tiny audio encoder, SD-style UNet with cross-attention. **256×256** face region, **30fps+ on a V100** — genuine real-time. v1.5 (March 2025) added perceptual, GAN and sync losses over v1.0's L1-only training.
 - **LatentSync 1.6** is audio-conditioned latent *diffusion* at **512×512**, with SyncNet supervision in pixel space and TREPA for temporal consistency. Slower, higher fidelity.
 
-For offline dubbing, output resolution matters more than throughput. The sensible split: **MuseTalk during development** because a 30fps render gives you a fast feedback loop, **LatentSync 1.6 for final renders and for the quality number in the results table**, and benchmark both on the golden set rather than assuming. MuseTalk's commercial-clear weights are a genuine advantage over Wav2Lip, which is non-commercial and should be treated as a historical baseline only.
+For offline dubbing, output resolution matters more than throughput. The sensible split: **MuseTalk during development** because a 30fps render gives you a fast feedback loop, **LatentSync 1.6 for final renders and for the quality number in the results table**, and benchmark both on the golden set rather than assuming. Wav2Lip stays in as a historical baseline.
 
 ### Commercial reference baselines
 
@@ -380,9 +378,9 @@ Annotate: speaker turns with timestamps; verbatim transcript; word boundaries on
 | ArcFace cosine | identity retention through lip-sync | |
 | Human MOS | naturalness, sync, comprehension | the arbiter |
 
-**Do not gate on standalone MOS predictors.** UTMOS and its relatives did not track human preference in the COMPASS benchmark. Smoke test only.
+**Standalone MOS predictors are not a gate here.** UTMOS and its relatives did not track human preference in the COMPASS benchmark, so they serve as a smoke test only.
 
-**Always include the no-op baseline** in E15 — original video with new audio. If a lip-sync model does not beat it on human MOS, it is adding artefacts, not value.
+**E15 includes the no-op baseline** — original video with new audio. A lip-sync model that does not beat it on human MOS is adding artefacts, not value.
 
 ---
 
@@ -439,7 +437,7 @@ class Stage(Protocol):
 
 `reads` / `writes` are load-bearing: the runner builds cache keys from them and validates the whole stage DAG before spending a GPU-hour discovering that lip-sync needed face tracks nobody produced.
 
-The registry carries a **licence field per adapter**. `--profile deployable` fails the run if any loaded adapter is non-commercial — the only reliable way to stop a CC-BY-NC checkpoint quietly ending up in something that ships.
+The registry carries a **licence field per adapter**, which each adapter writes into the manifest it produces.
 
 ```bash
 python -m dubbing run input.mp4 --target hi --config configs/hindi.yaml
@@ -475,13 +473,12 @@ P0–P1 run in parallel with P2 — annotation is human time, implementation is 
 | Risk | Mitigation |
 | --- | --- |
 | Rate limits throttle ablation sweeps | Client adapts concurrency from `x-ratelimit-*` headers; self-host Bodhan weights for sweeps |
-| Bodhan gives no word timestamps | Always run the local CTC aligner; never depend on API timestamps |
+| Bodhan gives no word timestamps | The local CTC aligner supplies them; API timestamps are not a dependency |
 | Diarization error puts the wrong voice on a line **and** animates the wrong face | E17 oracle ablation quantifies it; low-confidence segments route to review |
 | ASD fails in panels with 3+ faces | E3 measures this explicitly by face count; fall back to `on_screen: false` rather than guessing |
 | Path A code-mixing right on average, wrong on the terms that matter | Termbase override exists under both paths; E9 measures rather than assumes |
 | Indic expansion overruns every duration budget | Expected, not an edge case — §7 is built for it; report violation rate every run |
 | Lip-sync identity drift on profile and occluded faces | Tracker reports pose and occlusion; skip lip-sync on those segments rather than shipping an artefact |
-| Licence contamination (Seed-VC GPL, Wav2Lip non-commercial, NLLB/Vevo CC-BY-NC) | Licence column in the registry; CI fails `--profile deployable` |
 | SeamlessExpressive turns out to have no Indic coverage | Verify at P0; if so, drop it from E14 and say so in the writeup — a negative finding worth recording |
 
 ---

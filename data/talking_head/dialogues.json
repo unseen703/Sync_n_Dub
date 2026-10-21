@@ -1,0 +1,358 @@
+{
+  "version": 1,
+  "note": "Seed catalogue for the Talking Head page. `audio_url` is null on every entry by design: the clips are supplied later. An entry with no audio is offered and marked 'audio not supplied yet' rather than hidden, so adding a link is the only step needed to make it playable. Add languages by adding a key under `dialogues`; the UI reads this file and does not need a code change.",
+  "categories": [
+    {
+      "id": "slogan",
+      "label": "Slogans"
+    },
+    {
+      "id": "inspiring",
+      "label": "Inspiring thoughts"
+    },
+    {
+      "id": "funny",
+      "label": "Funny"
+    },
+    {
+      "id": "catchy",
+      "label": "Catchy"
+    },
+    {
+      "id": "famous",
+      "label": "Famous dialogues"
+    }
+  ],
+  "dialogues": {
+    "hi": [
+      {
+        "id": "hi-slogan-1",
+        "category": "slogan",
+        "text": "स्वच्छ भारत, स्वस्थ भारत।",
+        "audio_url": "/files/talking_head/audio/hi-slogan-1.wav"
+      },
+      {
+        "id": "hi-inspiring-1",
+        "category": "inspiring",
+        "text": "कोशिश करने वालों की कभी हार नहीं होती।",
+        "audio_url": "/files/talking_head/audio/hi-inspiring-1.wav"
+      },
+      {
+        "id": "hi-inspiring-2",
+        "category": "inspiring",
+        "text": "मंज़िल उन्हीं को मिलती है जिनके सपनों में जान होती है।",
+        "audio_url": "/files/talking_head/audio/hi-inspiring-2.wav"
+      },
+      {
+        "id": "hi-funny-1",
+        "category": "funny",
+        "text": "मैं आज भी फेंके हुए पैसे नहीं उठाता।",
+        "audio_url": "/files/talking_head/audio/hi-funny-1.wav"
+      },
+      {
+        "id": "hi-catchy-1",
+        "category": "catchy",
+        "text": "दिल है हिंदुस्तानी।",
+        "audio_url": "/files/talking_head/audio/hi-catchy-1.wav"
+      },
+      {
+        "id": "hi-famous-1",
+        "category": "famous",
+        "text": "कितने आदमी थे?",
+        "audio_url": "/files/talking_head/audio/hi-famous-1.wav"
+      },
+      {
+        "id": "hi-famous-2",
+        "category": "famous",
+        "text": "बड़े बड़े देशों में ऐसी छोटी छोटी बातें होती रहती हैं।",
+        "audio_url": "/files/talking_head/audio/hi-famous-2.wav"
+      },
+      {
+        "id": "hi-famous-3",
+        "category": "famous",
+        "text": "डॉन को पकड़ना मुश्किल ही नहीं, नामुमकिन है।",
+        "audio_url": "/files/talking_head/audio/hi-famous-3.wav"
+      },
+      {
+        "id": "hi-famous-4",
+        "category": "famous",
+        "text": "मेरे पास माँ है।",
+        "audio_url": "/files/talking_head/audio/hi-famous-4.wav"
+      }
+    ],
+    "ta": [
+      {
+        "id": "ta-inspiring-1",
+        "category": "inspiring",
+        "text": "முயற்சி திருவினையாக்கும்.",
+        "audio_url": "/files/talking_head/audio/ta-inspiring-1.wav"
+      },
+      {
+        "id": "ta-inspiring-2",
+        "category": "inspiring",
+        "text": "கனவு காண்பதை நிறுத்தாதே.",
+        "audio_url": "/files/talking_head/audio/ta-inspiring-2.wav"
+      },
+      {
+        "id": "ta-catchy-1",
+        "category": "catchy",
+        "text": "வாழ்க தமிழ்!",
+        "audio_url": "/files/talking_head/audio/ta-catchy-1.wav"
+      },
+      {
+        "id": "ta-famous-1",
+        "category": "famous",
+        "text": "நான் ஒரு தடவ சொன்னா, நூறு தடவ சொன்ன மாதிரி.",
+        "audio_url": "/files/talking_head/audio/ta-famous-1.wav"
+      },
+      {
+        "id": "ta-famous-2",
+        "category": "famous",
+        "text": "என் வழி, தனி வழி.",
+        "audio_url": "/files/talking_head/audio/ta-famous-2.wav"
+      }
+    ],
+    "te": [
+      {
+        "id": "te-inspiring-1",
+        "category": "inspiring",
+        "text": "ప్రయత్నమే విజయానికి మొదటి మెట్టు.",
+        "audio_url": "/files/talking_head/audio/te-inspiring-1.wav"
+      },
+      {
+        "id": "te-catchy-1",
+        "category": "catchy",
+        "text": "జై తెలుగు తల్లి!",
+        "audio_url": "/files/talking_head/audio/te-catchy-1.wav"
+      },
+      {
+        "id": "te-famous-1",
+        "category": "famous",
+        "text": "ఒక్కసారి కమిట్ అయితే, నా మాట నేనే వినను.",
+        "audio_url": "/files/talking_head/audio/te-famous-1.wav"
+      }
+    ],
+    "bn": [
+      {
+        "id": "bn-inspiring-1",
+        "category": "inspiring",
+        "text": "চেষ্টা করলে সবই সম্ভব।",
+        "audio_url": "/files/talking_head/audio/bn-inspiring-1.wav"
+      },
+      {
+        "id": "bn-inspiring-2",
+        "category": "inspiring",
+        "text": "যেখানে দেখিবে ছাই, উড়াইয়া দেখো তাই।",
+        "audio_url": "/files/talking_head/audio/bn-inspiring-2.wav"
+      },
+      {
+        "id": "bn-catchy-1",
+        "category": "catchy",
+        "text": "আমার সোনার বাংলা।",
+        "audio_url": "/files/talking_head/audio/bn-catchy-1.wav"
+      },
+      {
+        "id": "bn-famous-1",
+        "category": "famous",
+        "text": "ফাইট কোনি, ফাইট।",
+        "audio_url": "/files/talking_head/audio/bn-famous-1.wav"
+      }
+    ],
+    "mr": [
+      {
+        "id": "mr-inspiring-1",
+        "category": "inspiring",
+        "text": "प्रयत्ने वाळूचे कण रगडिता तेलही गळे.",
+        "audio_url": "/files/talking_head/audio/mr-inspiring-1.wav"
+      },
+      {
+        "id": "mr-catchy-1",
+        "category": "catchy",
+        "text": "जय महाराष्ट्र!",
+        "audio_url": "/files/talking_head/audio/mr-catchy-1.wav"
+      }
+    ],
+    "gu": [
+      {
+        "id": "gu-inspiring-1",
+        "category": "inspiring",
+        "text": "હિંમતે મર્દા તો મદદે ખુદા.",
+        "audio_url": "/files/talking_head/audio/gu-inspiring-1.wav"
+      },
+      {
+        "id": "gu-catchy-1",
+        "category": "catchy",
+        "text": "જય જય ગરવી ગુજરાત!",
+        "audio_url": "/files/talking_head/audio/gu-catchy-1.wav"
+      },
+      {
+        "id": "gu-famous-1",
+        "category": "famous",
+        "text": "હું ગુજરાતી છું.",
+        "audio_url": "/files/talking_head/audio/gu-famous-1.wav"
+      }
+    ],
+    "kn": [
+      {
+        "id": "kn-inspiring-1",
+        "category": "inspiring",
+        "text": "ಪ್ರಯತ್ನವೇ ಯಶಸ್ಸಿನ ಮೊದಲ ಹೆಜ್ಜೆ.",
+        "audio_url": "/files/talking_head/audio/kn-inspiring-1.wav"
+      },
+      {
+        "id": "kn-catchy-1",
+        "category": "catchy",
+        "text": "ಸಿರಿಗನ್ನಡಂ ಗೆಲ್ಗೆ!",
+        "audio_url": "/files/talking_head/audio/kn-catchy-1.wav"
+      }
+    ],
+    "ml": [
+      {
+        "id": "ml-inspiring-1",
+        "category": "inspiring",
+        "text": "ശ്രമിച്ചാൽ എന്തും സാധ്യമാണ്.",
+        "audio_url": "/files/talking_head/audio/ml-inspiring-1.wav"
+      },
+      {
+        "id": "ml-catchy-1",
+        "category": "catchy",
+        "text": "കേരളം, ദൈവത്തിന്റെ സ്വന്തം നാട്.",
+        "audio_url": "/files/talking_head/audio/ml-catchy-1.wav"
+      },
+      {
+        "id": "ml-famous-1",
+        "category": "famous",
+        "text": "എന്റെ പേര് മങ്ങലശ്ശേരി നീലകണ്ഠൻ.",
+        "audio_url": "/files/talking_head/audio/ml-famous-1.wav"
+      }
+    ],
+    "pa": [
+      {
+        "id": "pa-inspiring-1",
+        "category": "inspiring",
+        "text": "ਮਿਹਨਤ ਕਦੇ ਵਿਅਰਥ ਨਹੀਂ ਜਾਂਦੀ।",
+        "audio_url": "/files/talking_head/audio/pa-inspiring-1.wav"
+      },
+      {
+        "id": "pa-catchy-1",
+        "category": "catchy",
+        "text": "ਜੋ ਬੋਲੇ ਸੋ ਨਿਹਾਲ!",
+        "audio_url": "/files/talking_head/audio/pa-catchy-1.wav"
+      },
+      {
+        "id": "pa-famous-1",
+        "category": "famous",
+        "text": "ਜੱਟ ਦਾ ਮੁਕਾਬਲਾ ਜੱਟ ਨਾਲ ਹੀ।",
+        "audio_url": "/files/talking_head/audio/pa-famous-1.wav"
+      }
+    ],
+    "ur": [
+      {
+        "id": "ur-inspiring-1",
+        "category": "inspiring",
+        "text": "ہمت مرداں مدد خدا۔",
+        "audio_url": "/files/talking_head/audio/ur-inspiring-1.wav"
+      },
+      {
+        "id": "ur-inspiring-2",
+        "category": "inspiring",
+        "text": "خودی کو کر بلند اتنا کہ ہر تقدیر سے پہلے۔",
+        "audio_url": "/files/talking_head/audio/ur-inspiring-2.wav"
+      }
+    ],
+    "sa": [
+      {
+        "id": "sa-inspiring-1",
+        "category": "inspiring",
+        "text": "सत्यमेव जयते।",
+        "audio_url": "/files/talking_head/audio/sa-inspiring-1.wav"
+      },
+      {
+        "id": "sa-inspiring-2",
+        "category": "inspiring",
+        "text": "उद्यमेन हि सिध्यन्ति कार्याणि न मनोरथैः।",
+        "audio_url": "/files/talking_head/audio/sa-inspiring-2.wav"
+      }
+    ],
+    "or": [
+      {
+        "id": "or-inspiring-1",
+        "category": "inspiring",
+        "text": "ଚେଷ୍ଟା କଲେ ସବୁ ସମ୍ଭବ।",
+        "audio_url": "/files/talking_head/audio/or-inspiring-1.wav"
+      },
+      {
+        "id": "or-famous-1",
+        "category": "famous",
+        "text": "ମୁଁ ଓଡ଼ିଆ, ଓଡ଼ିଆ ମୋର ଭାଷା।",
+        "audio_url": "/files/talking_head/audio/or-famous-1.wav"
+      }
+    ],
+    "as": [
+      {
+        "id": "as-inspiring-1",
+        "category": "inspiring",
+        "text": "চেষ্টা কৰিলে সকলো সম্ভৱ।",
+        "audio_url": "/files/talking_head/audio/as-inspiring-1.wav"
+      }
+    ],
+    "ne": [
+      {
+        "id": "ne-inspiring-1",
+        "category": "inspiring",
+        "text": "प्रयास गरे सबै सम्भव छ।",
+        "audio_url": "/files/talking_head/audio/ne-inspiring-1.wav"
+      }
+    ],
+    "en": [
+      {
+        "id": "en-slogan-1",
+        "category": "slogan",
+        "text": "Think different.",
+        "audio_url": "/files/talking_head/audio/en-slogan-1.wav"
+      },
+      {
+        "id": "en-slogan-2",
+        "category": "slogan",
+        "text": "Just do it.",
+        "audio_url": "/files/talking_head/audio/en-slogan-2.wav"
+      },
+      {
+        "id": "en-inspiring-1",
+        "category": "inspiring",
+        "text": "The only way to do great work is to love what you do.",
+        "audio_url": "/files/talking_head/audio/en-inspiring-1.wav"
+      },
+      {
+        "id": "en-inspiring-2",
+        "category": "inspiring",
+        "text": "Fall seven times, stand up eight.",
+        "audio_url": "/files/talking_head/audio/en-inspiring-2.wav"
+      },
+      {
+        "id": "en-funny-1",
+        "category": "funny",
+        "text": "I'm not arguing, I'm just explaining why I'm right.",
+        "audio_url": "/files/talking_head/audio/en-funny-1.wav"
+      },
+      {
+        "id": "en-catchy-1",
+        "category": "catchy",
+        "text": "Say it once, say it loud.",
+        "audio_url": "/files/talking_head/audio/en-catchy-1.wav"
+      },
+      {
+        "id": "en-famous-1",
+        "category": "famous",
+        "text": "No, you don't understand.",
+        "audio_url": "/files/talking_head/audio/en-famous-1.wav"
+      },
+      {
+        "id": "en-famous-2",
+        "category": "famous",
+        "text": "I don't like violence, but violence likes me.",
+        "audio_url": "/files/talking_head/audio/en-famous-2.wav"
+      }
+    ]
+  }
+}

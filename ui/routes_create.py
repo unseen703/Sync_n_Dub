@@ -32,14 +32,17 @@ the refusal gives.
 from __future__ import annotations
 
 import datetime as _dt
+import json
 import logging
 import os
 import sys
+import uuid as _uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import (APIRouter, Depends, File, HTTPException, Response,
+                     UploadFile, status)
 from fastapi.concurrency import run_in_threadpool
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -141,14 +144,24 @@ def check_window(window, duration_s: Optional[float]) -> Optional[Dict[str, floa
 
 def check_lipsync_cap(lipsynced_s: Optional[float], *, model: Optional[str]
                       ) -> None:
-    """The compute cap, on the lip-synced portion only."""
+    """The compute cap, on the lip-synced portion only.
+
+    **No longer reached from a submission.** Since 2026-10-20 nothing
+    lip-syncs at submit time, so `model` is always None here and this
+    returns immediately. The live cap moved to
+    `ui/routes_edits._lipsync_blockers`, which is where the GPU hours are
+    actually committed and where the model is known.
+
+    Kept — rather than deleted — because it still correctly caps any caller
+    that DOES name a model, and because deleting it would quietly remove the
+    only enforcement on an upload path that might grow one later.
+    """
     if not model or not lipsynced_s:
         return                      # audio-only dubs are uncapped
     cap = max_lipsync_s()
     if lipsynced_s <= cap:
         return
-    est = presets.estimate_runtime(lipsynced_s, lipsync_model=model,
-                                   restore_model="codeformer")
+    est = presets.estimate_runtime(lipsynced_s, lipsync_model=model)
     raise _bad(
         f"That would lip-sync {lipsynced_s / 60:.0f} minutes of video, and "
         f"lip-sync is capped at {cap // 60} minutes here. This is a compute "
@@ -181,6 +194,24 @@ def check_tts(tts: Optional[str]) -> str:
                if engine == "edge" else "")
         )
     return engine
+
+
+def check_style(style: Optional[str]) -> Optional[str]:
+    """One of the four the form offers, or None for the neutral read.
+
+    Validated against `ui.speakers.SUBMIT_STYLES` rather than waved
+    through: an unknown value is a **422 at the TTS engine**, mid-run,
+    after ASR and MT have been paid for.
+    """
+    from .speakers import SUBMIT_STYLES
+
+    v = (style or "").strip()
+    if not v:
+        return None
+    if v not in SUBMIT_STYLES:
+        raise _bad(f"{v!r} is not an offered delivery type. Choose one of: "
+                   f"{', '.join(SUBMIT_STYLES)}.")
+    return v
 
 
 def check_language(code: str, tts: Optional[str]) -> str:
@@ -224,18 +255,24 @@ async def youtube_probe(req: ProbeRequest,
     """What the form needs to render: title, duration, poster, estimates."""
     meta = await _probe_checked(req.url)
     dur = float(meta.get("duration_s") or 0.0)
+    # The submission estimate is the DUB alone — no preset lip-syncs any
+    # more, so there is no model to cost here and no "auto" to guess at.
     estimates = {}
     for pid, spec in presets.PRESETS.items():
-        # "auto" is costed at wav2lip here — the cheap end — because this is
-        # the *form's* estimate and the probe has not run yet. The cap in
-        # `create_job` costs it at musetalk instead, deliberately: an
-        # estimate may be optimistic, a limit may not.
-        model = {"auto": "wav2lip"}.get(spec["lipsync"], spec["lipsync"])
-        est = presets.estimate_runtime(dur, lipsync_model=model,
-                                       restore_model=req.restore_model)
+        est = presets.estimate_runtime(dur, lipsync_model=spec["lipsync"])
         est.update(label=spec["label"], note=spec["note"])
         estimates[pid] = est
     meta["estimates"] = estimates
+
+    # Lip-sync is quoted SEPARATELY and PER MODEL, because it is now a second
+    # submission the operator makes after reviewing the dub. The models
+    # differ by roughly 20x on this host (wav2lip 3-5x clip length,
+    # musetalk 8-21x, latentsync ~83x) and one blended number would hide
+    # exactly the difference the choice turns on.
+    from models.lipsync import available_models
+    meta["lipsync_estimates"] = {
+        m: presets.estimate_runtime(dur, lipsync_model=m)
+        for m in available_models()}
     meta["max_lipsync_s"] = max_lipsync_s()
     return meta
 
@@ -244,10 +281,145 @@ async def youtube_probe(req: ProbeRequest,
 # create
 # ---------------------------------------------------------------------------
 
+async def _resolve_source(req: JobRequest) -> Dict[str, Any]:
+    """A URL or a staged upload, reduced to one metadata dict.
+
+    Both branches answer with `duration_s`, `title` and `webpage_url`, so
+    `create_job` below does not branch on where the video came from.
+    """
+    has_url = bool((req.url or "").strip())
+    if has_url == bool(req.upload_id):
+        raise _bad("Give either a link or an uploaded file — not both, and "
+                   "not neither.")
+    if has_url:
+        return await _probe_checked(req.url)
+
+    rec_path = DATA_DIR / "uploads" / f"{req.upload_id}.json"
+    if not rec_path.is_file():
+        raise _bad("That upload is no longer staged. Upload the file again.")
+    rec = json.loads(rec_path.read_text())
+    src = Path(rec["path"])
+    if not src.is_file():
+        raise _bad("The uploaded file is gone from the staging area. "
+                   "Upload it again.")
+    return {
+        "duration_s": rec.get("duration_s"),
+        "title": rec.get("title"),
+        "webpage_url": None,
+        "upload_id": req.upload_id,
+        "source_path": str(src),
+        "live_status": None,
+    }
+
+
+@router.post("/api/uploads", status_code=status.HTTP_201_CREATED)
+async def upload_video(file: UploadFile = File(...),
+                       _: None = Depends(basic_auth)) -> Dict[str, Any]:
+    """Accept a local video and answer with the same shape as the probe.
+
+    The form treats an upload and a YouTube link identically from here on:
+    both produce `{duration_s, title, estimates, max_lipsync_s}`, so the
+    range picker and the quote need no second code path.
+
+    `check_url` is NOT consulted. It is an SSRF control over hosts this
+    server will *fetch from*, and an upload is not a fetch — widening it to
+    admit a local path would turn an outbound guard into a local-file read.
+    The upload's own constraints live in `ui/uploads.py`.
+
+    The bytes land in a staging folder, not in a job folder: no job exists
+    until `POST /api/jobs` validates language, window and cap. The returned
+    `upload_id` is what ties the two calls together, and it is a uuid this
+    server generated rather than anything the client sent.
+    """
+    from . import uploads
+
+    try:
+        ext = uploads.check_ext(file.filename or "")
+    except ValueError as e:
+        raise _bad(str(e))
+
+    staging = DATA_DIR / "uploads"
+    staging.mkdir(parents=True, exist_ok=True)
+    upload_id = _uuid.uuid4().hex
+    dest = staging / f"{upload_id}{ext}"
+
+    cap = uploads.max_upload_mb() * 1024 * 1024
+    written = 0
+    try:
+        with dest.open("wb") as fh:
+            while True:
+                chunk = await file.read(1024 * 1024)
+                if not chunk:
+                    break
+                written += len(chunk)
+                if written > cap:
+                    # Stop at the cap rather than after it: a 4 GiB default
+                    # is already generous and buffering past it is how a
+                    # loopback UI fills a disk.
+                    raise _TooBig()
+                fh.write(chunk)
+    except _TooBig:
+        dest.unlink(missing_ok=True)
+        raise _bad(f"That file is larger than the "
+                   f"{uploads.max_upload_mb()} MB upload limit. Cut the "
+                   f"section you want first, or raise "
+                   f"DUBBING_UI_MAX_UPLOAD_MB.")
+    except Exception:
+        dest.unlink(missing_ok=True)
+        raise
+    finally:
+        await file.close()
+
+    if written == 0:
+        dest.unlink(missing_ok=True)
+        raise _bad("That upload was empty.")
+
+    try:
+        info = await run_in_threadpool(uploads.probe_file, dest)
+    except Exception as e:
+        # A file ffprobe cannot read is not a job worth allocating, and the
+        # staged bytes are dropped rather than left to accumulate.
+        dest.unlink(missing_ok=True)
+        raise _bad(str(e))
+
+    title = uploads.safe_stem(file.filename or "")
+    dur = float(info["duration_s"])
+    estimates = {}
+    for pid, spec in presets.PRESETS.items():
+        model = {"auto": "wav2lip"}.get(spec["lipsync"], spec["lipsync"])
+        est = presets.estimate_runtime(dur, lipsync_model=model)
+        est.update(label=spec["label"], note=spec["note"])
+        estimates[pid] = est
+
+    (staging / f"{upload_id}.json").write_text(json.dumps({
+        "upload_id": upload_id, "path": str(dest),
+        "original_filename": file.filename, "title": title,
+        "created_at": _now(), **info,
+    }, indent=2))
+    log.info("upload %s: %s (%.1f MB, %.1fs)", upload_id, file.filename,
+             written / 1e6, dur)
+
+    return {
+        "upload_id": upload_id,
+        "source": "upload",
+        "title": title,
+        "duration_s": dur,
+        "width": info.get("width"), "height": info.get("height"),
+        "has_audio": info.get("has_audio"),
+        "size_bytes": info.get("size_bytes"),
+        "estimates": estimates,
+        "max_lipsync_s": max_lipsync_s(),
+    }
+
+
+class _TooBig(Exception):
+    """Internal: the upload passed the size cap mid-stream."""
+
+
 @router.post("/api/jobs", status_code=status.HTTP_201_CREATED)
 async def create_job(req: JobRequest, response: Response,
                      _: None = Depends(basic_auth)) -> Dict[str, Any]:
-    meta = await _probe_checked(req.url)
+    meta = await _resolve_source(req)
 
     duration_s = meta.get("duration_s")
     window = check_window(req.window, duration_s)
@@ -280,6 +452,7 @@ async def create_job(req: JobRequest, response: Response,
 
     tts = check_tts(req.tts)
     language = check_language(req.target_language, tts)
+    style = check_style(req.style)
 
     # ---- everything validated; now allocate ----------------------------
     kwargs = presets.build_kwargs(
@@ -288,32 +461,41 @@ async def create_job(req: JobRequest, response: Response,
         # means "take the preset's choice" and `standard`'s choice is auto.
         lipsync_model=("off" if lipsync_off else requested_ls),
         num_speakers=req.num_speakers,
-        skip_stems=req.skip_stems, restore_model=req.restore_model,
+        skip_stems=req.skip_stems, style=style,
+        source_language=(req.source_language or None),
     )
     cfg = presets.plan_config(kwargs)
     # The planned config must describe the run that will happen, including a
     # lip-sync stage whose model is not known until the face probe.
     if requested_ls:
         cfg["lipsync"] = cost_model
-        cfg["restore"] = req.restore_model
+
+    # What the pipeline is pointed at: the page URL for a link, the staged
+    # file's PATH for an upload. `backend.downloader.resolve_input` already
+    # accepts either, so nothing below this line branches on the source.
+    source_input = (meta.get("source_path")
+                    or meta.get("webpage_url") or req.url)
 
     from backend.jobs import allocate, new_job_id
-    job_id = new_job_id(req.url, cfg)
+    job_id = new_job_id(source_input, cfg)
     job = await run_in_threadpool(
-        allocate, DATA_DIR, req.url, cfg,
+        allocate, DATA_DIR, source_input, cfg,
         job_id=job_id, argv=["ui", job_id],
     )
     job_root = Path(job.root)
 
     _write_meta(job_root, meta, window=window, preset=preset,
-                lipsync_requested=requested_ls)
-    await run_in_threadpool(ytmeta.fetch_thumbnail, meta, job_root)
+                lipsync_requested=requested_ls,
+                is_upload=bool(req.upload_id))
+    if not req.upload_id:
+        await run_in_threadpool(ytmeta.fetch_thumbnail, meta, job_root)
 
     request_doc = {
         "version": 1,
         "job_id": job_id,
         "created_at": _now(),
-        "url": meta.get("webpage_url") or req.url,
+        "url": source_input,
+        "upload_id": req.upload_id,
         "target_language": language,
         "window": window,
         "preset": preset,
@@ -340,7 +522,7 @@ async def create_job(req: JobRequest, response: Response,
         "target_language": language,
         "preset": preset,
         "estimate": presets.estimate_runtime(
-            clip_s, lipsync_model=cost_model, restore_model=req.restore_model),
+            clip_s, lipsync_model=cost_model),
     }
     if outcome["state"] == "queued":
         response.status_code = status.HTTP_202_ACCEPTED
@@ -358,7 +540,8 @@ def _pre_stages() -> List[str]:
 
 def _write_meta(job_root: Path, meta: Dict[str, Any], *,
                 window: Optional[Dict[str, float]], preset: str,
-                lipsync_requested: Optional[str]) -> None:
+                lipsync_requested: Optional[str],
+                is_upload: bool = False) -> None:
     """`<job>/meta.json` — written before the pipeline starts.
 
     The card needs a title while the download is still running, which is
@@ -372,8 +555,13 @@ def _write_meta(job_root: Path, meta: Dict[str, Any], *,
         # The name the card shows. Resolved here rather than in the UI so
         # that every reader — the job list, the spec panel, a later CLI
         # tool — agrees on what this job is called.
-        "display_name": ytmeta.display_name(meta, url=str(meta.get("webpage_url") or "")),
-        "source": "youtube",
+        # An upload has no page to name it, so its sanitised filename is
+        # the title; `ytmeta.display_name` would fall back to a URL slug
+        # that does not exist.
+        "display_name": (meta.get("title") if is_upload else
+                         ytmeta.display_name(
+                             meta, url=str(meta.get("webpage_url") or ""))),
+        "source": "upload" if is_upload else "youtube",
         "window": window,
         "preset": preset,
         "lipsync_requested": lipsync_requested,

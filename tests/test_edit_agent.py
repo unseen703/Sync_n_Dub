@@ -26,6 +26,13 @@ import pytest
 from backend import edits as E
 from backend import edit_agent as A
 
+#: Repo root, for the tests that assert against a module's SOURCE rather
+#: than its behaviour. Several of those referenced a bare `REPO` that was
+#: never defined, so they failed with NameError before reaching the thing
+#: they were checking — a test that cannot run is not a guard.
+REPO = Path(__file__).resolve().parent.parent
+REPO_ROOT = REPO
+
 
 # ---------------------------------------------------------------------------
 # fixtures
@@ -678,3 +685,264 @@ def test_rerun_replays_the_runs_speed_setup(tmp_path, monkeypatch):
     assert seen["timing_params"]["max_tempo"] == pytest.approx(1.4)
     assert seen["timing_params"]["safety_margin_s"] == 0.0
     assert seen["timing_params"]["use_target_duration"] is True
+
+
+# ---------------------------------------------------------------------------
+# The system prompt and the op registry must agree
+# ---------------------------------------------------------------------------
+#
+# As of 2026-10-19 the operation catalogue lives in `_SYSTEM` as fixed text
+# instead of being injected into every user turn from `op_catalogue()`. It
+# costs MORE tokens, not fewer (1653 -> 2156 input tokens per parse, measured
+# on Langfuse) because the new prompt is far longer than the old catalogue;
+# the win is correctness. It also costs a drift risk the generated version did
+# not have: add an op to `backend/edits.py` and the prompt will not know.
+#
+# The old arrangement had the mirror-image bug and nobody noticed: `OPS`
+# registers NINE ops, `op_catalogue()` advertised EIGHT, and `set_speaker`
+# was invisible to the model for as long as that lasted.
+
+def test_the_system_prompt_lists_every_registered_op():
+    import backend.edits as E
+    from backend.edit_agent import _SYSTEM
+
+    missing = sorted(op for op in E.OPS if op not in _SYSTEM)
+    assert not missing, (
+        f"{missing} are registered in backend/edits.py but absent from the "
+        f"system prompt, so the model can never emit them")
+
+
+def test_the_system_prompt_invents_no_ops():
+    """The other direction: a prompt advertising an op the pipeline does not
+    implement produces a confident request that is then rejected."""
+    import re
+    import backend.edits as E
+    from backend.edit_agent import _SYSTEM
+
+    # The numbered "## AVAILABLE OPERATIONS" entries, e.g. "1. set_text".
+    advertised = set(re.findall(r"^\s*\d+\.\s+([a-z_]+)\s*$", _SYSTEM, re.M))
+    assert advertised, "could not find the numbered op list in the prompt"
+    unknown = sorted(advertised - set(E.OPS))
+    assert not unknown, f"the prompt advertises unimplemented ops: {unknown}"
+
+
+def test_the_catalogue_is_not_repeated_in_the_user_turn():
+    """It is fixed text, so it belongs in the system turn. Sending it in
+    both places would be the worst of both — the drift risk AND the tokens."""
+    import backend.edit_agent as A
+    src = Path(A.__file__).read_text()
+    assert "Available ops:" not in src, (
+        "the op catalogue is being injected into the user message again")
+
+
+# ---------------------------------------------------------------------------
+# interpretability: sample prompts, and an honest "I could not read that"
+# ---------------------------------------------------------------------------
+
+def test_sample_prompts_are_phrasings_not_op_names():
+    """What a failed parse shows the user must be typeable.
+
+    `lipsync_window` and `set_speaker` are the agent's vocabulary. Listing
+    them tells the user what the CODE is called, which is not the question
+    they asked. Every OpSpec already carries worked examples written the way
+    a person types them.
+    """
+    from backend.edits import OPS, sample_prompts, sample_prompts_text
+    prompts = [p for p, _ in sample_prompts()]
+    assert len(prompts) >= 10
+    # Only the snake_case identifiers are machine-only. `retranslate` is an
+    # op name AND an ordinary English verb someone would type, so banning
+    # every op name outright would flag a perfectly good phrasing -- the
+    # test's job is to catch `set_speaker` and `lipsync_window`, not to make
+    # the examples avoid real words.
+    machine_only = [n for n in OPS if "_" in n]
+    assert machine_only, "expected snake_case op names to exist"
+    leaked = [(n, p) for p in prompts for n in machine_only if n in p]
+    assert not leaked, f"a sample prompt leaks an internal op name: {leaked}"
+    text = sample_prompts_text()
+    assert "from 0:30 to 0:45 that is the second speaker" in text
+
+
+def test_llm_abstention_is_carried_not_overridden(monkeypatch):
+    """An empty ops array from the LLM is a verdict, not a miss.
+
+    Rule 8 of the system prompt tells the model to return `{"ops": []}`
+    instead of guessing when a request is ambiguous. The old code logged
+    that and ran the regex parser anyway -- so the component that had read
+    the job's real speakers and cues said "I cannot tell what this means"
+    and a pattern match silently overrode it. A regex cannot detect
+    ambiguity; it matches or it does not, and matching is not being right.
+    """
+    import backend.edit_agent as A
+
+    class _Client:
+        def available(self):
+            return True
+
+    monkeypatch.setattr(A, "_llm_parse", lambda *a, **k: [])
+    monkeypatch.setattr(
+        A, "_rule_parse",
+        lambda nlq: [A.EditOp(op="set_speed", scope=A.Scope(all=True),
+                              params={"factor": 1.2})])
+    ops, source = A.parse_request("do the thing with the bit",
+                                  data={"segments": []}, client=_Client())
+    assert ops, "the regex result should still be offered"
+    assert source == "rules-unverified", (
+        "an unverified reading must be labelled so the caller can warn")
+
+
+def test_an_uninterpretable_request_offers_examples(monkeypatch):
+    """The error names phrasings that work, not the op registry."""
+    import backend.edit_agent as A
+
+    class _Client:
+        def available(self):
+            return True
+
+    monkeypatch.setattr(A, "_llm_parse", lambda *a, **k: [])
+    monkeypatch.setattr(A, "_rule_parse", lambda nlq: [])
+    with pytest.raises(A.EditError) as e:
+        A.parse_request("qqq", data={"segments": []}, client=_Client())
+    msg = str(e.value)
+    assert "could not interpret" in msg
+    assert "Try one of these shapes" in msg
+    assert '"' in msg, "no concrete phrasing offered"
+
+
+def test_set_speaker_never_reruns_diarization():
+    """Reattributing a stretch must not re-diarize the video.
+
+    The user names a window and the speaker it really belongs to; that is a
+    voice-casting change, not a reason to recompute who spoke when across
+    the whole file. `STAGE_ORDER` starts at code-mix, so diarization is not
+    in the rerun chain at all -- this pins that it stays that way.
+    """
+    from backend.edits import OPS, STAGE_ORDER
+    assert OPS["set_speaker"].dirty_from == "voices"
+    assert "diarization" not in STAGE_ORDER and "asr" not in STAGE_ORDER
+    assert STAGE_ORDER.index("voices") > 0
+
+
+def test_every_op_has_a_plain_language_description():
+    """A new op must not surface in the UI as a bare identifier.
+
+    The sidebar lists what the agent can do in the user's words. If an op is
+    added to the registry and nobody writes its description, the honest
+    failure is here rather than a panel showing `lipsync_window` to someone
+    who has never read the source.
+    """
+    from backend.edits import OPS, USER_ACTIONS, action_catalogue
+    missing = sorted(set(OPS) - set(USER_ACTIONS))
+    assert not missing, f"ops with no user-facing description: {missing}"
+    cat = action_catalogue()
+    assert len(cat) == len(OPS)
+    for row in cat:
+        for key in ("title", "takes", "changes", "replays"):
+            assert row.get(key), f"{row['op']} has an empty {key}"
+        assert row["op"] not in row["title"], (
+            f"{row['op']}: the title leaks the internal name")
+
+
+def test_replay_cost_is_derived_from_dirty_from_not_authored():
+    """The "what it costs" half must track the rerun logic automatically.
+
+    Authoring both halves by hand is how a description comes to promise a
+    cheaper re-render than the op really causes. `lipsync_window` only
+    re-syncs; `code_mix` goes all the way back to translation. Those two
+    must not be able to drift into saying the same thing.
+    """
+    from backend.edits import OPS, STAGE_PLAIN, action_catalogue
+    rows = {r["op"]: r for r in action_catalogue()}
+    assert rows["lipsync_window"]["replays"] == STAGE_PLAIN["lipsync"]
+    assert rows["code_mix"]["replays"] == STAGE_PLAIN["codemix"]
+    assert rows["lipsync_window"]["replays"] != rows["code_mix"]["replays"]
+    for op, spec in OPS.items():
+        assert rows[op]["replays"] == STAGE_PLAIN[spec.dirty_from]
+
+
+# ---------------------------------------------------------------------------
+# A rewritten line is spoken verbatim, so its wrapper has to come off
+# ---------------------------------------------------------------------------
+#
+# All three rewrite ops say "reply with the line ONLY", and when a model does
+# not obey, the failure is SILENT: the stray character is simply read aloud by
+# the TTS engine. Measured on gemma-3-12b, a retranslate came back as
+# `': cloud और इसी तरह …'` — the whole correct line behind a colon.
+
+def test_a_rewritten_line_is_stripped_of_its_wrapper():
+    from backend.edits import _clean_rewrite
+
+    assert _clean_rewrite(": cloud और इसी तरह") == "cloud और इसी तरह"
+    assert _clean_rewrite("  — ये सशर्त हैं।") == "ये सशर्त हैं।"
+    assert _clean_rewrite('"quoted line"') == "quoted line"
+    assert _clean_rewrite("```\nfenced\n```") == "fenced"
+    assert _clean_rewrite("clean line") == "clean line"
+    assert _clean_rewrite(None) == ""
+
+
+def test_the_sanitiser_keeps_sentence_punctuation():
+    """Only the LEADING wrapper goes. A Devanagari danda or a question mark
+    is part of the line and removing it would change the delivery."""
+    from backend.edits import _clean_rewrite
+
+    assert _clean_rewrite("ये सशर्त हैं।") == "ये सशर्त हैं।"
+    assert _clean_rewrite("क्या आप हैं?") == "क्या आप हैं?"
+
+
+def test_every_rewrite_op_uses_the_sanitiser():
+    """Three ops call the rewriter; one of them skipping the clean-up would
+    be invisible until a stray colon turned up in the audio."""
+    src = (REPO_ROOT / "backend" / "edits.py").read_text() \
+        if "REPO_ROOT" in dir() else Path(__import__(
+            "backend.edits", fromlist=["x"]).__file__).read_text()
+    # Four sites now: retranslate, set_tone, code_mix, and replace_term's
+    # one-word translation. The count is asserted rather than ">= 1" so that
+    # a FIFTH rewrite added later also has to come past this test.
+    assert src.count("_clean_rewrite(ctx.rewriter(") == 4
+    assert 'ctx.rewriter(system, user) or ""' not in src
+
+
+def test_retranslate_asks_for_the_complete_line():
+    """A word-level instruction used to return just that word, replacing the
+    whole cue — a destroyed line rather than a failed edit."""
+    src = Path(__import__("backend.edits", fromlist=["x"]).__file__).read_text()
+    assert "COMPLETE corrected line" in src
+    assert "never a fragment" in src
+
+
+def test_lipsync_replay_passes_the_jobs_recorded_settings():
+    """`POST .../lipsync` must render with the settings the job recorded.
+
+    `ui/presets.py` writes `lipsync_batch_size` at SUBMIT and says it does
+    so "because the replay that renders it rebuilds its kwargs from this
+    job's manifest config". For a while that was not true: the replay
+    called `run_lipsync` with no `lipsync_kwargs` at all, so the recorded
+    value went to the manifest and nowhere else, and the adapter used its
+    own default instead.
+
+    That is invisible while the two numbers agree and silent when they
+    stop. Batch size is a VRAM knob on a shared box, so "silent" means a
+    render that OOMs and reports only "produced no mp4".
+    """
+    src = (REPO / "backend" / "edit_agent.py").read_text()
+    fn = src[src.index("def _rerun_lipsync_only"):]
+    fn = fn[:fn.index("\ndef ")]
+    assert "lipsync_kwargs=" in fn, (
+        "the lip-sync replay renders without the job's recorded settings")
+    assert 'cfg.get("lipsync_batch_size")' in fn, (
+        "the recorded batch size is not read back from the manifest")
+
+
+def test_lipsync_replay_inherits_the_segment_default():
+    """The replay must not opt out of segmenting.
+
+    `run_lipsync(max_segment_s=120)` is what bounds peak RAM to the
+    segment rather than the clip. Passing an explicit 0 here -- or
+    threading a different value -- would give the UI's own lip-sync path
+    the unbounded memory curve that a 7-minute clip cannot survive.
+    """
+    src = (REPO / "backend" / "edit_agent.py").read_text()
+    fn = src[src.index("def _rerun_lipsync_only"):]
+    fn = fn[:fn.index("\ndef ")]
+    assert "max_segment_s" not in fn, (
+        "the replay overrides max_segment_s; it should inherit the default")

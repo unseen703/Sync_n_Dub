@@ -42,7 +42,7 @@ def synthesize_segments(
     out_dir: Path,
     stretched_dir: Optional[Path] = None,
     sample_rate: int = 24000,
-    max_stretch: float = 0.10,
+    max_stretch: float = 0.20,
     tts_kwargs: Optional[dict] = None,
     out_json: Optional[Path] = None,
     stretch_backend: str = "auto",

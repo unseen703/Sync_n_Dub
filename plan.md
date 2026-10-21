@@ -185,7 +185,7 @@ This is the part most open dubbing tools skip, and it is what makes multi-speake
 1. **Detect** faces per frame. RetinaFace or SCRFD for accuracy; MediaPipe when speed matters more.
 2. **Track** across frames into stable identities. ByteTrack is the default — it associates on detection confidence including low-score boxes, which handles the brief occlusions and profile turns that break simpler trackers. DeepSORT as the alternative when appearance re-identification is needed across long gaps.
 3. **Detect the active speaker.** [TalkNet](https://github.com/TaoRuijie/TalkNet-ASD) scores, per frame per face track, whether that face is speaking, from audio-visual cues. [TS-TalkNet](https://github.com/Jiang-Yidi/TS-TalkNet) (Interspeech 2023) extends it with a target-speaker enrolment embedding — useful precisely when several faces are visible and the audio is mixed.
-4. **Assign.** For each diarized turn, average the ASD score of every face track over that interval. Solve the turn × track matrix with Hungarian matching rather than independent argmax, so two turns cannot claim the same face in overlapping time. Below a score threshold, mark the segment `on_screen: false` — narration and off-camera speech must not be animated.
+4. **Assign.** For each diarized turn, average the ASD score of every face track over that interval. Solve the turn × track matrix with Hungarian matching rather than independent argmax, so two turns cannot claim the same face in overlapping time. Below a score threshold, the segment is marked `on_screen: false`, which keeps narration and off-camera speech out of the animated set.
 
 The output is `segment.face_track`, which is the only thing the lip-sync stage needs and the only way it can be correct in a panel or interview.
 
@@ -378,9 +378,9 @@ Annotate: speaker turns with timestamps; verbatim transcript; word boundaries on
 | ArcFace cosine | identity retention through lip-sync | |
 | Human MOS | naturalness, sync, comprehension | the arbiter |
 
-**Do not gate on standalone MOS predictors.** UTMOS and its relatives did not track human preference in the COMPASS benchmark. Smoke test only.
+**Standalone MOS predictors are not a gate here.** UTMOS and its relatives did not track human preference in the COMPASS benchmark, so they serve as a smoke test only.
 
-**Always include the no-op baseline** in E15 — original video with new audio. If a lip-sync model does not beat it on human MOS, it is adding artefacts, not value.
+**E15 includes the no-op baseline** — original video with new audio. A lip-sync model that does not beat it on human MOS is adding artefacts, not value.
 
 ---
 
@@ -473,7 +473,7 @@ P0–P1 run in parallel with P2 — annotation is human time, implementation is 
 | Risk | Mitigation |
 | --- | --- |
 | Rate limits throttle ablation sweeps | Client adapts concurrency from `x-ratelimit-*` headers; self-host Bodhan weights for sweeps |
-| Bodhan gives no word timestamps | Always run the local CTC aligner; never depend on API timestamps |
+| Bodhan gives no word timestamps | The local CTC aligner supplies them; API timestamps are not a dependency |
 | Diarization error puts the wrong voice on a line **and** animates the wrong face | E17 oracle ablation quantifies it; low-confidence segments route to review |
 | ASD fails in panels with 3+ faces | E3 measures this explicitly by face count; fall back to `on_screen: false` rather than guessing |
 | Path A code-mixing right on average, wrong on the terms that matter | Termbase override exists under both paths; E9 measures rather than assumes |

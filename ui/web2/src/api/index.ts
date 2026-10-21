@@ -54,9 +54,23 @@ export const probeYouTube: typeof live.probeYouTube = mockWrites
   ? (url: string) => mock.probeYouTube(url)
   : live.probeYouTube;
 export const createJob: typeof live.createJob = mockWrites ? mock.createJob : live.createJob;
+export const uploadVideo: typeof live.uploadVideo =
+  mockWrites ? mock.uploadVideo : live.uploadVideo;
+
+// The agent routes are read/stage only — `agentSend` writes `pending.json`
+// and nothing else, so there is no mock: a staged plan that did not stage
+// is exactly the kind of false success the mock chips exist to flag.
+export const getAgentParams = live.getAgentParams;
+export const getAgentScript = live.getAgentScript;
+export const agentSend = live.agentSend;
 export const cancelJob: typeof live.cancelJob = mockWrites ? mock.cancelJob : live.cancelJob;
 export const getEdits: typeof live.getEdits = mockWrites ? mock.getEdits : live.getEdits;
 export const stageEdits: typeof live.stageEdits = mockWrites ? mock.stageEdits : live.stageEdits;
+// Hand-typed script lines. Staging only, like `stageEdits` -- `applyEdits`
+// remains the single call that spends GPU time. No mock: the mock writer
+// has no notion of per-segment text, and silently accepting an edit that
+// goes nowhere is worse in a mocked UI than the call simply failing.
+export const stageScript = live.stageScript;
 export const discardEdits: typeof live.discardEdits = mockWrites
   ? mock.discardEdits
   : live.discardEdits;
@@ -64,3 +78,11 @@ export const applyEdits: typeof live.applyEdits = mockWrites ? mock.applyEdits :
 export const setSpeakerLabel: typeof live.setSpeakerLabel = mockWrites
   ? mock.setSpeakerLabel
   : live.setSpeakerLabel;
+
+// Lip-sync. NOT mocked, for the same reason the agent routes are not: this
+// is the one call that commits GPU hours, and a mocked "started" that
+// rendered nothing is exactly the false success the chips exist to flag.
+// The readiness read stays live alongside it so the panel cannot show a
+// green button against a server that would refuse.
+export const getLipsyncReadiness = live.getLipsyncReadiness;
+export const startLipsync = live.startLipsync;

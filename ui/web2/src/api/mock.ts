@@ -24,6 +24,7 @@ import type {
   Options,
   PendingEdit,
   ProbeResult,
+  UploadResult,
   Progress,
   Spec,
   SpeakerLabels,
@@ -52,13 +53,17 @@ export async function probeYouTube(url: string): Promise<ProbeResult> {
     thumbnail_url: null,
     live_status: null,
     webpage_url: `https://www.youtube.com/watch?v=${m[1]}`,
+    // One preset since 2026-10-20, and it does not lip-sync.
     estimates: {
-      draft: { low_s: 90, high_s: 150, text: 'about 2 minutes',
-               basis: 'Mocked.', label: 'Draft', note: 'Audio only' },
-      standard: { low_s: 2900, high_s: 5800, text: 'about 48 to 97 minutes',
-                  basis: 'Mocked.', label: 'Standard', note: 'wav2lip + CodeFormer' },
-      best: { low_s: 5800, high_s: 15200, text: 'about 1.6 to 4.2 hours',
-              basis: 'Mocked.', label: 'Best', note: 'MuseTalk' },
+      dub: { low_s: 90, high_s: 150, text: 'about 2 minutes',
+             basis: 'Mocked.', label: 'Dub the audio', note: 'Audio only' },
+    },
+    // Quoted separately, because lip-sync is a second submission.
+    lipsync_estimates: {
+      wav2lip: { low_s: 2900, high_s: 5800, text: 'about 48 to 97 minutes',
+                 basis: 'Mocked.', label: 'wav2lip', note: '3-5x' },
+      musetalk: { low_s: 5800, high_s: 15200, text: 'about 1.6 to 4.2 hours',
+                  basis: 'Mocked.', label: 'musetalk', note: '8-21x' },
     },
     max_lipsync_s: 1200,
   };
@@ -66,6 +71,27 @@ export async function probeYouTube(url: string): Promise<ProbeResult> {
 
 /** Jobs created in mock mode are remembered so the rail can show them. */
 const invented: CreateJobResult[] = [];
+
+export async function uploadVideo(file: File): Promise<UploadResult> {
+  await sleep(300);
+  return {
+    upload_id: 'f'.repeat(32),
+    source: 'upload',
+    title: file.name.replace(/\.[^.]+$/, ''),
+    duration_s: 92,
+    width: 1920, height: 1080, has_audio: true,
+    size_bytes: file.size,
+    estimates: {
+      dub: { low_s: 300, high_s: 700, text: 'about 5 minutes to 12 minutes',
+             basis: 'Mocked.', label: 'Dub the audio', note: 'Audio only' },
+    },
+    lipsync_estimates: {
+      wav2lip: { low_s: 300, high_s: 500, text: 'about 5 to 8 minutes',
+                 basis: 'Mocked.', label: 'wav2lip', note: '3-5x' },
+    },
+    max_lipsync_s: 1200,
+  };
+}
 
 export async function createJob(p: CreateJobRequest): Promise<CreateJobResult> {
   await sleep(300);
@@ -448,12 +474,21 @@ export async function getOptions(_tts?: string): Promise<Options> {
     ],
     // One row, matching the real `/api/options`: the form states the engine
     // rather than offering a choice of engine.
+    default_source_language: 'en',
+    styles: [
+      { value: 'TV style news', label: 'TV-style news' },
+      { value: 'advertisements', label: 'Advertisements' },
+      { value: 'educational lecture', label: 'Educational lecture' },
+      { value: "children's stories", label: "Children's stories" },
+    ],
     tts_engines: [
       { id: 'bodhan', label: 'Bodhan Indic voices', supports_tone: true,
         note: '22 Indian languages · a distinct voice per speaker' },
     ],
+    // No `auto` row. The model is named by the operator at the lip-sync
+    // step, against the face size that run measured — "Choose for me" is
+    // exactly the automatic selection that was removed.
     lipsync_models: [
-      { id: 'auto', label: 'Choose for me', note: 'Picked from the face size in the video' },
       { id: 'wav2lip', label: 'Wav2Lip', speed: '3–5× clip length' },
       { id: 'musetalk', label: 'MuseTalk', speed: '8–21× clip length' },
     ],

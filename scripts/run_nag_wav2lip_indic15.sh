@@ -49,7 +49,6 @@ echo "                 NOT YouTube's translated captions: timedtext is 429-throt
 echo "  tts          : Bodhan indic-speak, male lead voice per language"
 echo "  audio fit    : per-cue, rubberband, stretch cap +/-30%"
 echo "  lipsync      : wav2lip, resize_factor=1, batch=4, fp32"
-echo "  restore      : codeformer, fidelity 0.7, upscale 1  (BOTH renders kept)"
 echo "  device       : GPU 1 (GPU 0 is in use by another user, 10.8 GiB)"
 echo "  languages    : $LANGS"
 echo "  est. wall    : ~10.5 min/lang (237 s wav2lip + 386 s codeformer + tts)"
@@ -81,7 +80,6 @@ for LG in $LANGS; do
 
   echo "[$(date +%H:%M:%S)] [$LG] P3 wav2lip + codeformer"
   $PY -I scripts/run_lipsync_only.py --model wav2lip --stem "$STEM" \
-      --restore codeformer --restore-fidelity 0.7 --restore-upscale 1
   RC=$?
 
   T1=$(date +%s)
@@ -105,7 +103,7 @@ cat > "/tmp/nag_cfg_${TS}.json" <<CFG
   "mt": "bodhan indic-translate", "mt_target_script": "codemix",
   "tts": "bodhan indic-speak, male lead voice",
   "audio_fit": "per-cue rubberband, cap +/-30%",
-  "wav2lip_resize_factor": 1, "restore_fidelity": 0.7, "gpu": 1
+  "wav2lip_resize_factor": 1, "gpu": 1
 }
 CFG
 $PY -I scripts/regroup_lipsync_into_jobs.py \

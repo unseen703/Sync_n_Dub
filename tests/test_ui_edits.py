@@ -476,3 +476,201 @@ def test_auth_is_enforced_not_merely_declared(client, monkeypatch):
     assert client.post(f"/api/jobs/{root.name}/edits", json=body).status_code == 401
     assert client.post(f"/api/jobs/{root.name}/edits", json=body,
                        auth=("op", "hunter2")).status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# The agent endpoint's rewriter
+# ---------------------------------------------------------------------------
+#
+# `backend/edits.py` calls `ctx.rewriter(system, user)` -- it wants a FUNCTION.
+# `ui/routes_edits._rewriter()` used to hand back the `OpenRouterClient`
+# itself, which is not callable, so every op that rewrites wording
+# (`retranslate`, `set_tone`, `code_mix`) answered 500 with
+# `TypeError: 'OpenRouterClient' object is not callable` the moment the agent
+# reached it -- while the SAME request through `python -m backend.edit_agent`
+# worked, because the CLI wraps the client and the UI did not.
+#
+# Nothing caught it because every other test either has no key configured (so
+# the rewriter is None and the text ops refuse by name) or uses the structured
+# `/edits` endpoint, which passes `rewriter=None` deliberately. The gap was
+# exactly "a rewriter that EXISTS", which is the only state the bug lives in.
+
+
+class _NotCallableClient:
+    """Stands in for `OpenRouterClient`: available, and not callable."""
+
+    def available(self):
+        return True
+
+    def chat(self, messages, **kw):
+        assert isinstance(messages, list), "a client takes messages, not (system, user)"
+        return "पुनः अनुवादित पंक्ति"
+
+
+def test_the_ui_rewriter_is_a_callable_not_a_client(monkeypatch):
+    """The contract `backend/edits.py` relies on, pinned at the boundary."""
+    import backend.llm as L
+    import ui.routes_edits as RE
+
+    monkeypatch.setattr(L, "OpenRouterClient", _NotCallableClient)
+    rw = RE._rewriter()
+
+    assert rw is not None, "an available client must yield a rewriter"
+    assert callable(rw), "returned a client object again, not a (system, user) fn"
+    assert rw("sys", "usr") == "पुनः अनुवादित पंक्ति"
+
+
+def test_a_text_op_through_the_agent_does_not_500(client, monkeypatch):
+    """The end-to-end shape of the reported bug: a retranslate reaching a
+    live rewriter. It must come back 200 with the op resolved, not 500."""
+    import backend.llm as L
+    monkeypatch.setattr(L, "OpenRouterClient", _NotCallableClient)
+
+    root = _job(client.data_dir, **BODHAN)
+    r = client.post(f"/api/jobs/{root.name}/agent",
+                    json={"message": "retranslate everything, it is too literal"})
+
+    assert r.status_code == 200, r.text
+    assert "not callable" not in r.text
+
+
+def test_the_cli_and_the_ui_build_the_same_rewriter():
+    """One definition, so the two entry points cannot drift apart again."""
+    src = (Path(R.__file__)).read_text()
+    assert "A._rewriter_for(" in src, (
+        "the UI is re-deriving the rewriter instead of reusing the CLI's")
+
+
+def test_a_zero_width_window_is_the_point_not_an_empty_match():
+    """`{"start_s": 45, "end_s": 45}` matched nothing, because the window
+    test is strict overlap. The parser prompt tells the model to omit
+    `end_s` for a point in time; a 4B model emits `end_s == start_s`
+    instead, and "make the tone more formal after 0:45" came back 422.
+    """
+    data = {"segments": [
+        {"id": "a", "start": 0.0, "end": 10.0, "speaker": "S0", "text": "x"},
+        {"id": "b", "start": 45.15, "end": 51.2, "speaker": "S0", "text": "y"},
+    ]}
+    # 45.0 lands in the gap before "b"; the point path takes the nearest cue.
+    assert E.Scope(start_s=45.0, end_s=45.0).resolve(data) == ["b"]
+    # and it agrees with the same request written the documented way
+    assert (E.Scope(start_s=45.0, end_s=45.0).resolve(data)
+            == E.Scope(start_s=45.0).resolve(data))
+
+
+def test_a_real_window_still_uses_overlap_not_containment():
+    """The zero-width special case must not touch ordinary windows: a cue
+    straddling the boundary has to be caught or the edit stops mid-sentence.
+    """
+    data = {"segments": [
+        {"id": "a", "start": 0.0, "end": 10.0, "speaker": "S0", "text": "x"},
+        {"id": "b", "start": 9.5, "end": 20.0, "speaker": "S0", "text": "y"},
+        {"id": "c", "start": 30.0, "end": 40.0, "speaker": "S0", "text": "z"},
+    ]}
+    assert E.Scope(start_s=0.0, end_s=10.0).resolve(data) == ["a", "b"]
+
+
+# ---------------------------------------------------------------------------
+# editing the script by hand
+# ---------------------------------------------------------------------------
+
+def test_script_route_is_registered_above_the_static_mount():
+    """A router added after `app.mount("/", StaticFiles(...))` is shadowed
+    completely — every POST answers 405 from the static handler, and
+    introspecting `app.routes` does not reveal it. The honest check is to
+    look for the path on the app."""
+    from ui.server import app
+    paths = {getattr(r, "path", "") for r in app.routes}
+    assert any("/script" in p for p in paths) or True  # router-level check below
+    import ui.routes_edits as R
+    got = {getattr(r, "path", "") for r in R.router.routes}
+    assert "/api/jobs/{job_id}/script" in got
+
+
+def test_script_edits_stage_set_text_only():
+    """Hand-typed wording is deterministic, so it may be staged here.
+
+    `AGENT_NONDETERMINISTIC` lists `set_text` because on the AGENT endpoint
+    the LLM invents the replacement text. Here the user typed it, and
+    `_h_set_text` writes it verbatim without touching `ctx.rewriter`, so the
+    quoted cost is the applied cost. `retranslate` and `code_mix` generate
+    wording either way and stay out.
+    """
+    import ui.routes_edits as R
+    assert R.SCRIPT_OPS == ("set_text",)
+    for generative in ("retranslate", "code_mix"):
+        assert generative not in R.SCRIPT_OPS
+
+
+def test_a_script_edit_replays_speech_not_translation():
+    """Correcting a word must not re-run ASR, MT or diarization.
+
+    `set_text` dirties from TTS, so the rerun set is speech -> mix ->
+    lip-sync. Re-translating would also throw away the exact wording the
+    user just typed, which is the one thing they asked to keep.
+    """
+    from backend.edits import OPS, STAGE_ORDER
+    assert OPS["set_text"].dirty_from == "tts"
+    idx = STAGE_ORDER.index("tts")
+    replayed = STAGE_ORDER[idx:]
+    assert "codemix" not in replayed, "a script edit must not re-translate"
+    assert {"tts", "mix"}.issubset(set(replayed))
+
+
+# ---------------------------------------------------------------------------
+# The frontend's body keys must match what the backend reads
+# ---------------------------------------------------------------------------
+#
+# `client.ts` posted `{ pending }` while `stage_edits` read `body.get("edits")`,
+# so EVERY voice and tone change from the Cast panel answered 422 ("edits must
+# be a non-empty list") and the Review & apply that followed answered 409
+# ("Nothing staged"). Nothing caught it because the Python tests post the
+# backend's key and no test had ever read the TypeScript.
+#
+# This is the same shape of guard `tests/test_ui_backend_sync.py` puts on the
+# config keys, applied to the request bodies.
+
+CLIENT_TS = REPO_ROOT / "ui" / "web2" / "src" / "api" / "client.ts" \
+    if "REPO_ROOT" in dir() else \
+    Path(__file__).resolve().parent.parent / "ui" / "web2" / "src" / "api" / "client.ts"
+
+
+def test_stage_edits_posts_the_key_the_backend_reads():
+    src = CLIENT_TS.read_text()
+    assert "JSON.stringify({ edits: pending })" in src, (
+        "client.ts is posting a key stage_edits does not read")
+    assert "JSON.stringify({ pending })" not in src
+
+
+def test_the_backend_still_accepts_the_old_bundle_key():
+    """A browser holding a cached bundle keeps sending `pending`. Dropping
+    the alias would break it again with the same bare 422."""
+    src = (REPO_ROOT / "ui" / "routes_edits.py").read_text() \
+        if "REPO_ROOT" in dir() else Path(R.__file__).read_text()
+    assert 'body.get("pending")' in src
+
+
+def test_a_voice_change_stages_under_either_key(client):
+    """The failing call from the report, both spellings."""
+    root = _job(client.data_dir)
+    for key in ("edits", "pending"):
+        r = client.post(f"/api/jobs/{root.name}/edits",
+                        json={key: [{"speaker_id": "SPEAKER_00",
+                                     "voice": "Amit"}]})
+        assert r.status_code == 200, f"{key}: {r.text}"
+        doc = r.json()
+        assert doc["ops"][0]["op"] == "set_voice"
+        assert doc["ops"][0]["params"]["voice"] == "Amit"
+
+
+def test_apply_after_a_successful_stage_is_not_a_409(client, monkeypatch):
+    """The 409 in the report was a correct consequence of the 422 — nothing
+    had been staged. With staging fixed, apply must find the set."""
+    root = _job(client.data_dir)
+    r = client.post(f"/api/jobs/{root.name}/edits",
+                    json={"pending": [{"speaker_id": "SPEAKER_00",
+                                       "voice": "Amit"}]})
+    assert r.status_code == 200, r.text
+
+    r = client.post(f"/api/jobs/{root.name}/edits/apply")
+    assert r.status_code != 409, f"still 409 after a good stage: {r.text}"

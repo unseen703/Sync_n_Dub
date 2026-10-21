@@ -83,7 +83,7 @@ def detect_speaker_gender(ref_audio: Path, cues: list[dict], *,
     votes: list[dict] = []
     with tempfile.TemporaryDirectory() as td:
         for i, c in enumerate(cues):
-            if c["slot_s"] < 0.8:        # too short to read a pitch track from
+            if c["slot_s"] < 0.8:        # too short for a stable read
                 continue
             piece = Path(td) / f"g{i:03d}.wav"
             p = subprocess.run(
@@ -120,7 +120,8 @@ def detect_speaker_gender(ref_audio: Path, cues: list[dict], *,
     return {"gender": gender, "confidence": round(conf, 3),
             "votes_female": n_f, "votes_male": n_m, "n_votes": len(votes),
             "ref_audio": str(ref_audio), "per_cue": votes,
-            "method": "backend.gender.predict_gender (ECAPA, F0 fallback)"}
+            "method": "backend.gender.predict_gender "
+                      "(wav2vec2-large-xlsr-53-gender-recognition)"}
 
 
 def codemix_texts(src_texts: list[str], mt_texts: list[str], *,

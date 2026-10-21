@@ -493,6 +493,16 @@ def assign_voices(
         # When there is not, fall back to the target language -- explicitly,
         # and recorded, rather than leaning on the catalog's incidental order.
         can_embed = bool(voice_embs) and spk["id"] in speaker_embs
+        # No method could read this speaker's gender, so `gender` above is
+        # `FALLBACK_GENDER`, a placeholder rather than a prediction. Ranking
+        # that by timbre dresses a guess up as a match, so the request here
+        # is the plain one: a voice RECORDED IN THE TARGET LANGUAGE of that
+        # gender. Set by `pipeline.py` from `GenderVote.decided_by`.
+        no_gender_evidence = spk.get("gender_basis") == "fallback"
+        if no_gender_evidence:
+            log.warning("voices: %s has no gender evidence; casting a "
+                        "target-language (%s) %s voice rather than ranking "
+                        "by timbre", spk["id"], target_primary or "?", gender)
         scored: List[Tuple[float, float, Voice, Dict[str, object]]] = []
         for v in pool:
             why: Dict[str, object] = {}
@@ -510,11 +520,17 @@ def assign_voices(
             # when `score` is tied -- which is exactly the no-embedding case.
             scored.append((score, native, v, why))
 
-        scored.sort(key=lambda row: (-row[0], -row[1]))
+        # Language first when there is no gender evidence, similarity first
+        # otherwise. Both orderings keep the other term as the tiebreaker.
+        scored.sort(key=(lambda row: (-row[1], -row[0])) if no_gender_evidence
+                    else (lambda row: (-row[0], -row[1])))
         best_score, _native, best_voice, why = scored[0]
-        why["basis"] = "embedding" if (can_embed and "embed_cos" in why) \
-            else "language+gender"
-        if why["basis"] == "language+gender":
+        if no_gender_evidence:
+            why["basis"] = "language+gender (no gender evidence)"
+        else:
+            why["basis"] = "embedding" if (can_embed and "embed_cos" in why) \
+                else "language+gender"
+        if str(why["basis"]).startswith("language+gender"):
             fallback_used = True
         taken.add(best_voice.voice)
         out.append(SpeakerVoice(

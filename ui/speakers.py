@@ -115,10 +115,10 @@ def _from_voices_json(job_root: Path) -> Dict[str, dict]:
 def speaker_genders(job_root: Path, merged: Dict[str, Any]) -> Dict[str, str]:
     """Predicted gender per speaker, from whatever recorded it.
 
-    Stage 9d computes this from the reference clips with ECAPA and now
-    writes it beside the voice. Re-deriving it here would mean loading a
-    speaker-embedding model inside a web request, which is not a thing a
-    GET should do.
+    Stage 9d computes this from the reference clips with the wav2vec2
+    classifier and writes it beside the voice. Re-deriving it here would
+    mean loading 1.2 GB of weights inside a web request, which is not a
+    thing a GET should do.
     """
     out: Dict[str, str] = {}
     for info in (_read_json(p) or {} for p in
@@ -282,6 +282,16 @@ def build_table(job_root: Path, config: Dict[str, Any], *,
                 merged_json: Optional[Path] = None) -> Dict[str, Any]:
     job_root = Path(job_root)
     merged = (_read_json(merged_json) or {}) if merged_json else {}
+    # Derived on demand and cached in the job folder. A speaker with no
+    # usable face evidence or no rendered dub is simply absent from these,
+    # which is why the row falls back to None rather than a broken link.
+    try:
+        from .speaker_media import dub_sample_paths, face_crop_paths
+        dubs = dub_sample_paths(merged)
+        crops = face_crop_paths(job_root)
+    except Exception as e:                              # noqa: BLE001
+        log.warning("speakers: face/dub media unavailable (%s)", e)
+        dubs, crops = {}, {}
     voices = resolve_speaker_voices(job_root, config, merged)
     genders = speaker_genders(job_root, merged)
     labels = read_labels(job_root)
@@ -308,7 +318,16 @@ def build_table(job_root: Path, config: Dict[str, Any], *,
             "voice_score": v.get("score"),
             "voice_rationale": v.get("rationale"),
             "tone": tones.get(sid),
+            # The speaker's OWN voice, from the source audio.
             "reference_url": (_files_url(ref, data_dir) if ref else None),
+            # What the dub will actually sound like for this speaker, and
+            # the face stage 6 attributed to them. Both are what the review
+            # card is for: judging a cast means hearing the new voice beside
+            # the old one and seeing whose face it is being put on.
+            "dub_sample_url": (_files_url(Path(dubs[sid]), data_dir)
+                               if dubs.get(sid) else None),
+            "face_crop_url": (_files_url(crops[sid], data_dir)
+                              if crops.get(sid) else None),
         })
     # Protagonist first, the way `assign_voices` already ranks speakers.
     rows.sort(key=lambda r: -r["speech_s"])
@@ -319,9 +338,10 @@ def build_table(job_root: Path, config: Dict[str, Any], *,
     opts = voice_options(config)
     # Tag each voice with which speakers it suits, so the picker can open on
     # the right gender instead of making the user scan 44 names. Not a
-    # filter: a user who wants a male voice for a speaker ECAPA called
-    # female must still be able to pick one, because the prediction is a
-    # prediction.
+    # filter: a user who wants a male voice for a speaker the classifier
+    # called female must still be able to pick one, because the prediction
+    # is a prediction -- and a confident one here is no better evidence
+    # than an unsure one (`backend/gender.py`, point 3).
     for o in opts:
         o["recommended_for"] = [r["id"] for r in rows
                                 if r["gender"] and o.get("gender") == r["gender"]]
@@ -361,6 +381,37 @@ def tone_vocabulary() -> List[Dict[str, str]]:
 #: rest are delivery registers. Grouping them keeps a 14-item dropdown
 #: scannable, and tells the user which ones are moods rather than formats.
 _EMOTIONS = ("anger", "disgust", "fear", "happy", "sad", "surprise")
+
+
+#: The four the NEW-JOB form offers, as `tts_style` for the whole dub.
+#: Emotions are deliberately absent: they are per-SEGMENT moods that stage
+#: 9b2 derives from the source speaker's own delivery, and picking one up
+#: front would flatten every line of the video into "sad" or "anger". The
+#: four here are formats — a register a whole dub can plausibly be in.
+#: Values stay verbatim; an unknown one is a 422 at the engine.
+SUBMIT_STYLES = (
+    "TV style news",
+    "advertisements",
+    "educational lecture",
+    "children's stories",
+)
+
+
+def submit_style_options() -> List[Dict[str, str]]:
+    """`{value,label}` for the new-job form's Type dropdown.
+
+    Filtered from the engine's own list rather than written out, so a value
+    that stops existing upstream disappears here instead of 422-ing at
+    synthesis. `tests/test_ui_create.py` asserts the four are still real
+    members of `INDIC_SPEAK_STYLES`.
+    """
+    try:
+        from models.tts.bodhan_adapter import INDIC_SPEAK_STYLES
+    except Exception as e:                               # pragma: no cover
+        log.warning("bodhan style list unavailable: %s", e)
+        return []
+    return [{"value": v, "label": _tone_label(v)}
+            for v in SUBMIT_STYLES if v in INDIC_SPEAK_STYLES]
 
 
 def _tone_group(style: str) -> str:

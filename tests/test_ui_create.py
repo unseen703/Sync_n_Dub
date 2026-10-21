@@ -106,6 +106,58 @@ def _body(**over):
     return body
 
 
+def test_the_probe_answers_what_the_form_needs(client, probe_ok):
+    """The New-dub dialog is dead without this, and it fails SILENTLY.
+
+    `youtube_probe` read `req.restore_model` — a field that lived on
+    `JobRequest`, not on `ProbeRequest` — and raised AttributeError on
+    every call. Nothing in the UI shows a 500 from here: the form simply
+    never receives a duration, `canCreate` stays false, and the Create
+    button looks inert with no error on screen. Pin the whole shape the
+    form reads, not just the status code.
+    """
+    r = client.post("/api/youtube/probe", json={"url": _body()["url"]})
+    assert r.status_code == 200, r.text
+    j = r.json()
+    assert j.get("duration_s"), "the range picker has no bound without this"
+    assert j.get("max_lipsync_s"), "the form shows the cap"
+    for pid in presets.PRESET_IDS:
+        assert j["estimates"][pid]["text"], f"{pid} has no quotable estimate"
+
+
+def test_the_probe_quotes_the_dub_without_any_lipsync(client, probe_ok):
+    """A submission no longer lip-syncs, so its quote must not include one.
+
+    The estimate used to cost `standard` at wav2lip because `"auto"` might
+    resolve there. With the presets collapsed there is no model to cost, and
+    quoting one would overstate every submission.
+    """
+    j = client.post("/api/youtube/probe",
+                    json={"url": _body()["url"]}).json()
+    dub_only = presets.estimate_runtime(j["duration_s"], lipsync_model=None)
+    assert j["estimates"][presets.PRESET_ID]["high_s"] == dub_only["high_s"]
+
+
+def test_the_probe_quotes_lipsync_separately_per_model(client, probe_ok):
+    """Lip-sync is a second submission against a model the operator picks,
+    and the models differ by ~20x here. One blended number would hide the
+    difference the choice turns on."""
+    from models.lipsync import available_models
+
+    j = client.post("/api/youtube/probe",
+                    json={"url": _body()["url"]}).json()
+    quoted = j["lipsync_estimates"]
+    assert set(quoted) == set(available_models())
+    assert quoted["musetalk"]["high_s"] > quoted["wav2lip"]["high_s"]
+
+
+def test_probe_rejects_a_field_it_does_not_define(client, probe_ok):
+    """`extra="forbid"` on ProbeRequest, asserted rather than assumed."""
+    r = client.post("/api/youtube/probe",
+                    json={"url": _body()["url"], "nonexistent_field": 1})
+    assert r.status_code == 422
+
+
 def test_an_engine_this_install_does_not_have_is_refused(client):
     """400 before anything is allocated, not a dead job later.
 
@@ -188,17 +240,28 @@ def test_live_stream_is_refused(client, monkeypatch):
 # the compute cap — lip-synced portion only
 # ---------------------------------------------------------------------------
 
-def test_cap_refuses_a_long_lipsync(client, monkeypatch):
-    """90 minutes of lip-sync is 4.5 to 31 hours of GPU here. It is refused at
-    submission, with the compute reason, rather than queued and discovered
-    tomorrow."""
+def test_a_long_submission_is_accepted_because_it_only_dubs(client, monkeypatch):
+    """The cap MOVED on 2026-10-20; it did not disappear.
+
+    A submission no longer lip-syncs, so capping it would refuse a 90-minute
+    audio dub for compute it will never spend. The cap now lives at
+    `POST .../lipsync`, where the model is known and the GPU hours are
+    actually committed — see `tests/test_lipsync_is_explicit.py`.
+    """
     from ui import ytmeta
     monkeypatch.setattr(ytmeta, "probe",
                         lambda url: dict(FAKE_META, duration_s=90 * 60))
-    r = client.post("/api/jobs", json=_body(preset="standard"))
-    assert r.status_code == 400
-    detail = r.json()["detail"]
-    assert "20 minutes" in detail
+    r = client.post("/api/jobs", json=_body())
+    assert r.status_code == 201, r.text
+
+
+def test_the_cap_still_refuses_when_a_model_is_named(client):
+    """The function itself is unchanged and still caps any caller that names
+    a model. Only its submit-time call site went away."""
+    RC.check_lipsync_cap(10 * 60, model=None)            # audio-only: no cap
+    with pytest.raises(Exception) as exc:
+        RC.check_lipsync_cap(90 * 60, model="musetalk")
+    detail = str(exc.value)
     # The refusal has to say *why*, or it reads as an arbitrary policy.
     assert "compute" in detail.lower() and "3-21x" in detail
 
@@ -215,12 +278,19 @@ def test_cap_allows_a_long_audio_only_dub(client, probe_ok, monkeypatch):
     assert r.json()["state"] in ("starting", "queued")
 
 
-def test_cap_costs_auto_at_the_expensive_end():
-    """`auto` may resolve to MuseTalk, so the cap must cost it as MuseTalk. A
-    cap that waves through its own worst case is not a cap."""
-    RC.check_lipsync_cap(10 * 60, model=None)            # audio-only: no cap
-    with pytest.raises(Exception):
-        RC.check_lipsync_cap(30 * 60, model="musetalk")
+def test_the_submit_path_no_longer_costs_a_lipsync_model():
+    """`"auto"` is gone. Nothing at submit time may name a lip-sync model —
+    that is the whole point of the change, and a reintroduced default here
+    would silently put the choice back on the server."""
+    import inspect
+
+    # The MAPPING, not the word — the comment above it legitimately names
+    # `"auto"` while recording why it went.
+    src = inspect.getsource(RC.youtube_probe)
+    assert '{"auto": "wav2lip"}' not in src, (
+        "the probe is resolving an auto model again")
+    assert "lipsync_estimates" in src, (
+        "lip-sync must still be quoted, just separately and per model")
 
 
 # ---------------------------------------------------------------------------
@@ -382,7 +452,7 @@ def test_request_json_is_written_and_argv_carries_only_the_job_id(
     window title. The runner reads everything but the job id from
     request.json, so the launcher needs no other argument."""
     url = "https://www.youtube.com/watch?v=svwrTOm55y4"
-    r = client.post("/api/jobs", json=_body(url=url, preset="standard",
+    r = client.post("/api/jobs", json=_body(url=url,
                                             window={"start_s": 10.0,
                                                     "end_s": 70.0}))
     assert r.status_code == 201, r.text
@@ -394,9 +464,9 @@ def test_request_json_is_written_and_argv_carries_only_the_job_id(
     assert req["window"] == {"start_s": 10.0, "end_s": 70.0}
     assert req["target_language"] == "hi"
     assert req["pipeline"]["mt_target_language"] == "hi"
-    # "auto" survives into the request; the runner resolves it after the
-    # face probe, because nothing can resolve it before the clip exists.
-    assert req["lipsync_model"] == "auto"
+    # No lip-sync model survives into the request any more: there is nothing
+    # for the runner to resolve, because the stage is a separate submission.
+    assert not req["pipeline"].get("lipsync_model")
 
     manifest = json.loads((root / "manifest.json").read_text())
     assert manifest["argv"] == ["ui", job_id]
@@ -417,94 +487,96 @@ def test_meta_json_carries_the_title(client, probe_ok):
     assert r.json()["display_name"] == "Thermal Physics L4"
 
 
-def test_draft_preset_asks_for_no_lipsync(client, probe_ok):
-    """`draft` exists to answer 'is the translation any good' in minutes. If
-    a lip-sync model leaked into its kwargs it would take hours instead."""
-    r = client.post("/api/jobs", json=_body(preset="draft"))
-    root = client.jobs_dir / r.json()["job_id"]
-    kw = json.loads((root / "request.json").read_text())["pipeline"]
-    assert "lipsync_model" not in kw and "restore_model" not in kw
-    assert kw["mix"] is True
+@pytest.mark.parametrize("preset", ["dub", "draft", "standard", "best"])
+def test_no_submission_asks_for_lipsync(client, probe_ok, preset):
+    """Every submission dubs and stops, whichever id it was sent under.
 
-
-def test_standard_preset_defers_the_lipsync_model(client, probe_ok):
-    """`standard` leaves the lip-sync model to the face probe.
-
-    `lipsync_model` must be ABSENT rather than None — a None reads as
-    "lip-sync is off" to `plan_stages`, which is how the Lip sync node went
-    missing from the progress bar for every default-preset job.
+    `lipsync_model` must be ABSENT rather than None — `plan_stages` keys off
+    presence, and a None would still draw a Lip sync node on a bar whose run
+    will never reach one.
     """
-    r = client.post("/api/jobs", json=_body(preset="standard"))
-    kw = json.loads((client.jobs_dir / r.json()["job_id"]
-                     / "request.json").read_text())["pipeline"]
-    assert kw["face_detector"] == "retinaface"
-    assert "lipsync_model" not in kw
-
-
-def test_off_turns_lipsync_off_even_on_a_preset_that_has_it(client, probe_ok):
-    """The form's "Off — dubbed audio only" option must actually work.
-
-    It 400'd with `Unknown lip-sync model 'off'`: the dropdown adds that
-    row client-side and the server only ever knew the registry ids plus
-    "auto". Normalising it to None was not enough either — None means "take
-    the preset's choice", and `standard`'s choice is `auto`, so the fix had
-    to make "off" a value `build_kwargs` understands rather than an absence.
-    """
-    r = client.post("/api/jobs", json=_body(preset="standard",
-                                            lipsync_model="off"))
+    r = client.post("/api/jobs", json=_body(preset=preset))
     assert r.status_code == 201, r.text
     kw = json.loads((client.jobs_dir / r.json()["job_id"]
                      / "request.json").read_text())["pipeline"]
     assert "lipsync_model" not in kw
-    assert "face_detector" not in kw      # no face probe for an audio-only dub
     assert kw["mix"] is True
 
 
-def test_off_is_uncapped_because_nothing_is_lipsynced(client, probe_ok,
-                                                      monkeypatch):
-    """The lip-sync cap is on the lip-synced portion, so "off" is exempt.
+def test_faces_run_on_every_submission(client, probe_ok):
+    """Stage 5 + 6 used to be gated on wanting lip-sync. Their output is what
+    the review screen reads — the size of the face ASD attributes to each
+    speaker — so gating them on a decision nobody has made yet is what made
+    the measurement invisible."""
+    r = client.post("/api/jobs", json=_body())
+    kw = json.loads((client.jobs_dir / r.json()["job_id"]
+                     / "request.json").read_text())["pipeline"]
+    assert kw["face_detector"] == "retinaface"
+    assert kw["asd_model"] == "talknet"
 
-    The form already knows this (`tooLong = lipsync !== 'off' && …`); the
-    server has to agree or a long audio-only dub is refused for compute it
-    will never spend.
+
+def test_the_batch_size_is_recorded_at_submit(client, probe_ok):
+    """The render happens later and rebuilds its kwargs from this job's
+    manifest config, so the VRAM-safe batch size has to be written down HERE.
+
+    Collapsing the presets once moved it inside a branch that no longer
+    runs, which handed the adapter MuseTalk's own default of 20 — measured
+    at a 15496 MiB peak on a 16311 MiB card.
     """
+    r = client.post("/api/jobs", json=_body())
+    kw = json.loads((client.jobs_dir / r.json()["job_id"]
+                     / "request.json").read_text())["pipeline"]
+    assert kw["lipsync_batch_size"] == 10
+
+
+def test_a_long_audio_only_dub_is_never_capped(client, probe_ok, monkeypatch):
+    """The cap is on the lip-synced portion, and nothing is lip-synced at
+    submit. A ten-second cap must not refuse a ten-minute dub."""
     monkeypatch.setenv("DUBBING_UI_MAX_LIPSYNC_S", "10")
     r = client.post("/api/jobs", json=_body(
-        preset="standard", lipsync_model="off",
         window={"start_s": 0, "end_s": 600}))
     assert r.status_code == 201, r.text
 
 
-def test_restoration_is_opt_in_not_a_preset_default(client, probe_ok):
-    """No preset turns CodeFormer on, and that is deliberate.
+def test_no_preset_asks_for_face_restoration(client, probe_ok):
+    """Restoration was removed from the project on 2026-10-17.
 
-    It WAS a preset default until 2026-10-17, and that was a promise the
-    pipeline did not keep: the UI wrote `restore: codeformer` into every
-    standard/best manifest while `_run_pipeline` never forwarded
-    `restore_model` to the stage that runs it, so no UI job was ever
-    restored. The forwarding bug is fixed; turning the default back on would
-    have converted a silent no-op into a silent doubling of GPU time
-    (CodeFormer measures ~13x clip length), so it now has to be asked for by
-    name. This test is the record of that choice — if a preset starts
-    shipping `restore_model` again, it should be because someone decided to,
-    not because a default drifted back.
+    `models/restore/`, the `--restore*` flags, `run_lipsync(restore=...)`
+    and the UI's `restore_model` field are all gone, at the owner's request
+    and after being told what the pass was for. This test is the record:
+    nothing may put a restore key back into a submission's kwargs without
+    the stage existing to consume it, which is the shape of the bug the
+    removed code already had once (the UI wrote `restore: codeformer` into
+    manifests for a stage that never ran).
     """
-    for preset in ("draft", "standard", "best"):
+    for preset in ("dub", "draft", "standard", "best"):
         r = client.post("/api/jobs", json=_body(
             preset=preset, window={"start_s": 0.0, "end_s": 60.0}))
         kw = json.loads((client.jobs_dir / r.json()["job_id"]
                          / "request.json").read_text())["pipeline"]
-        assert kw.get("restore_model") is None, preset
+        assert not any("restore" in k for k in kw), (preset, sorted(kw))
 
 
-def test_best_preset_pins_musetalk(client, probe_ok):
+def test_the_restore_stage_is_gone_from_the_registries(client):
+    """Removed, not merely unreferenced — an importable adapter would come
+    back the first time someone added a flag for it."""
+    import importlib
+
+    for mod in ("models.restore", "models.restore.codeformer_adapter"):
+        with pytest.raises(ModuleNotFoundError):
+            importlib.import_module(mod)
+
+
+def test_a_retired_preset_id_no_longer_pins_a_model(client, probe_ok):
+    """`best` used to mean "always MuseTalk". It is now an alias for the one
+    flow, and pins nothing — the model is named at `POST .../lipsync`."""
     r = client.post("/api/jobs",
                     json=_body(preset="best",
                                window={"start_s": 0.0, "end_s": 60.0}))
-    root = client.jobs_dir / r.json()["job_id"]
-    doc = json.loads((root / "request.json").read_text())
-    assert doc["lipsync_model"] == "musetalk"
-    assert doc["pipeline"]["lipsync_model"] == "musetalk"
+    assert r.status_code == 201, r.text
+    doc = json.loads((client.jobs_dir / r.json()["job_id"]
+                      / "request.json").read_text())
+    assert not doc["pipeline"].get("lipsync_model")
 
 
 def test_unknown_preset_is_refused_not_coerced(client, probe_ok):
@@ -720,9 +792,7 @@ def test_estimates_use_the_measured_factors():
     measured table, not from a guess — and it must be marked as a range."""
     fast = presets.estimate_runtime(60, lipsync_model="wav2lip")
     slow = presets.estimate_runtime(60, lipsync_model="musetalk")
-    slower = presets.estimate_runtime(60, lipsync_model="musetalk",
-                                      restore_model="codeformer")
-    assert fast["high_s"] < slow["high_s"] < slower["high_s"]
+    assert fast["high_s"] < slow["high_s"]
     assert fast["exact"] is False
     assert "3-5x" in fast["basis"]
 

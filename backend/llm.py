@@ -12,7 +12,8 @@ Env
                        path rather than crashing — an NLQ edit still parses,
                        it just loses the LLM's reading of the sentence.
   OPENROUTER_URL       default https://openrouter.ai/api/v1
-  OPENROUTER_MODEL     default google/gemma-3-4b-it
+  OPENROUTER_MODEL     default google/gemma-3-12b-it
+  OPENROUTER_JSON_MODE auto (=off) | on | off — see JSON_MODE_ENV
 
 On the default model
 --------------------
@@ -38,10 +39,18 @@ import re
 import time
 from typing import Any, Dict, List, Optional, Sequence
 
+from . import tracing as _tracing
+
 log = logging.getLogger(__name__)
 
 DEFAULT_URL = "https://openrouter.ai/api/v1"
-DEFAULT_MODEL = "google/gemma-3-4b-it"
+#: Gemma 3 12B as of 2026-10-19, by request. Verified live on OpenRouter:
+#: 131k context, $0.05/M in and $0.15/M out, and it advertises
+#: `response_format` + `structured_outputs`, which is what `chat_json`
+#: relies on. The 4B it replaces was a weak structured-output generator
+#: — every op it returned still gets schema-validated and re-resolved
+#: against real segment ids, and that stays true at 12B.
+DEFAULT_MODEL = "google/gemma-3-12b-it"
 
 #: Sent so usage shows up under a recognisable name in the OpenRouter
 #: dashboard. Both headers are optional for the API and carry no secrets.
@@ -49,6 +58,39 @@ _REFERER = "https://github.com/unseen703/Sync_n_Dub"
 _TITLE = "Dubbing Studio"
 
 _RETRY_STATUS = {408, 409, 429, 500, 502, 503, 504}
+
+#: Whether to send `response_format={"type":"json_object"}`.
+#:
+#: `auto` (the default) means OFF, and that is a measurement rather than a
+#: preference. On 2026-10-19, `google/gemma-3-12b-it` through OpenRouter
+#: answered the edit-agent prompt like this WITH json mode on:
+#:
+#:     {"ops":[{}]}
+#:     {".ops":[{".op":".lipsync_window",".scope":{"start_s":"0:20.00", ...
+#:
+#: — an empty op, and keys prefixed with a full stop. Both are *valid JSON*,
+#: so nothing downstream can tell they are wrong: `extract_json` parses them
+#: happily and the caller gets `ops=None` or an op with no name. The same
+#: two requests, same prompt, json mode OFF, came back correct inside ```json
+#: fences, which `extract_json` already strips.
+#:
+#: So the flag that exists to guarantee parseable JSON is what was breaking
+#: it. `on` restores it for a model that genuinely needs it; `off` is
+#: explicit. The caller runs `extract_json` either way, which is why turning
+#: it off costs nothing.
+JSON_MODE_ENV = "OPENROUTER_JSON_MODE"
+
+
+def _json_mode_enabled(requested: bool) -> bool:
+    """Resolve `json_object=True` against `OPENROUTER_JSON_MODE`."""
+    if not requested:
+        return False
+    want = (os.getenv(JSON_MODE_ENV) or "auto").strip().lower()
+    if want in ("on", "1", "true", "yes"):
+        return True
+    if want in ("off", "0", "false", "no"):
+        return False
+    return False            # auto -> off; see the note above
 
 
 def _env_num(name: str, default):
@@ -228,12 +270,16 @@ class OpenRouterClient:
         max_tokens: Optional[int] = None,
         json_object: bool = False,
         extra_body: Optional[Dict[str, Any]] = None,
+        trace_name: Optional[str] = None,
     ) -> str:
         """Post one chat completion, return the assistant's text.
 
         `json_object=True` asks for `response_format={"type":"json_object"}`.
         Providers that do not honour it answer normally, which is why the
         caller still runs `extract_json` over the result.
+
+        `trace_name` names the Langfuse generation. It is cosmetic when
+        tracing is off, which is the default.
         """
         self._ensure_session()
         payload: Dict[str, Any] = {
@@ -241,12 +287,49 @@ class OpenRouterClient:
             "messages": list(messages),
             "temperature": self.temperature if temperature is None else float(temperature),
             "max_tokens": self.max_tokens if max_tokens is None else int(max_tokens),
+            # Token counts AND the dollar cost come back in the response
+            # body. This is the route that works with an ORDINARY OpenRouter
+            # key: the account-level Analytics API needs a *management* key
+            # and answers 403 to a normal one, so per-request usage is the
+            # only thing a plain key can read — and it is the better figure
+            # anyway, because it attaches to the call that incurred it.
+            "usage": {"include": True},
         }
+        json_object = _json_mode_enabled(json_object)
         if json_object:
             payload["response_format"] = {"type": "json_object"}
         if extra_body:
             payload.update(extra_body)
 
+        # ONE generation spans every retry rather than one per attempt: a 429
+        # that succeeds on the third try is a single logical call that took
+        # three round trips, and `attempts` in the metadata is what says so.
+        t0 = time.monotonic()
+        with _tracing.generation(
+            trace_name or "openrouter.chat",
+            model=self.model,
+            input=list(messages),
+            model_parameters={"temperature": payload["temperature"],
+                              "max_tokens": payload["max_tokens"],
+                              "json_object": bool(json_object)},
+        ) as rec:
+            try:
+                text, body, attempts = self._post_with_retries(payload)
+            except BaseException as exc:
+                rec.fail(f"{type(exc).__name__}: {exc}")
+                raise
+            usage = body.get("usage") or {}
+            rec.succeed(text, usage=usage, cost=usage.get("cost"),
+                        metadata={"attempts": attempts,
+                                  "latency_ms": round((time.monotonic() - t0) * 1000, 1)})
+            return text
+
+    def _post_with_retries(self, payload: Dict[str, Any]):
+        """`(text, body, attempts)`, retrying the statuses worth retrying.
+
+        Split out of `chat` so the tracing wrapper stays a flat `with` over
+        a single call instead of re-indenting the whole retry loop.
+        """
         url = f"{self.base_url}/chat/completions"
         last_err: Optional[str] = None
         for attempt in range(self.max_retries + 1):
@@ -264,7 +347,7 @@ class OpenRouterClient:
                     body = resp.json()
                 except ValueError as e:
                     raise LLMUnavailable(f"non-JSON 200 from {url}: {e}") from e
-                return _content_of(body)
+                return _content_of(body), body, attempt + 1
 
             if resp is not None:
                 last_err = f"HTTP {resp.status_code}: {resp.text[:300]}"
@@ -292,6 +375,7 @@ class OpenRouterClient:
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
         repair_rounds: int = 1,
+        trace_name: Optional[str] = None,
     ) -> Any:
         """`chat`, but parse the reply as JSON, re-asking once on garbage.
 
@@ -301,8 +385,15 @@ class OpenRouterClient:
         convo = list(messages)
         err: Optional[Exception] = None
         for round_ in range(repair_rounds + 1):
+            # Each repair round is its OWN generation, deliberately. A reply
+            # that needed a second ask is the interesting case, and folding
+            # the two into one span would hide both the bad JSON and the fact
+            # that it cost two calls.
+            name = trace_name or "openrouter.chat_json"
             text = self.chat(convo, temperature=temperature,
-                             max_tokens=max_tokens, json_object=True)
+                             max_tokens=max_tokens, json_object=True,
+                             trace_name=(name if round_ == 0
+                                         else f"{name}.repair{round_}"))
             try:
                 return extract_json(text)
             except ValueError as e:

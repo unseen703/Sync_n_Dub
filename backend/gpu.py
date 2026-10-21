@@ -97,14 +97,144 @@ def visible_cuda_devices() -> List[int]:
     return []
 
 
-def pick_devices(n: Optional[int] = None) -> List[int]:
-    """Return up to `n` GPU ids to pin workers to. `n=None` means all visible."""
+def gpu_busy_pids() -> dict:
+    """{device id -> [pids]} for compute processes that are NOT ours.
+
+    "Free" means nobody else is on the card, not "has N GiB headroom". A
+    fixed free-VRAM floor was tried and removed: our OWN process holds a
+    CUDA context on whichever card it touched earlier in the pipeline
+    (measured ~1.9-4.7 GiB for `ui.runner` after face detection), so a
+    memory threshold reads the job's own context as a foreign tenant and
+    refuses the card it is already using.
+
+    Keyed in the same id space as `visible_cuda_devices()`; see
+    `gpu_free_memory` for why the CUDA_VISIBLE_DEVICES remap matters.
+    """
+    try:
+        proc = subprocess.run(
+            ["nvidia-smi", "--query-compute-apps=gpu_uuid,pid",
+             "--format=csv,noheader"],
+            capture_output=True, text=True, timeout=20)
+        if proc.returncode != 0:
+            return {}
+        uuid_rows = subprocess.run(
+            ["nvidia-smi", "--query-gpu=index,uuid",
+             "--format=csv,noheader"],
+            capture_output=True, text=True, timeout=20)
+        phys = {}
+        for line in (uuid_rows.stdout or "").strip().splitlines():
+            idx, uu = [x.strip() for x in line.split(",", 1)]
+            phys[uu] = int(idx)
+        ours = _own_pids()
+        busy = {}
+        for line in (proc.stdout or "").strip().splitlines():
+            uu, pid = [x.strip() for x in line.split(",")[:2]]
+            if not pid.isdigit() or int(pid) in ours:
+                continue
+            g = phys.get(uu)
+            if g is not None:
+                busy.setdefault(g, []).append(int(pid))
+    except Exception:                                    # noqa: BLE001
+        return {}
+
+    cvd = os.getenv("CUDA_VISIBLE_DEVICES", "").strip()
+    if cvd and not os.getenv("DUBBING_GPUS", "").strip():
+        ids = [int(x) for x in cvd.split(",") if x.strip().isdigit()]
+        return {pos: busy[ph] for pos, ph in enumerate(ids) if ph in busy}
+    return busy
+
+
+def _own_pids() -> set:
+    """This process and everything under it.
+
+    Our own CUDA context must not make a card look occupied to us.
+    """
+    mine = {os.getpid(), os.getppid()}
+    try:
+        out = subprocess.run(["ps", "-eo", "pid,ppid", "--no-headers"],
+                             capture_output=True, text=True, timeout=10)
+        kids = {}
+        for line in (out.stdout or "").splitlines():
+            parts = line.split()
+            if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+                kids.setdefault(int(parts[1]), []).append(int(parts[0]))
+        stack = list(mine)
+        while stack:
+            for c in kids.get(stack.pop(), []):
+                if c not in mine:
+                    mine.add(c)
+                    stack.append(c)
+    except Exception:                                    # noqa: BLE001
+        pass
+    return mine
+
+
+def free_devices() -> list:
+    """Visible GPUs with no foreign compute process, in index order."""
     gpus = visible_cuda_devices()
     if not gpus:
         return []
-    if n is None or n >= len(gpus):
-        return gpus
-    return gpus[:max(1, n)]
+    busy = gpu_busy_pids()
+    return [g for g in gpus if not busy.get(g)]
+
+
+def gpu_free_memory() -> dict:
+    """{device id -> free MiB}, keyed in the SAME id space as
+    `visible_cuda_devices()`.
+
+    nvidia-smi reports PHYSICAL indices, but with `CUDA_VISIBLE_DEVICES=2,5`
+    the process sees those as 0 and 1 -- so position i must be looked up
+    under the physical id at position i, or the figures attach to the wrong
+    cards. Kept for reporting and for the operator-facing message; it no
+    longer gates selection.
+    """
+    try:
+        proc = subprocess.run(
+            ["nvidia-smi", "--query-gpu=index,memory.free",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=20)
+        if proc.returncode != 0:
+            return {}
+        physical = {}
+        for line in (proc.stdout or "").strip().splitlines():
+            idx, free = [x.strip() for x in line.split(",")[:2]]
+            physical[int(idx)] = int(free)
+    except Exception:                                    # noqa: BLE001
+        return {}
+
+    cvd = os.getenv("CUDA_VISIBLE_DEVICES", "").strip()
+    if cvd and not os.getenv("DUBBING_GPUS", "").strip():
+        ids = [int(x) for x in cvd.split(",") if x.strip().isdigit()]
+        return {pos: physical.get(phys, 0) for pos, phys in enumerate(ids)}
+    return physical
+
+
+def pick_devices(n: Optional[int] = None) -> List[int]:
+    """Every free GPU by default; [] when none is free.
+
+    Policy (set 2026-10-19): both cards free -> use both. One free -> use
+    that one. None free -> return [] so the caller refuses the run and tells
+    the operator, rather than queueing behind a stranger's job or OOMing
+    beside it.
+
+    `n` caps the count when a caller wants fewer. Returning [] is a REFUSAL,
+    not "use the default device" -- an unpinned worker lands on whichever
+    card the driver picks, which is exactly the collision this avoids.
+    """
+    gpus = visible_cuda_devices()
+    if not gpus:
+        return []
+    free = free_devices()
+    if not free:
+        log.warning("gpu: every visible device has another process on it "
+                    "(%s); refusing to start",
+                    ", ".join(f"gpu{g}" for g in gpus))
+        return []
+    if len(free) < len(gpus):
+        log.info("gpu: %d of %d device(s) free: %s",
+                 len(free), len(gpus), ", ".join(f"gpu{g}" for g in free))
+    want = len(free) if n is None else max(1, int(n))
+    return free[:min(want, len(free))]
 
 
 def probe_duration(media: Path) -> float:

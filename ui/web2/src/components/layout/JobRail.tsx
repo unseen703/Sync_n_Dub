@@ -3,14 +3,18 @@ import { useStore, filterJobs } from '../../store/useStore';
 import { JobCard } from './JobCard';
 import { Button } from '../ui/Button';
 import { EmptyState, Skeleton } from '../ui/Card';
-import { IconAlert, IconFilm, IconSearch } from '../ui/Icons';
+import { IconAlert, IconFilm, IconMenu, IconSearch } from '../ui/Icons';
+import { Tooltip } from '../ui/Tooltip';
 import { normalizeState } from '../../lib/format';
 
 /**
  * The job rail — the LEFT column, and the one you navigate from.
  *
- * Newest first, which is the order `_list_jobs` already returns
- * (`sorted(..., reverse=True)` over the timestamp-prefixed folder names).
+ * Most recently RUN first, which is the order `_list_jobs` already returns —
+ * it sorts on `last_activity`, the newest of the progress, status and
+ * manifest stamps plus the folder mtime. This component must not re-sort:
+ * the server has evidence the client does not (a re-run leaves the job id's
+ * timestamp untouched), and sorting here on `timestamp` would undo it.
  *
  * Arrow keys move between cards once one has focus, so a long list is
  * walkable without the mouse; `/` from anywhere focuses the search box.
@@ -25,6 +29,7 @@ export function JobRail({ onNavigate }: { onNavigate?: () => void }) {
   const setSearch = useStore((s) => s.setSearch);
   const refreshJobs = useStore((s) => s.refreshJobs);
   const setNewJobOpen = useStore((s) => s.setNewJobOpen);
+  const setRailOpen = useStore((s) => s.setRailOpen);
   // Only the selected job has live progress; every other card shows its
   // last known state. Polling 54 jobs to animate 53 idle bars is not worth
   // the requests.
@@ -53,9 +58,26 @@ export function JobRail({ onNavigate }: { onNavigate?: () => void }) {
 
   return (
     <div className="flex h-full w-full flex-col">
-      <div className="flex items-center justify-between gap-2 px-4 pb-2.5 pt-4">
+      {/* The collapse control sits ABOVE the list it collapses, not across
+          the header on the far side of the screen. A toggle belongs next to
+          the thing it acts on; in the brand bar it read as a global menu
+          and gave no hint which column it would move. */}
+      <div className="flex items-center gap-2 px-3 pb-2.5 pt-4">
+        <Tooltip label="Hide the job list">
+          <button
+            type="button"
+            onClick={() => setRailOpen(false)}
+            aria-label={`Hide the job list (${total} jobs)`}
+            aria-expanded={true}
+            aria-controls="job-rail-list"
+            className="-ml-0.5 rounded-lg p-1.5 text-ink3 transition-colors
+                       hover:bg-ink/[0.07] hover:text-ink"
+          >
+            <IconMenu />
+          </button>
+        </Tooltip>
         <h2 className="text-[13px] font-semibold text-ink">Your dubs</h2>
-        <span className="text-[11.5px] text-ink4">
+        <span className="ml-auto text-[11.5px] text-ink4">
           {loaded ? (running ? `${running} running` : `${total}`) : '…'}
         </span>
       </div>

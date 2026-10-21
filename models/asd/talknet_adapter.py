@@ -186,6 +186,30 @@ class TalkNetASD(BaseASD):
                 audio_feat = audio_feat.cuda(); video_feat = video_feat.cuda()
             audio_embed = self._model.model.forward_audio_frontend(audio_feat.unsqueeze(0))
             video_embed = self._model.model.forward_visual_frontend(video_feat.unsqueeze(0))
+            # Trim both to the common length BEFORE cross-attention.
+            #
+            # The two frontends disagree by a frame on most clips: the audio
+            # one downsamples 100 Hz MFCC by 4 (-> 25 Hz), the visual one
+            # emits exactly one embedding per crop, and `n_frames *
+            # samples_per_frame` rarely divides into a whole number of MFCC
+            # windows. The residual becomes a 17-vs-16 mismatch inside
+            # `attentionLayer.forward`'s `src + self.dropout1(src2)`, which
+            # raises RuntimeError and takes the whole stage -- and so the
+            # whole job -- down with it.
+            #
+            # Upstream does the same alignment earlier, on durations, in
+            # `demoTalkNet.py`:
+            #     length = min((audio.shape[0] - audio.shape[0] % 4) / 100,
+            #                  video.shape[0] / 25)
+            # This adapter builds its tensors itself and never ported that
+            # line. Trimming the tail is correct rather than merely safe:
+            # the extra frame has no counterpart to attend to.
+            t = min(audio_embed.shape[1], video_embed.shape[1])
+            if audio_embed.shape[1] != video_embed.shape[1]:
+                log.debug("talknet: trimming a=%d v=%d -> %d",
+                          audio_embed.shape[1], video_embed.shape[1], t)
+            audio_embed = audio_embed[:, :t]
+            video_embed = video_embed[:, :t]
             audio_embed, video_embed = self._model.model.forward_cross_attention(
                 audio_embed, video_embed
             )

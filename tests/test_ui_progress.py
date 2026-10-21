@@ -315,7 +315,20 @@ def test_a_finished_job_reports_a_finished_render():
             if (p := P.read_progress(d)) and p["state"] == "done"]
     if not done:
         pytest.skip("no finished jobs on disk")
-    bad = [d.name for d, p in done if not p["milestones"]["lipsync_ready"]]
+    # Only jobs that actually RAN lip-sync can have a render. A dub-only job
+    # -- `--mix` with no `--lipsync`, which is how the scaling benchmarks
+    # built one dub for six separate lip-sync passes to share -- has an empty
+    # `lipsync/` by design, and asserting a render for it fails the suite for
+    # doing exactly what it was asked to do. Keyed off the planned stage list
+    # rather than the manifest config, because `read_progress` normalises
+    # four different on-disk job shapes and the stage list is the one thing
+    # all four agree on.
+    ran_lipsync = [(d, p) for d, p in done
+                   if any(s.get("key") == "9h" for s in p.get("stages", []))]
+    if not ran_lipsync:
+        pytest.skip("no finished jobs on disk that configured lip-sync")
+    bad = [d.name for d, p in ran_lipsync
+           if not p["milestones"]["lipsync_ready"]]
     assert not bad, f"finished jobs whose render was not found: {bad[:5]}"
 
 

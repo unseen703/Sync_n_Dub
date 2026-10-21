@@ -148,6 +148,33 @@ def download_youtube(
         "noplaylist": not playlist,
         # Ask for a single merged file whenever a split format is chosen.
         "merge_output_format": "mp4",
+        # Retry, because YouTube's 403 on a media URL is usually TRANSIENT.
+        #
+        # Nothing here set these, so yt-dlp used its own low defaults and a
+        # single refusal ended the job: a UI run on 2026-10-17 failed at
+        # stage 1 in TWO SECONDS with `HTTP Error 403: Forbidden`, and the
+        # identical URL, format string and interpreter downloaded all
+        # 127 MiB a few minutes later with no change but time. The 403
+        # comes from rate limiting on the media host, not from the video
+        # being private — the metadata probe that precedes it succeeds,
+        # which is why the UI could show a title for a job it could not
+        # fetch.
+        #
+        # `fragment_retries` matters as much as `retries`: a DASH stream is
+        # fetched in fragments and a mid-file refusal is the common shape.
+        "retries": 10,
+        "fragment_retries": 10,
+        "extractor_retries": 5,
+        "retry_sleep_functions": {
+            # Exponential, capped — the point is to outlast a throttle
+            # window, not to hammer through it.
+            "http": lambda n: min(2 ** n, 60),
+            "fragment": lambda n: min(2 ** n, 30),
+            "extractor": lambda n: min(2 ** n, 30),
+        },
+        # A stalled socket is indistinguishable from a hung one; fail it and
+        # let the retry above handle it rather than blocking the stage.
+        "socket_timeout": 30,
     }
     if force_mp4:
         # Remux to mp4 when codecs allow, otherwise transcode. Guarantees the

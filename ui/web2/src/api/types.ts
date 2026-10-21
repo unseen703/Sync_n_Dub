@@ -282,8 +282,22 @@ export interface LipsyncModelOption {
   speed?: string;
 }
 
+/** One of the four delivery types the new-job form offers. */
+export interface StyleOption {
+  value: string;
+  label: string;
+}
+
 export interface Options {
   languages: LanguageOption[];
+  /**
+   * Whole-dub delivery register. Four formats, no emotions: an emotion is
+   * a per-SEGMENT mood stage 9b2 derives from the source speaker, and
+   * choosing one up front flattens the whole video into it.
+   */
+  styles: StyleOption[];
+  /** What the form preselects as the spoken language; null = detect. */
+  default_source_language: string | null;
   tts_engines: TtsEngineOption[];
   lipsync_models: LipsyncModelOption[];
   limits: { max_lipsync_s: number; note: string };
@@ -321,13 +335,106 @@ export interface ProbeResult {
   thumbnail_url: string | null;
   webpage_url: string;
   live_status: string | null;
+  /**
+   * Keyed by preset id. There is only one preset (`dub`) since 2026-10-20,
+   * and it does NOT lip-sync — so this is the cost of the dub alone.
+   */
   estimates: Record<string, RuntimeEstimate>;
-  /** The lip-sync cap, in seconds. The form enforces it before submitting. */
+  /**
+   * What lip-sync would add LATER, per model. Separate from `estimates`
+   * because lip-sync is a second submission the operator makes after
+   * reviewing the dub, and the models differ by ~20x here — one blended
+   * number would hide the difference the choice turns on.
+   */
+  lipsync_estimates: Record<string, RuntimeEstimate>;
+  /**
+   * The lip-sync cap, in seconds. Shown as a heads-up at submit; it is
+   * ENFORCED at `POST /api/jobs/{id}/lipsync`, not here, because nothing
+   * lip-syncs at submit any more.
+   */
   max_lipsync_s: number;
 }
 
+/** `POST /api/uploads` — a local file, probed with ffprobe not yt-dlp. */
+export interface UploadResult {
+  upload_id: string;
+  source: 'upload';
+  title: string;
+  duration_s: number;
+  width: number | null;
+  height: number | null;
+  has_audio: boolean;
+  size_bytes: number;
+  estimates: Record<string, RuntimeEstimate>;
+  lipsync_estimates: Record<string, RuntimeEstimate>;
+  max_lipsync_s: number;
+}
+
+/** One speaker's on-screen face, as ASD attributed it. */
+export interface FaceSizeSpeaker {
+  speaker: string;
+  frames: number;
+  avg_frac: number;
+  avg_px: number;
+}
+
+/**
+ * The measured face size, from `GET /api/jobs/{id}/lipsync/readiness`.
+ *
+ * `available: false` is normal, not an error — a job that ran before stages
+ * 5 and 6 were switched on simply has no number, and `reason` says which.
+ */
+export interface FaceSize {
+  available: boolean;
+  reason?: string;
+  source?: 'asd';
+  frame_height?: number;
+  avg_frac?: number;
+  avg_px?: number;
+  per_speaker?: FaceSizeSpeaker[];
+  /** A SUGGESTION shown beside the number. Nothing acts on it. */
+  suggests?: string;
+  why?: string;
+}
+
+/**
+ * Everything the "ready to lip-sync?" step needs, in one read.
+ *
+ * `can_start` and `blockers` come from the SAME server function the POST
+ * enforces (`_lipsync_blockers`), so a disabled button cannot drift into
+ * offering an action the server then refuses.
+ */
+export interface LipsyncReadiness {
+  job_id: string;
+  can_start: boolean;
+  blockers: string[];
+  pending_edits: number;
+  already_rendered: boolean;
+  /** Always true: the operator names the model, and the POST 422s without one. */
+  model_required: boolean;
+  models: string[];
+  clip_s: number | null;
+  max_lipsync_s: number;
+  estimates: Record<string, string | null>;
+  face: FaceSize;
+}
+
+export interface LipsyncStarted {
+  job_id: string;
+  status: string;
+  model: string;
+  dirty_stages: string[];
+  warnings: string[];
+}
+
 export interface CreateJobRequest {
-  url: string;
+  /** Exactly one of `url` / `upload_id`. */
+  url?: string;
+  upload_id?: string;
+  /** Whole-dub delivery register; omit for the voice's neutral read. */
+  style?: string | null;
+  /** What is SPOKEN in the source; omit to let the ASR detect it. */
+  source_language?: string | null;
   target_language: string;
   /** Omitted or null means the whole video. */
   window?: { start_s: number; end_s: number } | null;
@@ -428,4 +535,116 @@ export interface RevertResult {
   restored: string[];
   n_restored: number;
   warnings: string[];
+}
+
+
+// ---------------------------------------------------------------------------
+// the plain-language edit agent
+// ---------------------------------------------------------------------------
+
+/** One field the agent can change: what it is now, and what is staged. */
+export interface AgentField<T> {
+  current: T | null;
+  staged: T | null;
+}
+
+export interface AgentSpeaker {
+  id: string;
+  label: string | null;
+  gender: string | null;
+  speech_s: number | null;
+  voice: AgentField<string>;
+  tone: AgentField<string>;
+}
+
+export interface AgentTurn {
+  at: string;
+  message: string;
+  /** "llm" when OPENROUTER answered, "rules" for the regex fallback. */
+  source: string;
+  ops: Array<Record<string, unknown>>;
+}
+
+export interface AgentParams {
+  job_id: string;
+  clip: {
+    current: { start_s: number; end_s: number | null;
+               duration_s: number | null; n_segments: number };
+    staged: null;
+  };
+  /**
+   * Read-only. Re-translating a finished dub into a different language is
+   * a new run from stage 9a, not an edit, so the agent cannot change it.
+   */
+  language: { current: string | null; staged: null; editable: false; note: string };
+  lipsync: {
+    current: string | null;
+    staged: string | null;
+    window: { current: null; staged: { start_s: number; end_s: number } | null };
+  };
+  tts_engine: string | null;
+  speakers: AgentSpeaker[];
+  voice_options: VoiceOption[];
+  tone_options: ToneOption[];
+  dirty_stages: string[];
+  cost: CostPreview | null;
+  /**
+   * What the agent can do, in the user's words. Served by the backend from
+   * the op registry rather than written here, for the same reason
+   * `tone_options` is: a list the frontend authors itself can describe an
+   * operation the backend does not have.
+   */
+  actions: AgentAction[];
+  /** Copyable requests, drawn from each operation's own examples. */
+  prompts: AgentPrompt[];
+  turns: AgentTurn[];
+  warnings: string[];
+}
+
+export interface AgentScriptRow {
+  id: string;
+  speaker: string | null;
+  start: number;
+  end: number;
+  src_text: string;
+  text: string;
+  tts_voice: string | null;
+  tts_style: string | null;
+  /** The pending set would rewrite this cue. */
+  staged: boolean;
+}
+
+export interface AgentScript {
+  job_id: string;
+  segments: AgentScriptRow[];
+  total: number;
+}
+
+
+/** One hand-edited line, as `POST /api/jobs/{id}/script` takes it. */
+export interface ScriptEdit {
+  segment_id: string;
+  text: string;
+}
+
+
+/** One thing the agent can do, described for a person rather than a parser. */
+export interface AgentAction {
+  /** The internal op name. Shown nowhere; used only as a React key. */
+  op: string;
+  title: string;
+  /** What the user has to supply. */
+  takes: string;
+  /** What it does to the dub. */
+  changes: string;
+  /** What re-running it costs — DERIVED by the backend from the op's own
+   *  `dirty_from`, so it cannot promise a cheaper render than it causes. */
+  replays: string;
+  examples: string[];
+}
+
+/** A copyable request and what it would do. */
+export interface AgentPrompt {
+  text: string;
+  does: string;
 }

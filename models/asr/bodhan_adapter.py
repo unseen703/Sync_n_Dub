@@ -123,26 +123,68 @@ class BodhanASR(BaseASR):
         import io
         out_segments: List[ASRSegment] = []
         detected_lang: Optional[str] = None
-        for sid, start_s, end_s, speaker in segments:
+
+        # ONE language for the whole file, detected once.
+        #
+        # Each diarization turn is its own POST, and with no `language` the
+        # server re-detects per turn. A turn is 1-5 s — far too little for
+        # reliable identification — so a single English lecture came back
+        # on 2026-10-17 transcribed into FOUR scripts across nine turns:
+        #
+        #   Telugu     'టిల్ ఇట్ గోస్ టు డి డైమెన్షన్స్'   ("till it goes to the dimensions")
+        #   English    'So typically this would be some sixteen...'
+        #   Gujarati   'આ મલ્ટીલેયર'                      ("aa multilayer")
+        #   Malayalam  'റിസെപ്റ്ററാന്ന് പറഞ്ഞ എം എൽ പി'
+        #
+        # Every one of those is ENGLISH SPEECH written in an Indic script,
+        # and MT then translated each as if it were that language — which
+        # is how one dub ended up part Hindi and part untouched English,
+        # with `language: null` on the result because nothing was ever
+        # pinned. `detected_lang` already existed here and was recorded but
+        # never fed back into the next request.
+        #
+        # The probe turn is the LONGEST one, because identification gets
+        # monotonically better with duration and the first turn is often a
+        # two-word fragment. It costs no extra call: that turn is in the
+        # list anyway and its result is kept.
+        order = list(range(len(segments)))
+        if language is None and len(segments) > 1:
+            longest = max(order, key=lambda i: segments[i][2] - segments[i][1])
+            order = [longest] + [i for i in order if i != longest]
+        results: dict = {}
+
+        for _idx in order:
+            sid, start_s, end_s, speaker = segments[_idx]
             s0 = max(0, int(round(start_s * sr)))
             s1 = min(len(audio), int(round(end_s * sr)))
             clip = audio[s0:s1]
             if clip.size == 0:
-                out_segments.append(ASRSegment(
+                results[_idx] = ASRSegment(
                     id=sid, start=start_s, end=end_s, text="",
-                    speaker=speaker, language=language,
-                ))
+                    speaker=speaker, language=language or detected_lang,
+                )
                 continue
+            # An explicit `language` always wins; otherwise the probe turn's
+            # answer is pinned for every turn after it.
+            use = language or detected_lang
             with tempfile.NamedTemporaryFile(suffix=".wav", delete=True) as tmp:
                 sf.write(tmp.name, clip, sr)
-                r = self._post_file(Path(tmp.name), language)
-            detected_lang = detected_lang or r.get("language")
-            out_segments.append(ASRSegment(
+                r = self._post_file(Path(tmp.name), use)
+            if detected_lang is None and r.get("language"):
+                detected_lang = r["language"]
+                log.info("bodhan asr: language detected as %r from the "
+                         "longest turn (%.1fs); pinning it for the "
+                         "remaining %d turn(s)",
+                         detected_lang, end_s - start_s, len(segments) - 1)
+            results[_idx] = ASRSegment(
                 id=sid, start=start_s, end=end_s,
                 text=(r.get("text") or "").strip(),
                 speaker=speaker,
-                language=r.get("language") or language,
-            ))
+                language=use or r.get("language"),
+            )
+
+        # Back into timeline order: the probe turn was processed first.
+        out_segments = [results[i] for i in range(len(segments)) if i in results]
 
         return ASRResult(
             audio_path=audio_path,
@@ -191,6 +233,20 @@ class BodhanASR(BaseASR):
                             attempt + 1, wait)
                 time.sleep(wait)
                 continue
+            if resp.status_code == 422 and "render_mode" in resp.text:
+                # The one 4xx this adapter can diagnose outright. The field
+                # is this module's own invention (see the header: "if a
+                # future API spec names it differently, change this one
+                # line") and the live endpoint does not accept it, so a
+                # caller passing it fails the whole job at stage 7 with a
+                # litellm wrapper message that never names the cause.
+                raise RuntimeError(
+                    f"Bodhan ASR rejected `render_mode="
+                    f"{self.render_mode!r}` (HTTP 422). The hosted "
+                    f"indic-transcribe endpoint does not accept that field "
+                    f"— drop --render-mode and let the server default "
+                    f"stand. Server said: {resp.text[:240]}"
+                )
             if 500 <= resp.status_code < 600:
                 sig = (resp.status_code, resp.text[:200])
                 if last_err_sig == sig and attempt >= 1:

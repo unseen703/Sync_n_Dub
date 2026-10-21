@@ -136,7 +136,7 @@ is cue-level — manual `.hi.vtt` cue onsets against the CTC onset whisperx gave
 (shared text, independent timing): **185 ms median over 9 clips** (`scripts/hi_cue_floor.py`).
 
 **So 185 ms is an upper bound on the Hindi floor, and differences smaller than it are ties, not
-ranks.** The 55 ms figure is the English side and must not be quoted as the ranking's floor.
+ranks.** The 55 ms figure is the English side, and is not the ranking's floor.
 Full detail: `data/golden_reference_provenance.md`.
 
 ---

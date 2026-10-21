@@ -63,7 +63,6 @@ interface State {
   railOpen: boolean;
   theme: 'dark' | 'light';
   toggleTheme: () => void;
-  newJobOpen: boolean;
   shortcutsOpen: boolean;
   /**
    * Which video the player shows. `null` means "nobody has chosen" — the
@@ -76,6 +75,12 @@ interface State {
    * track. Null is what distinguishes "not chosen yet" from "chose the
    * original".
    */
+  /** True on `#/job/<id>/edit` — the plain-language agent page. */
+  editing: boolean;
+  setEditing: (v: boolean) => void;
+  /** `#/talking-head` — the still-portrait page. */
+  talkingHead: boolean;
+  setTalkingHead: (v: boolean) => void;
   videoTrack: 'original' | 'lipsync' | null;
   toasts: Toast[];
 
@@ -226,8 +231,9 @@ export const useStore = create<State>()((set, get) => ({
   // reference and remembers whatever the user last chose.
   railOpen: true,
   theme: readTheme(),
-  newJobOpen: false,
   shortcutsOpen: false,
+  editing: false,
+  talkingHead: false,
   videoTrack: null,
   toasts: [],
   staged: {},
@@ -240,8 +246,16 @@ export const useStore = create<State>()((set, get) => ({
     // catch-all route on the Python side.
     const fromHash = decodeURIComponent((location.hash.match(/^#\/job\/(.+)$/) ?? [])[1] ?? '');
     const jobs = get().jobs;
+
+    // `#/` and `#/new` are DESTINATIONS, not an absent hash. Falling back
+    // to `jobs[0]` on them made the landing page unreachable: the router
+    // cleared the selection on `#/`, then this re-selected the newest job
+    // a moment later when `refreshJobs()` resolved, so clicking the
+    // wordmark changed the hash and nothing else. Only a hash that names
+    // no destination at all gets the convenience pick.
+    const atHome = location.hash === '#/' || location.hash === '#/new';
     const pick = (fromHash && jobs.some((j) => j.job_id === fromHash) && fromHash)
-      || jobs[0]?.job_id
+      || (atHome ? null : jobs[0]?.job_id)
       || null;
     if (pick) get().selectJob(pick);
   },
@@ -259,6 +273,18 @@ export const useStore = create<State>()((set, get) => ({
     if (get().selected === id) return;
     set({
       selected: id,
+      // Selecting a job means LOOKING at it, never editing it. This has to
+      // be set here and not left to `useHashRoute`, because the line below
+      // moves the hash with `history.replaceState`, which does NOT fire
+      // `hashchange` — so the route handler never runs and `editing` stayed
+      // true from whatever page you were on.
+      //
+      // The visible symptom was "Back to the dub does nothing": picking
+      // another job from the rail while on the agent page left `editing`
+      // true with the hash already at `#/job/<newId>`, so the Back link
+      // pointed at the hash it was already on, no event fired, and the
+      // click was a no-op.
+      editing: false,
       progress: null,
       media: null,
       speakers: null,
@@ -385,8 +411,23 @@ export const useStore = create<State>()((set, get) => ({
     applyTheme(next);
     set({ theme: next });
   },
-  setNewJobOpen: (v) => set({ newJobOpen: v }),
+  // The new-dub form lives ON the landing page now, not in a dialog, so
+  // "open the new-job form" means "navigate home". Kept under the old
+  // name so every caller — the brand bar, the job rail, the failure card,
+  // the `N` shortcut — keeps working without each one learning the route.
+  setNewJobOpen: (v) => {
+    if (!v) return;
+    if (location.hash !== '#/') location.hash = '#/';
+    useStore.getState().selectJob(null);
+    // The link field is the first thing to do, so put the caret in it.
+    setTimeout(() => {
+      const el = document.querySelector<HTMLInputElement>('#start-url');
+      el?.focus();
+    }, 60);
+  },
   setShortcutsOpen: (v) => set({ shortcutsOpen: v }),
+  setEditing: (v) => set({ editing: v }),
+  setTalkingHead: (v) => set({ talkingHead: v }),
   setVideoTrack: (t) => set({ videoTrack: t }),
 
   /**

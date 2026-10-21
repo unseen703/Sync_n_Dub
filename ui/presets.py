@@ -8,8 +8,8 @@ the pipeline's own default, which is where the knowledge about it lives.
 
     draft     no lip-sync. Audio dub only, stems skipped. Minutes, not hours;
               this is the "is the translation any good" run.
-    standard  lip-sync with the auto-picked model + CodeFormer restoration.
-    best      MuseTalk + CodeFormer, regardless of face size.
+    standard  lip-sync with the auto-picked model.
+    best      MuseTalk, regardless of face size.
 
 Model choices that are not a preset decision (which ASR, which MT) are
 environment-overridable rather than hard-coded, because they depend on which
@@ -24,7 +24,7 @@ Estimates
 `estimate_runtime` exists because the form shows a number for every video
 before the operator commits. The lip-sync factors are measured on this host
 (`.claude/skills/clip-run`): wav2lip 3-5x clip length, musetalk 8-21x,
-latentsync ~83x, CodeFormer a further ~13x. The non-lip-sync part of the
+latentsync ~83x. The non-lip-sync part of the
 pipeline is NOT measured that way — the range below is a rough band and is
 labelled as such, because quoting a precise number nobody measured is how a
 UI teaches people to distrust it.
@@ -43,57 +43,78 @@ LIPSYNC_FACTORS: Dict[str, Tuple[float, float]] = {
     "lipgan":     (5.0, 15.0),      # torch port, ~10 it/s; least characterised
 }
 
-#: CodeFormer is a second pass, not a cheaper one: ~13x clip length.
-RESTORE_FACTORS: Dict[str, Tuple[float, float]] = {
-    "codeformer": (10.0, 16.0),
-}
-
 #: Everything before lip-sync — download, stems, diarization, ASR, MT, TTS,
 #: mix. Not measured as a factor the way the GPU stages were; this is a band
 #: wide enough to be honest and is reported as approximate.
 BASE_FACTOR: Tuple[float, float] = (1.5, 5.0)
 BASE_FLOOR_S: float = 60.0          # model load + download dominate short clips
 
-PRESET_IDS = ("draft", "standard", "best")
+#: ONE flow, as of 2026-10-20. Every run dubs the audio and stops; lip-sync
+#: is a separate, explicit second step against a model the operator names.
+#:
+#: The three presets this replaces differed in exactly two things — whether
+#: stems were separated, and what happened at lip-sync — and the second of
+#: those is no longer a submit-time decision at all:
+#:
+#:   draft     lipsync=None,      skip_stems=True
+#:   standard  lipsync="auto",    skip_stems=False
+#:   best      lipsync="musetalk" skip_stems=False
+#:
+#: `"auto"` is gone with them. It resolved the model from a face-size probe,
+#: which meant the most expensive stage in the pipeline was chosen by a
+#: measurement the operator never saw. The measurement is still taken and is
+#: now SHOWN (`GET /api/jobs/{id}/lipsync/readiness`); the choice is the
+#: operator's, and `POST .../lipsync` refuses without one rather than
+#: guessing.
+PRESET_ID = "dub"
+
+#: Old ids keep working: a browser holding the previous bundle still posts
+#: `preset: "standard"`, and every job already on disk names one of these.
+PRESET_ALIASES: Dict[str, str] = {
+    "draft": PRESET_ID, "standard": PRESET_ID, "best": PRESET_ID,
+}
+
+PRESET_IDS = (PRESET_ID,)
 
 PRESETS: Dict[str, Dict[str, Any]] = {
-    "draft": {
-        "label": "Draft — audio only",
-        "note": "Dubs the audio and skips lip-sync entirely. Minutes, not hours.",
+    PRESET_ID: {
+        "label": "Dub the audio",
+        "note": ("Transcribes, translates and speaks the dub, then stops so "
+                 "you can review the cast, the transcript and the face size "
+                 "before committing GPU time to lip-sync."),
         "lipsync": None,
-        "restore": None,
-        "skip_stems": True,
-    },
-    "standard": {
-        "label": "Standard — lip-synced",
-        "note": ("Lip-syncs with the model picked from the face size in the "
-                 "video."),
-        "lipsync": "auto",
-        "restore": None,
-        "skip_stems": False,
-    },
-    "best": {
-        "label": "Best — MuseTalk",
-        "note": ("Always MuseTalk at 256x256. Slowest; use it when the "
-                 "speaker fills the frame."),
-        "lipsync": "musetalk",
-        "restore": None,
+        # Stems are separated now where `draft` skipped them. Draft skipped
+        # them for speed on a throwaway pass; this is the only pass there is,
+        # and its mix is what the review judges.
         "skip_stems": False,
     },
 }
 
-#: Restoration is OPT-IN and no preset turns it on. It was a preset default
-#: until 2026-10-17, which was a promise the pipeline did not keep: the UI
-#: wrote `restore: codeformer` into every standard/best manifest while
-#: `_run_pipeline` never forwarded `restore_model` to the stage that runs it,
-#: so no UI job has ever been restored. Rather than switch a silent no-op into
-#: a silent doubling of GPU time, it now has to be asked for by name
-#: (`restore_model` on the request). The forwarding bug is fixed either way.
-DEFAULT_RESTORE: Optional[str] = None
 
+def resolve_preset(name: Optional[str]) -> str:
+    """Map any accepted preset id — including the retired ones — onto the
+    single flow. Unknown ids still raise, so a typo is not silently dubbed."""
+    key = (name or PRESET_ID).strip().lower()
+    key = PRESET_ALIASES.get(key, key)
+    if key not in PRESETS:
+        raise ValueError(f"unknown preset {name!r}; expected {PRESET_ID}")
+    return key
 
 def _env(name: str, default: str) -> str:
     return (os.environ.get(name) or default).strip()
+
+
+def default_source_language() -> Optional[str]:
+    """What the UI assumes is SPOKEN in the source, unless told otherwise.
+
+    English, because the direction this project dubs in is English -> Indic.
+    `DUBBING_UI_SOURCE_LANGUAGE=auto` restores per-turn detection, which is
+    what this used to do implicitly and which produced one lecture
+    transcribed into four different Indic scripts (see
+    `models/asr/bodhan_adapter.py`).
+    """
+    v = _env("DUBBING_UI_SOURCE_LANGUAGE", "en").lower()
+    return None if v in ("auto", "detect", "none", "") else v
 
 
 def default_asr() -> str:
@@ -172,15 +193,14 @@ UI_STAGE_DEFAULTS: Dict[str, Any] = {
     "refine_speaker_labels": True,
     "asd_model": "talknet",             # 6   ASD + Hungarian assignment
     "asd_on_screen_threshold": 0.3,
-    # 7  Indic-Transcribe renders in native script, mixed (English and
-    #    numerals left in Latin) or fully romanized — plan.md section 5.
-    #    `mixed` because this transcript is MT INPUT: `native` would
-    #    re-script "weight" to "वेट" before Bodhan MT ever sees it, which
-    #    destroys exactly the English terms `mt_target_script="codemix"`
-    #    then asks to be preserved. Left unset it is whatever the server
-    #    defaults to, which is not a thing to leave to chance in the one
-    #    stage that decides what every later stage reads.
-    "render_mode": "mixed",
+    # 2. NO `render_mode`. The hosted indic-transcribe endpoint REFUSES it:
+    #    `HTTP 422 unexpected field(s): ['render_mode']`, which fails the
+    #    whole job at stage 7. It was set to "mixed" here on the reasoning
+    #    that this transcript is MT input and `native` would re-script
+    #    "weight" to "वेट" before Bodhan MT ever saw it — sound reasoning
+    #    for a knob the API does not have. Whatever the server defaults to
+    #    is what every UI run has ever used, because the field was never
+    #    accepted. Re-add it only after one rated call returns 200.
     "tts_style": "auto",                # 9b1 content register from metadata
     "emotion_model": "emotion2vec",     # 9b2 source emotion
     "tts_force_align": True,            # 9f1 post-TTS forced alignment
@@ -217,40 +237,29 @@ def build_kwargs(preset: str, *, target_language: str,
                  lipsync_model: Optional[str] = None,
                  num_speakers: Optional[int] = None,
                  skip_stems: Optional[bool] = None,
-                 restore_model: Optional[str] = None) -> Dict[str, Any]:
+                 style: Optional[str] = None,
+                 source_language: Optional[str] = None) -> Dict[str, Any]:
     """The `run_pipeline` kwargs for one submission.
 
     `lipsync_model` is the *resolved* model: `"auto"` is not a pipeline value,
     so `ui/runner.py` substitutes the face-picked model before calling. A
     `None` here means no lip-sync, whatever the preset said.
     """
-    if preset not in PRESETS:
-        raise ValueError(f"unknown preset {preset!r}; expected one of "
-                         f"{', '.join(PRESET_IDS)}")
-    spec = PRESETS[preset]
+    spec = PRESETS[resolve_preset(preset)]
     engine = (tts or default_tts()).lower()
 
-    # "Will there be lip-sync" and "which model" are two different questions,
-    # and conflating them silently dropped restoration: with `standard` the
-    # model is deferred to the face probe, so `lipsync_model` is absent here
-    # — but restoration still happens, and keying it off the model meant it
-    # was dropped for exactly the preset that is supposed to have it.
-    # Three distinct inputs, and collapsing any two of them is a bug:
-    #   "off"  -> no lip-sync, whatever the preset says
-    #   None   -> unspecified; take the preset's choice
-    #   "auto" -> lip-sync, model deferred to the face probe
-    # `None` used to be the only way to say "no lip-sync", which made it
-    # impossible to turn lip-sync OFF on a preset that has it on: the form's
-    # "Off" option resolved back to the preset's `auto`.
-    if (lipsync_model or "").lower() == "off":
-        requested = None
-    elif lipsync_model is not None:
-        requested = lipsync_model
-    else:
-        requested = spec["lipsync"]
-    wants_lipsync = requested is not None
-    ls = None if requested == "auto" else requested
-
+    # NO lip-sync here, ever. Phase one dubs the audio and stops; the model
+    # is named at `POST /api/jobs/{id}/lipsync` by the operator, against the
+    # face size this run measured. `lipsync_model` is still accepted on the
+    # submit schema so the older bundle does not 422, and is ignored.
+    #
+    # Stage 5 (faces) and 6 (ASD) run ANYWAY, which is new. They used to be
+    # gated on wanting lip-sync, but their output is what the review screen
+    # reads — the average size of the face ASD attributes to each speaker —
+    # and `assignments.json` also feeds the gender vote (CLAUDE.md §4) and
+    # the speaking-face targeting a later lip-sync uses. Gating them on a
+    # decision that has not been made yet is what made the measurement
+    # invisible in the first place.
     kw: Dict[str, Any] = {
         # who speaks when
         "diarization_model": "pyannote",
@@ -281,6 +290,28 @@ def build_kwargs(preset: str, *, target_language: str,
         "tts_model": engine,
         "mix": True,
         "mux_video": True,
+        # Always, not only when lip-sync is wanted — see the note above.
+        "face_detector": "retinaface",
+        # Recorded at SUBMIT even though lip-sync happens later, because the
+        # replay that renders it rebuilds its kwargs from this job's manifest
+        # config. Collapsing the presets moved this inside a `wants_lipsync`
+        # branch that no longer runs, which silently handed the adapter
+        # MuseTalk's own default of 20 — measured at a 15496 MiB peak on a
+        # 16311 MiB card, i.e. 815 MiB of headroom and an OOM as soon as the
+        # ~460 MiB onnxruntime CUDA EP is resident after face detection.
+        #
+        # Batch size moves throughput and VRAM only, not a single output
+        # pixel: `datagen` is a pure chunker, each frame pairs with its own
+        # latent by frame index, and the loop is `@torch.no_grad()` with the
+        # models in `.eval()`.
+        #
+        # Named parameter, NOT the shared `batch_size` adapter kwarg: stage 4
+        # picks that one up too and would hand it to the diarizer.
+        #
+        # 8 since 2026-10-20, tracking the adapter default. This box is
+        # shared and a neighbour holding ~4 GiB is enough to push a batch-10
+        # render past the 16311 MiB ceiling, where MuseTalk fails silently.
+        "lipsync_batch_size": 8,
     }
     # Voice conversion (9f) is deliberately absent. The adapters are here but
     # neither upstream is installed on this host -- `third_party/OpenVoice` and
@@ -289,18 +320,20 @@ def build_kwargs(preset: str, *, target_language: str,
     # output and overrides the stock voice just assigned. Enable it only with
     # a deliberate `vc_model`, once a repo exists to run it.
     kw.update(UI_STAGE_DEFAULTS)
+    # An explicit delivery type from the form REPLACES the `"auto"` default,
+    # which is stage 9b1 classifying the register from the video's own
+    # metadata. Choosing one is the operator saying they already know, so
+    # 9b1 is not planned and not run — `plan_stages` keys 9b1 off
+    # `tts_style == "auto"`, so the progress bar follows automatically.
+    if style:
+        kw["tts_style"] = style
+    # Stated beats the install default, which beats detection. An explicit
+    # "auto" from the form reaches here as the string, and means detect.
+    if (source_language or "").lower() in ("auto", "detect"):
+        kw["asr_language"] = None
+    else:
+        kw["asr_language"] = source_language or default_source_language()
     kw.update(UI_TIMING_DEFAULTS)
-    if wants_lipsync:
-        kw["face_detector"] = "retinaface"
-        # Opt-in only: the caller's explicit choice, else the preset's (which
-        # is None for every preset). Never a silent default.
-        kw["restore_model"] = (restore_model if restore_model is not None
-                               else spec["restore"])
-        if ls:
-            kw["lipsync_model"] = ls
-        # No `lipsync_model` key when the choice is deferred: `ui/runner.py`
-        # sets it after the face probe. Writing None here would read as
-        # "lip-sync is off" to `plan_stages` and to the pipeline alike.
     return kw
 
 
@@ -309,6 +342,7 @@ def plan_config(kwargs: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "diarization":     kwargs.get("diarization_model"),
         "asr":             kwargs.get("asr_model"),
+        "asr_language":    kwargs.get("asr_language"),
         "align":           kwargs.get("align_model"),
         "mt":              kwargs.get("mt_model"),
         "target_language": kwargs.get("mt_target_language"),
@@ -320,7 +354,6 @@ def plan_config(kwargs: Dict[str, Any]) -> Dict[str, Any]:
         "face_detector":   kwargs.get("face_detector"),
         "asd":             kwargs.get("asd_model"),
         "lipsync":         kwargs.get("lipsync_model"),
-        "restore":         kwargs.get("restore_model"),
         "mix":             kwargs.get("mix"),
         "skip_stems":      kwargs.get("skip_stems"),
         "timing_producer": kwargs.get("timing_producer"),
@@ -340,8 +373,8 @@ def plan_config(kwargs: Dict[str, Any]) -> Dict[str, Any]:
 # estimates
 # ---------------------------------------------------------------------------
 
-def estimate_runtime(duration_s: float, *, lipsync_model: Optional[str] = None,
-                     restore_model: Optional[str] = None) -> Dict[str, Any]:
+def estimate_runtime(duration_s: float, *,
+                     lipsync_model: Optional[str] = None) -> Dict[str, Any]:
     """`{low_s, high_s, text, exact}` for a clip of `duration_s`.
 
     `exact=False` always: the base band is not measured the way the lip-sync
@@ -359,12 +392,6 @@ def estimate_runtime(duration_s: float, *, lipsync_model: Optional[str] = None,
         low += d * lo
         high += d * hi
         parts.append(f"{ls} at {lo:g}-{hi:g}x")
-    rs = (restore_model or "").lower()
-    if rs in RESTORE_FACTORS:
-        lo, hi = RESTORE_FACTORS[rs]
-        low += d * lo
-        high += d * hi
-        parts.append(f"{rs} at a further ~13x")
 
     return {
         "low_s": int(round(low)),

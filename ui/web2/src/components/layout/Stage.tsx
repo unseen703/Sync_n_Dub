@@ -1,6 +1,8 @@
 import { MotionConfig } from 'framer-motion';
 import { TopBar } from './TopBar';
 import { Landing } from './Landing';
+import { EditAgentPage } from '../agent/EditAgentPage';
+import { TalkingHeadPage } from '../talkinghead/TalkingHeadPage';
 import { StageRibbon } from '../progress/StageRibbon';
 import { FailureCard } from '../progress/FailureCard';
 import { VideoStage } from '../video/VideoStage';
@@ -31,14 +33,39 @@ export function Stage() {
   const media = useStore((s) => s.media);
   const jobError = useStore((s) => s.jobError);
   const refreshProgress = useStore((s) => s.refreshProgress);
+  const editing = useStore((s) => s.editing);
 
+  const talkingHead = useStore((s) => s.talkingHead);
   const centre = deriveCentreState(progress, media);
+
+  // Checked before the no-selection branch: this page has no job behind it,
+  // so it would otherwise fall through to the landing page.
+  if (talkingHead) {
+    return (
+      <MotionConfig reducedMotion="user">
+        <div className="min-h-0 flex-1 overflow-y-auto px-4 lg:px-6">
+          <TalkingHeadPage />
+        </div>
+      </MotionConfig>
+    );
+  }
 
   if (!selected) {
     return (
       <MotionConfig reducedMotion="user">
         <div className="min-h-0 flex-1 overflow-y-auto px-4 lg:px-6">
           <Landing />
+        </div>
+      </MotionConfig>
+    );
+  }
+
+  if (editing) {
+    return (
+      <MotionConfig reducedMotion="user">
+        <TopBar />
+        <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3 lg:px-5 lg:py-4">
+          <EditAgentPage jobId={selected} />
         </div>
       </MotionConfig>
     );

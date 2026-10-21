@@ -71,7 +71,6 @@ LIPSYNC_RATES: Dict[str, float] = {
 }
 
 #: A restoration pass is a *second* pass over the render, not a cheaper one.
-RESTORE_RATE = 13.0
 
 #: Seconds of TTS per segment, measured over the Edge and Bodhan paths.
 TTS_S_PER_SEGMENT = 0.6
@@ -115,8 +114,6 @@ def _estimate(stage: str, *, clip_s: Optional[float],
         if clip_s is None or rate is None:
             return None
         total = clip_s * rate
-        if config.get("restore"):
-            total += clip_s * RESTORE_RATE
         return round(total, 1)
     # codemix (one network call per cue), duration, timing, vc: no rate has
     # been measured on this host. Say so by omission.

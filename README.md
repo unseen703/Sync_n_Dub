@@ -58,7 +58,7 @@ that logged like a working feature. All 45 `indic-speak` clips are now rendered;
 regenerate with `$PY scripts/build_voice_refs.py` (idempotent, re-runs fill only
 gaps, expect 429s). They are gitignored because that one command rebuilds them.
 
-**Render them with the engine; never download them.** The cosine is only
+**They are rendered by the engine rather than downloaded.** The cosine is only
 meaningful against what the candidate voice actually sounds like, so a clip of a
 different human filed under `Amit.wav` scores a confident match on the wrong
 timbre — strictly worse than having none. A zero-shot engine whose voices *are*
@@ -91,56 +91,30 @@ Launch it detached via `scripts/run_clip_asd_musetalk.sh` (tmux `dubsync`); it
 writes `STATUS.json` per phase so a later session can answer "where is it" from
 disk instead of from the transcript.
 
-### Sharpening the face afterwards
+### The face comes back soft, and nothing sharpens it
 
-Lip-sync models rebuild the mouth at a small fixed working resolution — Wav2Lip
-generates a 96x96 crop and pastes it back — so the region they touched comes
-back softer than the face around it. The fix is a face-restoration pass over
-the finished render, which is what
-[Wav2Lip-CodeFormer](https://github.com/langzizhixin/Wav2Lip-CodeFormer)
-packages: Wav2Lip moves the mouth, then CodeFormer rebuilds the whole face
-through a learned codebook.
+Lip-sync models rebuild the mouth at a small fixed working resolution —
+Wav2Lip generates a **96x96** crop and pastes it back, MuseTalk 256x256 — so
+the region they touched comes back softer than the face around it. The higher
+the source resolution, the more visible it is: on a 4K frame with the face at
+24% of frame height (~520 px), a 96x96 crop is upscaled roughly 5x.
 
-`models/restore/` is that as a stage. It runs after lip-sync, takes video in
-and video out, and chains automatically:
+There used to be a face-restoration stage for this (`models/restore/`,
+CodeFormer, `--restore codeformer`). **It was removed on 2026-10-17** along
+with its CLI flags, its comparison script and the UI plumbing. Nothing in the
+pipeline re-sharpens the animated region now.
 
-```bash
-python scripts/run_lipsync_only.py --model wav2lip --stem <stem> \
-       --restore codeformer --restore-fidelity 0.7 --restore-upscale 1
-```
+What is left is model choice. `--lipsync musetalk` works at 256x256 rather
+than 96x96, which is ~2.7x the linear mouth resolution, at 8-21x clip length
+instead of 3-5x. The face probe picks between them automatically from face
+size (the threshold is 25% of frame height); `--lipsync musetalk` overrides it
+when the shot is unusual — a 4K source is exactly that case.
 
-or `run_lipsync(..., restore="codeformer")` from the pipeline, which records
-the pass under `extra.lipsync.restore` in the manifest and keeps the
-un-restored render beside the restored one so the two stay comparable.
-
-Two defaults are deliberate. `--restore-upscale 1` keeps the frame's own
-resolution, so the only pixels that change are the detected faces — a
-restoration pass should not quietly also be an upscale. And the background
-upsampler is off: upstream's notebook enables Real-ESRGAN, which rewrites the
-whole frame and costs VRAM that the lip-sync model has usually just spent.
-
-`--restore-fidelity` is CodeFormer's `-w`: 0 produces the best-looking face, 1
-stays closest to the input. 0.5-0.7 is upstream's range for genuinely degraded
-faces, and a Wav2Lip mouth qualifies.
-
-The pass is only worth running where there is a face to restore. It reports
-`frames_with_faces`, and a run that finds none still exits 0 while re-encoding
-the input unchanged — the stage says so rather than letting that read as a
-success.
-
-Measured on this host, 30 s / 747 frames of 1280x720 (one small
-picture-in-picture speaker) on one RTX PRO 2000: **386 s wall, ~770 MiB VRAM**,
-roughly 0.5 s/frame and about 13x realtime — comparable to the Wav2Lip pass it
-follows (237 s), so budget for the restoration roughly doubling a Wav2Lip run.
-It rewrote 0.75% of each frame, confined to a 139x131 box around the face
-(2.0% of the frame), and raised detail there (variance of Laplacian) by **+36%**
-in 6 of 6 sampled frames.
-
-To check a pass did what it claims, use
-[scripts/compare_restore.py](scripts/compare_restore.py). Run the restoration
-with `--restore-keep-frames` and compare with `--frames <work_dir>`: diffing
-the two *rendered videos* instead measures the gap between two H.264 encoders,
-which is large enough to hide the result entirely.
+For reference, the removed pass measured 386 s on 30 s / 747 frames of 720p
+(~13x realtime, ~770 MiB VRAM), roughly doubling a Wav2Lip run, and raised
+detail in a 139x131 box around the face by +36%. The vendored
+`third_party/CodeFormer/` checkout is still on disk; the adapter that drove it
+is not.
 
 ## Translation script: code-mix is the default
 
@@ -183,7 +157,7 @@ code-mix/script-normalisation stage in [backend/codemix.py](backend/codemix.py)
 is for (`--translit`, `--termbase`): it detects retained spans, transliterates
 them in one batch, and substitutes them back. `scripts/clip_dub_audio.py`
 exposes that as `--normalize-script` — off by default, and the *opposite* of
-`--target-script codemix`, so do not combine the two.
+`--target-script codemix`; the two cancel each other out when combined.
 
 ## Pacing the dub: two speed modes
 
@@ -309,9 +283,9 @@ conda run -n dubui npm --prefix ui/web2 install
 conda run -n dubui npm --prefix ui/web2 run build
 ```
 
-Always via `conda run` — the system node is v12 and bare `npm` fails with
-`Cannot find module 'node:path'`, which looks like a corrupt install and is
-not. See CLAUDE.md §1.
+The `conda run` wrapper is what makes this work — the system node is v12 and
+bare `npm` fails with `Cannot find module 'node:path'`, which looks like a
+corrupt install and is not. See CLAUDE.md §1.
 
 If `ui/web-dist/` is missing or stale the server falls back to the old
 read-only inspector in `ui/web/`, which stays reachable at `/legacy`. A broken
@@ -369,10 +343,10 @@ segment's `edit_backup`, and each request is journalled into `extra.edits` and
 **The LLM is used for two things only** — reading the request, and rewriting
 text for `retranslate` / `set_tone` / `code_mix mode=llm`. Resolving a
 timestamp to a cue, picking a voice of a given gender, computing a stretch
-factor and deciding which stages are dirty are all ordinary code, because
-those are the parts that must not be improvised. It goes through
+factor and deciding which stages are dirty are all ordinary code, which keeps
+those parts deterministic. It goes through
 [backend/llm.py](backend/llm.py) to OpenRouter, default
-`google/gemma-3-4b-it`; `--check-llm` verifies the key and slug in one round
+`google/gemma-3-12b-it`; `--check-llm` verifies the key and slug in one round
 trip. With no key the agent still runs on a regex parser, and only the three
 text-rewriting ops refuse.
 
@@ -560,7 +534,7 @@ Prose outside the block is written by hand and is not touched by the script.
 
 <!-- BEGIN AUTOGEN:structure -->
 
-*Regenerated by `scripts/repo_checkup.py` — 2026-10-17T14:25:17. Edits inside this block are overwritten; write prose outside it.*
+*Regenerated by `scripts/repo_checkup.py` — 2026-10-20T00:09:22. Edits inside this block are overwritten; write prose outside it.*
 
 ### Layout
 
@@ -572,15 +546,19 @@ audio_browser.ipynb
 backend/
 comparison-results.md
 data/
+docs/
 experiments/
+gfpgan/
 lipsync-history.md
 logs/
 models/
+next_implementation_steps.py
 notebooks/
 plan.md
 reference.py
 requirements.txt
 resourses_for_suggested_edits./
+run_w1l2_cli.sh
 scripts/
 setup.sh
 tests/
@@ -590,7 +568,7 @@ ui/
 
 ### `backend/` modules
 
-`align`  `asd`  `asr`  `assign_faces`  `classify`  `cli`  `codemix`  `diarize`  `downloader`  `duration`  `edit_agent`  `edits`  `emotion`  `experiment`  `faces`  `gender`  `gpu`  `jobs`  `lipsync`  `llm`  `media_io`  `mix`  `pipeline`  `sanitize`  `segment`  `speaker_id`  `stem_separation`  `stretch`  `timing`  `timing_advanced`  `transcripts`  `translate`  `tts`  `voice_convert`  `voices`
+`align`  `asd`  `asr`  `assign_faces`  `caption_asr`  `classify`  `cli`  `codemix`  `diarize`  `downloader`  `duration`  `edit_agent`  `edits`  `emotion`  `experiment`  `faces`  `gender`  `gpu`  `jobs`  `lipsync`  `lipsync_targets`  `llm`  `media_io`  `mix`  `pipeline`  `sanitize`  `segment`  `speaker_id`  `stem_separation`  `stretch`  `timing`  `timing_advanced`  `tracing`  `transcripts`  `translate`  `tts`  `voice_convert`  `voices`
 
 ### Adapter registries
 
@@ -605,14 +583,13 @@ Every stage resolves its implementation through a `_REGISTRY_SPEC`, so adding a 
 | `emotion` | `emotion2vec` |
 | `faces.detect` | `mediapipe`, `retinaface` |
 | `faces.track` | `bytetrack` |
-| `lipsync` | `latentsync`, `lipgan`, `musetalk`, `wav2lip` |
+| `lipsync` | `latentsync`, `lipgan`, `musetalk`, `wav2lip`, `wav2lip_hd` |
 | `mt` | `bodhan`, `nllb` |
-| `restore` | `codeformer` |
 | `translit` | `bodhan`, `indicxlit` |
 | `tts` | `bodhan`, `indicf5` |
 | `vc` | `openvoice`, `vevo` |
 
-### Pipeline stages (25)
+### Pipeline stages (26)
 
 In execution order, as logged by `backend/pipeline.py`:
 
@@ -625,6 +602,7 @@ In execution order, as logged by `backend/pipeline.py`:
 4c    speaker label refinement
 5     face detect+track
 6     ASD + Hungarian assignment
+7     transcript from captions
 7     ASR
 8     forced alignment
 9     machine translation
@@ -646,15 +624,15 @@ In execution order, as logged by `backend/pipeline.py`:
 
 ### `scripts/`
 
-`archive_data.sh`  `benchmark_gender.py`  `build_clip_cues.py`  `build_voice_refs.py`  `calibrate_tts_duration.py`  `clip_asd_musetalk_run.py`  `clip_dub_audio.py`  `compare_restore.py`  `extract_corpus_audio.sh`  `fetch_captions_runner.sh`  `fetch_corpus.py`  `fetch_indic_audio.py`  `fetch_indic_captions.py`  `hi_cue_floor.py`  `regroup_lipsync_into_jobs.py`  `repo_checkup.py`  `rerun_iit_musetalk_revoiced.sh`  `revoice_lipsynced.py`  `run_clip_asd_musetalk.sh`  `run_gt_hindi_dub.py`  `run_iit_musetalk_indic15.sh`  `run_lipsync.sh`  `run_lipsync_only.py`  `run_nag_wav2lip_codeformer.sh`  `run_nag_wav2lip_indic15.sh`  `run_sweep.sh`  `select_clips.py`  `setup.py`  `ui_run_job.sh`
+`archive_data.sh`  `benchmark_gender.py`  `build_clip_cues.py`  `build_voice_refs.py`  `calibrate_tts_duration.py`  `clip_asd_musetalk_run.py`  `clip_dub_audio.py`  `extract_corpus_audio.sh`  `fetch_captions_runner.sh`  `fetch_corpus.py`  `fetch_indic_audio.py`  `fetch_indic_captions.py`  `gpu_watcher.py`  `hi_cue_floor.py`  `langfuse_usage.py`  `regroup_lipsync_into_jobs.py`  `repo_checkup.py`  `rerun_iit_musetalk_revoiced.sh`  `revoice_lipsynced.py`  `run_clip_asd_musetalk.sh`  `run_gt_hindi_dub.py`  `run_iit_musetalk_indic15.sh`  `run_lipsync.sh`  `run_lipsync_only.py`  `run_nag_wav2lip_indic15.sh`  `run_sweep.sh`  `run_wav2liphd_clips.sh`  `select_clips.py`  `setup.py`  `setup_wav2liphd.py`  `ui_run_job.sh`  `wav2liphd_enhance.py`
 
 ### `tests/`
 
-`conftest`  `test_edit_agent`  `test_experiment_isolation`  `test_face_import_order`  `test_gender`  `test_restore_registry`  `test_speaker_id`  `test_speed_mode`  `test_stretch`  `test_timing_plan`  `test_ui_create`  `test_ui_edits`  `test_ui_errors`  `test_ui_media`  `test_ui_progress`  `test_ui_queue`  `test_ui_server`  `test_ui_speakers`
+`conftest`  `test_caption_asr`  `test_coord_cache`  `test_edit_agent`  `test_experiment_isolation`  `test_face_import_order`  `test_gender`  `test_gpu_pick`  `test_lipsync_env_python`  `test_lipsync_failure_honesty`  `test_lipsync_targets`  `test_musetalk_frame_parity`  `test_register_to_tts`  `test_speaker_face_tracks`  `test_speaker_id`  `test_speed_mode`  `test_staged_review`  `test_stretch`  `test_talking_head`  `test_timing_plan`  `test_tracing`  `test_ui_backend_sync`  `test_ui_create`  `test_ui_edits`  `test_ui_errors`  `test_ui_media`  `test_ui_progress`  `test_ui_queue`  `test_ui_register_row`  `test_ui_server`  `test_ui_speakers`
 
 ### `third_party/` clones
 
-`CodeFormer`  `LatentSync`  `LipGAN`  `MuseTalk`  `TalkNet-ASD`  `Wav2Lip`
+`LatentSync`  `LipGAN`  `MuseTalk`  `TalkNet-ASD`  `Wav2Lip`  `Wav2Lip-HD`  `langfuse`
 
 ### Project skills (`.claude/skills/`)
 
@@ -664,9 +642,9 @@ In execution order, as logged by `backend/pipeline.py`:
 
 GPUs: NVIDIA RTX PRO 2000 Blackwell, 16311 MiB; NVIDIA RTX PRO 2000 Blackwell, 16311 MiB
 
-Environments: `chemformer`, `chemformer-gpu`, `dubbing`, `dubui`, `latentsync`, `lipgan`, `musetalk`, `vllm`, `.venv-diarization`
+Environments: `chemformer`, `chemformer-gpu`, `dubbing`, `dubui`, `latentsync`, `lipgan`, `musetalk`, `vllm`, `wav2liphd`, `.venv-diarization`
 
-CLI surface: 80 flags on `backend/cli.py` (`python -m backend.cli --help`).
+CLI surface: 79 flags on `backend/cli.py` (`python -m backend.cli --help`).
 
 <!-- END AUTOGEN:structure -->
 

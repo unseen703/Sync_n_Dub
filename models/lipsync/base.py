@@ -18,6 +18,62 @@ from pathlib import Path
 from typing import Optional
 
 
+def resolve_env_python(model: str, env_name: str,
+                       explicit: Optional[str] = None) -> str:
+    """Interpreter for an adapter that CANNOT run in the `dubbing` env.
+
+    MuseTalk and LatentSync have upstream pins incompatible with `dubbing`,
+    which is why they have their own conda envs. The adapters used to resolve
+    `<MODEL>_PYTHON or sys.executable`, and an empty value is the normal case:
+    neither variable was in `.env.example` (added 2026-10-17), and
+    `LIPGAN_PYTHON` / `WAV2LIP_PYTHON` being legitimately blank makes a blank
+    look safe. The fallback then ran MuseTalk under `dubbing`, where
+    `import diffusers` fails -- AFTER a full run has paid for ASR, MT, TTS and
+    the mix, with the adapter still logging "done" and the manifest recording
+    an output path that does not exist.
+
+    So the sibling conda env is tried BEFORE `sys.executable`: `dubbing`'s
+    interpreter lives at `<prefix>/envs/dubbing/bin/python`, so a sibling is
+    `<prefix>/envs/<env_name>/bin/python`. Derived from `sys.executable`
+    rather than hard-coded, which is the same trick `media_io._ffmpeg_bin()`
+    uses to find the env actually executing. Resolving it here fixes the CLI,
+    the UI runner, the edit agent and `experiment.py` at once, instead of
+    each launcher remembering to export a variable.
+
+    Order: explicit argument -> `<MODEL>_PYTHON` -> sibling env ->
+    `sys.executable` (warned, because that is the shape that failed).
+    """
+    import logging
+    import os
+    import sys
+
+    log = logging.getLogger(__name__)
+    var = f"{model.upper()}_PYTHON"
+
+    for value, source in ((explicit, "argument"), (os.getenv(var), var)):
+        if value and str(value).strip():
+            return str(value).strip()
+
+    try:
+        envs_dir = Path(sys.executable).resolve().parents[2]
+        sibling = envs_dir / env_name / "bin" / "python"
+        if sibling.is_file():
+            log.info("%s: using sibling env interpreter %s (set %s to override)",
+                     model, sibling, var)
+            return str(sibling)
+    except (IndexError, OSError):
+        pass
+
+    log.warning(
+        "%s: no %s and no sibling '%s' conda env; falling back to %s. This "
+        "interpreter is very likely missing %s's dependencies, and the "
+        "failure lands at the lip-sync stage after the rest of the run has "
+        "already been paid for.",
+        model, var, env_name, sys.executable, model,
+    )
+    return sys.executable
+
+
 @dataclass
 class LipSyncRequest:
     """One (video, audio) pair to run through a lip-sync model.

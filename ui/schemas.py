@@ -14,7 +14,7 @@ from typing import Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from .presets import PRESET_IDS
+from .presets import PRESET_IDS, resolve_preset
 
 #: The shortest window worth a run. Below this diarization has nothing to
 #: segment and the GPU stages spend longer loading models than rendering.
@@ -42,10 +42,30 @@ class ProbeRequest(BaseModel):
 class JobRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    url: str = Field(min_length=1, max_length=2048)
+    #: Exactly one of `url` / `upload_id`. A URL goes through the host
+    #: allowlist and yt-dlp; an upload was already staged and probed by
+    #: `POST /api/uploads` and carries neither. `routes_create.create_job`
+    #: enforces the "exactly one" rule, because the message it produces
+    #: ("give a link or upload a file, not both") is worth more than a
+    #: pydantic validation blob.
+    url: Optional[str] = Field(default=None, min_length=1, max_length=2048)
+    upload_id: Optional[str] = Field(default=None, pattern=r"^[0-9a-f]{32}$")
     target_language: str = Field(min_length=2, max_length=16)
+    #: What is SPOKEN in the source. None means "let the ASR detect it",
+    #: which on short diarization turns is unreliable: an English lecture
+    #: came back on 2026-10-17 transcribed into Telugu, Gujarati, Malayalam
+    #: and English across nine turns. The adapter now detects once and pins
+    #: it, but a stated language beats a guessed one.
+    source_language: Optional[str] = Field(default=None, min_length=2,
+                                           max_length=16)
+    #: Whole-dub delivery register (`tts_style`). One of
+    #: `ui.speakers.SUBMIT_STYLES`, or None for the engine's neutral read.
+    style: Optional[str] = Field(default=None, max_length=64)
     window: Optional[Window] = None
-    preset: str = Field(default="standard")
+    #: One flow since 2026-10-20 (`presets.PRESET_ID`). The retired ids
+    #: `draft` / `standard` / `best` are still accepted and map onto it,
+    #: because a browser holding the older bundle still posts `standard`.
+    preset: str = Field(default="dub")
     #: None means "the install default" (`presets.default_tts()`), not "no
     #: TTS" — a dub with no TTS is not a thing this form can ask for.
     tts: Optional[str] = None
@@ -54,25 +74,17 @@ class JobRequest(BaseModel):
     lipsync_model: Optional[str] = None
     num_speakers: Optional[int] = Field(default=None, ge=1, le=32)
     skip_stems: Optional[bool] = None
-    #: Face restoration after lip-sync. OPT-IN: None means off, whatever the
-    #: preset once said. It roughly doubles GPU time (~10-16x clip length on
-    #: top of lip-sync's own 3-21x), rebuilds every face it finds rather than
-    #: only the one that was animated, and cannot be measured by diffing the
-    #: two rendered videos. Ask for it deliberately: `"restore_model":
-    #: "codeformer"`.
-    restore_model: Optional[str] = None
 
     @field_validator("preset")
     @classmethod
     def _known_preset(cls, v: str) -> str:
-        # Rejected rather than silently coerced to "standard": a typo that
-        # quietly produced a different, slower run would be discovered only
-        # by the GPU bill.
-        p = (v or "").strip().lower()
-        if p not in PRESET_IDS:
-            raise ValueError(f"unknown preset {v!r}; expected one of "
-                             f"{', '.join(PRESET_IDS)}")
-        return p
+        # A retired id maps onto the single flow; anything else is REJECTED
+        # rather than silently coerced, because a typo that quietly produced
+        # a different run would be discovered only by the GPU bill.
+        try:
+            return resolve_preset(v)
+        except ValueError as e:
+            raise ValueError(str(e)) from None
 
     @field_validator("target_language", "tts", "lipsync_model")
     @classmethod

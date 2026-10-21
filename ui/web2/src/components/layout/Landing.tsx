@@ -3,6 +3,7 @@ import { Button } from '../ui/Button';
 import { IconFilm, IconGlobe, IconSparkle, IconWave } from '../ui/Icons';
 import { useStore } from '../../store/useStore';
 import { LANGUAGES } from '../../lib/lang';
+import { StartPanel } from './StartPanel';
 
 /**
  * What the user sees before they have picked a dub — and the first thing a
@@ -40,7 +41,6 @@ const STEPS = [
 ];
 
 export function Landing() {
-  const setNewJobOpen = useStore((s) => s.setNewJobOpen);
   const jobs = useStore((s) => s.jobs);
   const loaded = useStore((s) => s.jobsLoaded);
   const selectJob = useStore((s) => s.selectJob);
@@ -80,14 +80,53 @@ export function Landing() {
         </p>
 
         <div className="flex flex-wrap items-center gap-3">
-          <Button variant="primary" size="lg" onClick={() => setNewJobOpen(true)}>
+          <Button
+            variant="primary"
+            size="lg"
+            onClick={() => document.querySelector<HTMLInputElement>('#start-url')?.focus()}
+          >
             Start a dub
           </Button>
           <span className="text-[12.5px] text-ink3">
-            or press <Kbd>N</Kbd> from anywhere
+            paste a link below — or press <Kbd>N</Kbd> from anywhere
           </span>
         </div>
       </div>
+
+      {/* The home page starts a dub itself. The dialog is still there for
+          the window picker and the lip-sync model; this covers the common
+          case in one screen. */}
+      <div className="mt-8">
+        <StartPanel />
+      </div>
+
+      {/* The other thing this tool can do. Kept to one line and one link:
+          it is a different job from dubbing a video, and burying it in the
+          dub form would make both harder to find. */}
+      <button
+        type="button"
+        onClick={() => {
+          location.hash = '#/talking-head';
+        }}
+        className="card mt-3 flex w-full items-center gap-3 p-4 text-left transition-colors
+                   hover:border-edge/70 hover:bg-surface"
+      >
+        <span
+          className="grid h-9 w-9 flex-none place-items-center rounded-xl border border-line
+                     bg-gradient-to-br from-brand/25 to-aqua/15 text-brand-ink"
+          aria-hidden="true"
+        >
+          <IconSparkle width={17} height={17} />
+        </span>
+        <span className="min-w-0">
+          <span className="block text-[13.5px] font-semibold text-ink">
+            Talking head — make a photo speak
+          </span>
+          <span className="mt-1 block text-[12.5px] leading-relaxed text-ink3">
+            Upload a portrait, pick a language and a line. No video needed.
+          </span>
+        </span>
+      </button>
 
       <ol className="mt-10 grid gap-3 sm:grid-cols-2">
         {STEPS.map(({ Icon, title, body }, i) => (

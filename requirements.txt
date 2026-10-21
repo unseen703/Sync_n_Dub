@@ -43,6 +43,25 @@ pyannote.audio>=3.4.0
 # `onnxruntime` — cosmetic: onnxruntime-gpu provides that module, pip just
 # cannot see the distribution name. See CLAUDE.md section 1.
 insightface>=0.7.3
+
+# librosa reached this env only as a transitive dependency of `funasr` (the
+# optional emotion stage) until 2026-10-18, when `backend/gender.py` made it
+# load-bearing in stage 9d -- which runs on every dub. Declared outright so a
+# lean install does not lose a gender voter silently. `backend/segment.py`
+# has imported it all along.
+librosa>=0.10
+
+# Langfuse — LLM tracing/usage/cost for `backend/tracing.py`. Optional at
+# RUNTIME (no keys = no-op) but imported by `backend/llm.py`, so it is a
+# hard install dependency.
+#
+# PIN protobuf ALONGSIDE IT. `pip install langfuse` on its own resolves
+# protobuf 6.32.0 -> 7.36.2, a major bump in a package onnxruntime, NeMo
+# and TensorFlow all link here. langfuse itself is happy with <8.0,>=5.0,
+# so the pin costs nothing and the upgrade is pure risk:
+#     pip install langfuse "protobuf==6.32.0"
+langfuse>=4.18,<5
+protobuf==6.32.0
 onnxruntime-gpu>=1.17
 mediapipe>=0.10.14
 opencv-python-headless>=4.9        # cv2 for frame decode; headless avoids GUI deps
@@ -86,16 +105,10 @@ sacrebleu>=2.4       # BLEU / chrF
 rouge-score>=0.1.2   # ROUGE-1 / ROUGE-2 / ROUGE-L
 nltk>=3.8            # METEOR
 
-# -------- face restoration (models/restore) --------
-# CodeFormer vendors its own trimmed `basicsr` inside third_party/CodeFormer,
-# so basicsr is NOT installed from pip — the adapter puts the repo root on
-# PYTHONPATH instead. Installing pip's basicsr alongside it would shadow the
-# vendored one and drag in torchvision pins this env cannot satisfy. These are
-# the four imports that vendored tree needs and the env did not already have.
-lpips>=0.1.4         # basicsr.losses
-addict>=2.4          # basicsr config dicts
-yapf>=0.40           # basicsr.utils.options
-lmdb>=1.4            # basicsr.data
+# `lpips`, `addict`, `yapf` and `lmdb` were here only for CodeFormer's
+# vendored basicsr. Face restoration was removed on 2026-10-17 (models/restore,
+# third_party/CodeFormer and the --restore flags all gone), so they went with
+# it. Nothing else in the tree imports them.
 
 # -------- operator UI (ui/server.py) --------
 # These were running from the conda env without ever being declared, so a

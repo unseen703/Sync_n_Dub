@@ -31,8 +31,8 @@ A subtitle timed to the dub matches the Hindi audio more often and more tightly.
 
 Consequences, per video:
 
-- **`6-NRiom8K9Y`** — the Hindi subtitle is a translation laid on the English timeline. Use it as
-  reference **text only**. Hindi timing ground truth must come from whisperx forced-align on
+- **`6-NRiom8K9Y`** — the Hindi subtitle is a translation laid on the English timeline, so it
+  serves as reference **text only**. Hindi timing ground truth comes from whisperx forced-align on
   `6-NRiom8K9Y.hi.webm` using that text as the transcript, cross-checked against VAD.
 - **`ZPUtA3W-7_I`, `qjPH9njnaVU`** — Hindi cue times are usable as a timing reference. Still refine
   to word level with whisperx forced-align; the cue-level offsets above (74–97 ms) are the floor on
@@ -52,8 +52,8 @@ Inline `<00:00:00.378><c>word</c>` timestamps exist only in the auto-caption tra
 There is **no `hi-orig` track on any video in this corpus**, so there are no published Hindi word
 timings. Hindi word-level ground truth is whisperx forced-align on the dub audio, for all four.
 
-Note: these auto-caption files are rolling captions and must be read with `parse_vtt_words`, never
-`parse_vtt` — the latter inflates word counts roughly 2x (see Phase 0.4).
+Note: these auto-caption files are rolling captions, which `parse_vtt_words` handles and
+`parse_vtt` does not — the latter inflates word counts roughly 2x (see Phase 0.4).
 
 ## Duration lock
 
@@ -109,8 +109,8 @@ Two limits on what that number covers:
 - **The six NPTEL clips have no floor at all.** That video carries manual subtitles but no
   auto-captions, so there is no second word stream to disagree with. They are still the primary
   ranker — domain-matched IIT Madras lecture content — but a timing claim resting only on NPTEL
-  clips inherits the 55 ms floor from the other videos by assumption, not by measurement, and the
-  report must say so.
+  clips inherits the 55 ms floor from the other videos by assumption, not by measurement, which
+  the report records alongside the number.
 
 ## Which clips may carry which metric
 
@@ -151,7 +151,7 @@ Two consequences worth stating plainly:
   which is what this pipeline targets), so the ranking leans more on the Modi interview than the
   corpus design intended. Per-video breakdowns accompany every pooled number.
 - **At n=7 the bootstrap floors widen** against the n=12 figures quoted elsewhere in the plan. The
-  floors must be recomputed at the real n before any method is declared a winner, and the resolution
+  floors are recomputed at the real n before a method is declared a winner, and the resolution
   remains `max(bootstrap floor, 55 ms ground-truth floor)`.
 
 ## Metric calibration: the no-op baseline, and what it disqualifies
@@ -177,8 +177,8 @@ heavily no matter how badly aligned they are. The metric's entire usable range i
 and its clip-to-clip spread at the floor (0.580–0.970, i.e. 0.390) is **three times** that headroom.
 A difference between methods cannot be distinguished from a difference between clips.
 
-Speech IoU therefore moves out of the headline table and is reported as a **guard** — it should
-catch a method that stops producing audio, and nothing finer. This supersedes the plan's
+Speech IoU therefore moves out of the headline table and is reported as a **guard** — it catches
+a method that stops producing audio, and nothing finer. This supersedes the plan's
 `IoU >= 0.60` row.
 
 ### Pause F1 @ 200 ms is the discriminator
@@ -215,7 +215,7 @@ comes from a single producer — `whisperx forced-align (hi)` — with nothing t
 `meta.agreement_median_ms.ref_dub` records this verbatim as
 `"needs BOTH a caption word stream and whisperx words; caption=0, whisperx=<n>"`.
 
-The 55 ms figure must therefore **not** be quoted as "the ground truth's noise floor" for the method
+The 55 ms figure is therefore **not** "the ground truth's noise floor" for the method
 ranking. It is the floor of the *English source* word stream, on a language with two independent
 alignments available. The Hindi reference is the side every timing metric is actually scored against,
 and it has no such check.

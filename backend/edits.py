@@ -40,6 +40,7 @@ from __future__ import annotations
 import datetime as _dt
 import json
 import logging
+import re
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
@@ -145,7 +146,18 @@ class Scope:
                     f"no segments for speaker {self.speaker!r} "
                     f"(known: {', '.join(known) or 'none'})")
 
-        if self.start_s is not None and self.end_s is not None:
+        # A ZERO-WIDTH window is the point path wearing the wrong shape, and
+        # it matches almost nothing: the overlap test is strict
+        # (`end > lo and start < hi`), so `45–45` catches only a cue that
+        # straddles 45.0 exactly and answers "matched no segments" otherwise.
+        # The parser prompt says to OMIT `end_s` for a single point in time
+        # and a 4B model routinely emits `end_s == start_s` instead -- which
+        # is how "make the tone more formal after 0:45" became a 422. Treat
+        # it as the point it plainly means; it has no other sensible reading.
+        zero_width = (self.start_s is not None and self.end_s is not None
+                      and float(self.start_s) == float(self.end_s))
+
+        if self.start_s is not None and self.end_s is not None and not zero_width:
             lo, hi = sorted((float(self.start_s), float(self.end_s)))
             picked = [s for s in picked
                       if _seg_end(s) > lo and _seg_start(s) < hi]
@@ -275,6 +287,16 @@ OP_SPECS: List[OpSpec] = [
         examples=['change the line at 1:20 to "यह गलत अनुवाद था"'],
     ),
     OpSpec(
+        name="replace_term", dirty_from="tts",
+        params={"find": "the word or phrase exactly as it appears now",
+                "replace": "the exact replacement; omit it to have `find` "
+                           "translated into the target language"},
+        summary="Replace one word or phrase inside the line and leave every "
+                "other character identical.",
+        examples=['translate the word "conditional" into Hindi',
+                  'replace "cloud" with "क्लाउड" everywhere'],
+    ),
+    OpSpec(
         name="retranslate", dirty_from="tts",
         params={"instruction": "how the new translation should differ",
                 "target_language": "ISO code, only if it changes"},
@@ -312,6 +334,15 @@ OP_SPECS: List[OpSpec] = [
                   "SPEAKER_01 is male, not female"],
     ),
     OpSpec(
+        name="set_speaker", dirty_from="voices",
+        params={"speaker": "the speaker id that really talks here, "
+                           "e.g. SPK_02"},
+        summary="Reattribute a stretch of dialogue to a different speaker, "
+                "so it is spoken in THAT speaker's voice.",
+        examples=["the line at 1:20 is SPK_02, not SPK_00",
+                  "from 0:30 to 0:45 that is the second speaker"],
+    ),
+    OpSpec(
         name="set_voice", dirty_from="voices",
         params={"voice": "engine voice id, e.g. hi-IN-MadhurNeural or Aditi",
                 "engine": "tts engine, only if it changes"},
@@ -337,6 +368,154 @@ OP_SPECS: List[OpSpec] = [
 ]
 
 OPS: Dict[str, OpSpec] = {s.name: s for s in OP_SPECS}
+
+
+#: What re-running from a stage actually means, in a sentence. Keyed by the
+#: `dirty_from` values above, so the explanation a user reads is derived from
+#: the rerun logic rather than written alongside it and left to rot.
+STAGE_PLAIN: Dict[str, str] = {
+    "codemix":  "re-translates the affected lines, then re-speaks, remixes "
+                "and re-syncs them",
+    "duration": "re-fits the timing, then re-speaks, remixes and re-syncs",
+    "voices":   "re-casts the voice, then re-speaks those lines, remixes "
+                "the audio and re-syncs the lips",
+    "tts":      "re-speaks the affected lines, remixes the audio and "
+                "re-syncs the lips",
+    "vc":       "re-converts the voice, remixes and re-syncs",
+    "timing":   "re-fits the timing, remixes and re-syncs",
+    "mix":      "remixes the audio and re-syncs the lips",
+    "lipsync":  "re-syncs the lips only",
+}
+
+#: op name -> how it reads to a person. `title` is the action, `takes` is
+#: what the user supplies, `changes` is what it does to the DUB.
+#:
+#: The replay cost is deliberately NOT written here -- it is derived from
+#: the op's own `dirty_from` through `STAGE_PLAIN`. Authoring both halves by
+#: hand is how a description comes to promise a cheaper re-render than the
+#: op really causes. Splitting them also keeps `changes` honest in the other
+#: direction: `retranslate` replays from TTS, but what it CHANGES is the
+#: wording, and a reader told only "re-speaks the lines" would not know the
+#: translation itself moves.
+#:
+#: `tests/test_edit_agent.py` fails if an op has no entry, which is what
+#: stops a newly added op from surfacing in the UI as a bare identifier.
+USER_ACTIONS: Dict[str, Dict[str, str]] = {
+    "set_text": {
+        "title": "Rewrite a line",
+        "takes": "a moment in the video, and the exact wording you want",
+        "changes": "that line is spoken with your wording, word for word",
+    },
+    "replace_term": {
+        "title": "Change one word everywhere",
+        "takes": "the word as it appears now, and either the replacement or "
+                 "nothing (it will be translated for you)",
+        "changes": "only that word changes; the rest of the line stays "
+                   "exactly as it was",
+    },
+    "retranslate": {
+        "title": "Translate a passage again",
+        "takes": "a time range, and what to change about it "
+                 "(\"too literal\", \"simpler\")",
+        "changes": "the translation of those lines is rewritten, then spoken",
+    },
+    "set_tone": {
+        "title": "Change how a line is delivered",
+        "takes": "a time range or a speaker, and a tone such as formal, "
+                 "warm or urgent",
+        "changes": "the same words are spoken in a different manner",
+    },
+    "code_mix": {
+        "title": "Keep English words in English",
+        "takes": "optionally the terms to protect, e.g. gradient, weight",
+        "changes": "technical terms stay English inside the translated "
+                   "sentence instead of being translated",
+    },
+    "set_gender": {
+        "title": "Change a voice's gender",
+        "takes": "a speaker or a moment, and male or female",
+        "changes": "that speaker is re-cast from the other gender's voices",
+    },
+    "set_speaker": {
+        "title": "Reassign who is talking",
+        "takes": "a time range, and which speaker it really is",
+        "changes": "those lines move to that speaker and are read in THEIR "
+                   "voice; who speaks when is not recomputed",
+    },
+    "set_voice": {
+        "title": "Pick a specific voice",
+        "takes": "a speaker, and a voice from the catalogue",
+        "changes": "that speaker is read by the voice you named",
+    },
+    "set_speed": {
+        "title": "Speed up or slow down",
+        "takes": "a time range, and how much faster or slower",
+        "changes": "the dubbed speech is re-fitted into a shorter or "
+                   "longer slot; the picture is untouched",
+    },
+    "lipsync_window": {
+        "title": "Lip-sync only part of the video",
+        "takes": "a time range, and optionally which lip-sync model",
+        "changes": "only that stretch has its mouth re-animated and is "
+                   "spliced back into the full timeline",
+    },
+}
+
+
+def action_catalogue() -> List[Dict[str, Any]]:
+    """Every op as plain language: what it is, takes, changes, and the cost.
+
+    Served to the UI so the list cannot drift from the op registry. The repo
+    has paid for that before: `ui/speakers.py` first shipped an invented
+    tone vocabulary, and every tone change then failed at the API with
+    nothing on screen to explain it.
+    """
+    out: List[Dict[str, Any]] = []
+    for spec in OP_SPECS:
+        meta = USER_ACTIONS.get(spec.name)
+        if not meta:
+            continue
+        out.append({
+            "op": spec.name,
+            "title": meta["title"],
+            "takes": meta["takes"],
+            "changes": meta["changes"],
+            # Derived, never authored -- see the note above.
+            "replays": STAGE_PLAIN.get(spec.dirty_from, spec.dirty_from),
+            "examples": list(spec.examples or [])[:2],
+        })
+    return out
+
+
+def sample_prompts(per_op: int = 2) -> List[Tuple[str, str]]:
+    """`(phrasing, what it does)` pairs, in user language, for every op.
+
+    The op names (`lipsync_window`, `set_speaker`) are the agent's
+    vocabulary, not a person's. Listing them when a request fails to parse
+    tells the user what the CODE is called, which is not what they asked.
+    Each OpSpec already carries worked `examples` written as someone would
+    actually type them; this surfaces those instead.
+    """
+    out: List[Tuple[str, str]] = []
+    for spec in OP_SPECS:
+        for ex in (spec.examples or [])[:per_op]:
+            out.append((ex, spec.summary))
+    return out
+
+
+def sample_prompts_text(per_op: int = 2, indent: str = "  ") -> str:
+    """`sample_prompts` rendered for a terminal."""
+    lines = []
+    for spec in OP_SPECS:
+        ex = (spec.examples or [])[:per_op]
+        if not ex:
+            continue
+        lines.append(f"{indent}{spec.summary}")
+        for e in ex:
+            lines.append(f'{indent}  "{e}"')
+        lines.append("")
+    return "\n".join(lines).rstrip()
+
 
 
 # ---------------------------------------------------------------------------
@@ -609,6 +788,104 @@ def _h_set_text(data, seg_ids, op, applied, ctx, res):
         applied.changes.append(f"{sid}: {before!r} → {text!r}")
 
 
+#: Leading junk a small model prefixes to a "reply with the line only"
+#: answer. Measured on gemma-3-12b: a retranslate came back as
+#: `': cloud और इसी तरह …'` — the whole correct line behind a stray colon,
+#: which would then be SPOKEN by the TTS engine. Cheaper to strip here than
+#: to keep tightening the prompt against it.
+_REWRITE_JUNK = re.compile(r'^[\s:：\-–—•*>]+')
+
+
+def _clean_rewrite(text: str) -> str:
+    """Trim a rewritten line of the wrapper a model puts around it.
+
+    Quotes and code fences too: the prompts all say "reply with the line
+    ONLY", and the failure when that is not obeyed is silent — the stray
+    character is just read aloud.
+    """
+    out = (text or "").strip()
+    if out.startswith("```"):
+        out = out.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+    out = _REWRITE_JUNK.sub("", out).strip()
+    if len(out) >= 2 and out[0] == out[-1] and out[0] in "\"'\u201c\u201d":
+        out = out[1:-1].strip()
+    return out
+
+
+def _h_replace_term(data, seg_ids, op, applied, ctx, res):
+    """Swap one term inside the line; everything else is byte-identical.
+
+    `retranslate` could not do this. It hands the whole line to an LLM and
+    takes a whole line back, so even told to change one word the model
+    rewrites around it — measured on one cue, "translate the word
+    'conditional'" also turned `text generators` into `पाठ जनरेटर` in one
+    segment and `टेक्स्ट जेनरेटर` in the next. Two different renderings of a
+    phrase nobody asked about, in adjacent lines.
+
+    Here the substitution is `str`-level and the model, when it is used at
+    all, is asked for ONE WORD rather than a sentence. The rest of the cue
+    cannot drift because it is never regenerated.
+
+    `replace` omitted means "translate `find` into the target language" — one
+    LLM call per distinct term for the whole op, not one per segment, because
+    the same word in two cues must come out the same way. That consistency is
+    the other half of what `retranslate` got wrong.
+    """
+    find = str(op.params.get("find") or op.params.get("term")
+               or op.params.get("word") or "").strip()
+    if not find:
+        raise EditError("replace_term needs a `find` word or phrase")
+
+    repl = op.params.get("replace", op.params.get("replacement",
+                                                  op.params.get("to")))
+    repl = None if repl is None else str(repl)
+
+    if repl is None:
+        if ctx.rewriter is None:
+            raise EditError(
+                f"replace_term can translate {find!r} only with the LLM "
+                f"(OPENROUTER_API_KEY unset). Pass the replacement outright: "
+                f'replace "{find}" with "<your text>".')
+        lang = ctx.target_language or "the target language"
+        system = (
+            "You translate ONE word or short phrase for a subtitle. Reply "
+            "with the translation ONLY — no quotes, no commentary, no "
+            "alternatives, no explanation, no transliteration in brackets.")
+        user = (f"Target language: {lang}\n"
+                f"Translate this term: {find}")
+        repl = _clean_rewrite(ctx.rewriter(system, user))
+        if not repl:
+            raise EditError(f"the model returned no translation for {find!r}")
+        applied.changes.append(f"term: {find!r} → {repl!r} (translated)")
+
+    # Case-insensitive, because the cue may carry `Conditional` mid-sentence
+    # while the request typed it lower-case. `re.escape` keeps a term with
+    # punctuation in it literal rather than letting it act as a pattern.
+    pattern = re.compile(re.escape(find), re.IGNORECASE)
+    by_id = {str(s.get("id")): s for s in data.get("segments", [])}
+    hits = 0
+    for sid in seg_ids:
+        seg = by_id[sid]
+        cur = _seg_text(seg)
+        if not pattern.search(cur):
+            # Named rather than silently skipped: a scope that caught cues
+            # without the term is usually an off-by-one in the request, and
+            # the old behaviour rewrote those cues anyway.
+            applied.warnings.append(f"{sid}: {find!r} not in this line; left alone")
+            continue
+        new_text = pattern.sub(repl.replace("\\", "\\\\"), cur)
+        if new_text == cur:
+            continue
+        _set_segment_text(seg, new_text)
+        applied.changes.append(f"{sid}: {cur!r} → {new_text!r}")
+        hits += 1
+
+    if not hits:
+        raise EditError(
+            f"{find!r} does not appear in any of the scoped cue(s). Check the "
+            f"spelling, or widen the scope.")
+
+
 def _h_retranslate(data, seg_ids, op, applied, ctx, res):
     if ctx.rewriter is None:
         raise EditError(
@@ -622,16 +899,29 @@ def _h_retranslate(data, seg_ids, op, applied, ctx, res):
         seg = by_id[sid]
         src = seg.get("text") or ""
         cur = _seg_text(seg)
+        # The instruction describes a CHANGE to a line that is already
+        # translated, and saying so matters. Told only "reply with the
+        # replacement line", gemma-3-12b answered a word-level instruction
+        # ("translate the word 'conditional' into Hindi") with just that
+        # word — `'.शर्तिया टेक्स्ट जेनरेटर'` in place of the whole
+        # sentence, which is a destroyed cue rather than a failed one.
         system = (
-            "You are a subtitle translator for a dubbing pipeline. Reply with "
-            "the replacement line ONLY: no quotes, no commentary, no "
-            "romanisation, no alternatives.")
+            "You are a subtitle translator for a dubbing pipeline. You are "
+            "given a line that is ALREADY translated, plus an instruction "
+            "describing a change to it.\n\n"
+            "Apply the instruction to the current translation and reply with "
+            "the COMPLETE corrected line. Preserve every part of the line the "
+            "instruction does not mention — wording, word order and "
+            "punctuation. If the instruction concerns one word or phrase, "
+            "change only that and leave the rest identical.\n\n"
+            "Reply with the line ONLY: no quotes, no commentary, no "
+            "romanisation, no alternatives, and never a fragment.")
         user = (
             f"Source line (original language): {src}\n"
             f"Current translation ({lang}): {cur}\n"
             f"Instruction: {instruction or 'improve the translation'}\n"
             f"Write the corrected {lang} line.")
-        new = (ctx.rewriter(system, user) or "").strip()
+        new = _clean_rewrite(ctx.rewriter(system, user))
         if not new or new == cur:
             applied.warnings.append(f"{sid}: model returned no change")
             continue
@@ -677,7 +967,7 @@ def _h_set_tone(data, seg_ids, op, applied, ctx, res):
                 "meaning and the approximate length — the line has to fit the "
                 "same time slot. Reply with the rewritten line ONLY.")
             user = (f"Language: {lang}\nRegister: {tone}\nLine: {cur}")
-            new = (ctx.rewriter(system, user) or "").strip()
+            new = _clean_rewrite(ctx.rewriter(system, user))
             if not new or new == cur:
                 continue
             _set_segment_text(seg, new)
@@ -767,7 +1057,7 @@ def _h_code_mix(data, seg_ids, op, applied, ctx, res):
                     f"Current translation: {cur}\n"
                     + (f"Always keep these in English: {', '.join(terms)}\n"
                        if terms else ""))
-            new = (ctx.rewriter(system, user) or "").strip()
+            new = _clean_rewrite(ctx.rewriter(system, user))
             if not new or new == cur:
                 continue
             _set_segment_text(seg, new)
@@ -853,6 +1143,72 @@ def _h_set_gender(data, seg_ids, op, applied, ctx, res):
             applied.changes.append(f"{sid}: gender={gender}, voice={voice}")
         applied.dirty_from = "tts"
     applied.changes.append(why)
+
+
+def _h_set_speaker(data, seg_ids, op, applied, ctx, res):
+    """Move scoped cues onto another speaker.
+
+    This is the one op that edits `seg["speaker"]`, which is upstream of
+    everything voice-related: `backend/tts.py` resolves each segment through
+    `speaker_voice_map[seg["speaker"]]`, so moving a cue moves which voice
+    reads it. That is the whole point -- diarization attributing a line to
+    the wrong person is the failure this corrects, and no other op can.
+
+    `dirty_from="voices"` rather than `"tts"` because the speaker set itself
+    can change: moving the last cue off a speaker leaves it with no segments,
+    and stage 9d re-derives the map from what is actually there.
+
+    The target must already exist in the job. Inventing a speaker id would
+    give it no reference clip, no gender vote and no catalog voice, so TTS
+    would fall back to the engine default and read it in a voice nobody
+    chose -- the silent-wrong-output shape CLAUDE.md records for
+    `--voice-engine`.
+    """
+    target = str(op.params.get("speaker") or "").strip()
+    if not target:
+        raise EditError("set_speaker needs a speaker id, e.g. SPK_02")
+
+    by_id = {str(s.get("id")): s for s in data.get("segments", [])}
+    known = {str(s.get("speaker")) for s in data.get("segments", [])
+             if s.get("speaker")}
+    if target not in known:
+        raise EditError(
+            f"unknown speaker {target!r}; this job has "
+            f"{', '.join(sorted(known)) or 'no labelled speakers'}. "
+            f"A new id would have no reference clip and no assigned voice.")
+
+    moved = 0
+    for sid in seg_ids:
+        seg = by_id.get(sid)
+        if seg is None:
+            continue
+        before = seg.get("speaker")
+        if str(before) == target:
+            continue
+        _backup(seg, "speaker")
+        # The per-segment voice override is whatever the PREVIOUS speaker was
+        # pinned to. Leaving it would silently defeat the reattribution: the
+        # cue would move to the new speaker and still be read in the old
+        # one's voice, because `tts.py` reads `tts_voice` ahead of the map.
+        if seg.get("tts_voice"):
+            _backup(seg, "tts_voice")
+            seg["tts_voice"] = None
+        seg["speaker"] = target
+        moved += 1
+        applied.changes.append(f"{sid}: speaker {before} -> {target}")
+
+    if not moved:
+        applied.warnings.append(
+            f"every scoped cue was already {target}; nothing to move")
+    else:
+        # Say when a speaker has been emptied: 9d will drop it, the voice it
+        # held is freed, and the operator's speaker list is about to change.
+        left = {str(s.get("speaker")) for s in data.get("segments", [])
+                if s.get("speaker")}
+        for gone in sorted(known - left):
+            applied.warnings.append(
+                f"{gone} now has no cues and will disappear from the cast")
+    applied.dirty_from = "voices"
 
 
 def _h_set_voice(data, seg_ids, op, applied, ctx, res):
@@ -973,7 +1329,9 @@ _HANDLERS: Dict[str, Callable] = {
     "set_tone": _h_set_tone,
     "code_mix": _h_code_mix,
     "set_gender": _h_set_gender,
+    "set_speaker": _h_set_speaker,
     "set_voice": _h_set_voice,
+    "replace_term": _h_replace_term,
     "set_speed": _h_set_speed,
     "lipsync_window": _h_lipsync_window,
 }

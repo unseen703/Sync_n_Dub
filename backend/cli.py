@@ -87,7 +87,6 @@ def _tts_styles():
         return ("auto",) + tuple(INDIC_SPEAK_STYLES)
     except ImportError:
         return ("auto",)
-from models.restore import available_models as _restore_models
 from models.mt import available_models as _mt_models
 from models.translit import available_models as _translit_models
 from models.tts import available_models as _tts_models
@@ -272,12 +271,34 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                     help="Automatic-speech-recognition model. Bare --asr "
                          f"selects {_default_impl('asr')!r}; omit the flag "
                          "entirely to skip the stage.")
-    ap.add_argument("--asr-language", default=None,
-                    help="ISO-639 code (en, hi, ta, …). None = detect.")
+    ap.add_argument("--asr-language", default="en",
+                    help="ISO-639 code of what is SPOKEN in the source "
+                         "(en, hi, ta, …). Default 'en' — the dubbing "
+                         "direction here is English -> Indic. Pass "
+                         "'auto' to let the ASR detect it instead, which "
+                         "it does per diarization turn and therefore "
+                         "unreliably on short ones.")
     ap.add_argument("--asr-full-audio", action="store_true",
                     help="Transcribe the entire 16 kHz mix end-to-end instead "
                          "of re-slicing to diarization turns. Keeps intro/outro "
                          "and over-music speech that would otherwise be dropped.")
+    ap.add_argument("--no-captions-transcript", action="store_true",
+                    help="Always run ASR, even when the source has a "
+                         "human-authored caption track. By default the "
+                         "pipeline uses the uploader's own published "
+                         "transcript for the ASR language when one exists, "
+                         "which skips stage 7's per-turn API calls entirely. "
+                         "Every failure mode (wrong language, auto-only, "
+                         "rolling duplication, thin coverage) already falls "
+                         "back to ASR on its own.")
+    ap.add_argument("--captions-allow-auto", action="store_true",
+                    help="Also accept YouTube's AUTO-generated captions as "
+                         "the transcript. Off by default: those are "
+                         "YouTube's own ASR output, so using them swaps the "
+                         "engine chosen here for an unconfigurable one -- on "
+                         "Indic-accented English that is usually a downgrade, "
+                         "not a saving. Only manual tracks are used unless "
+                         "this is passed.")
     ap.add_argument("--render-mode", default=None,
                     choices=("native", "mixed", "roman"),
                     help="Bodhan ASR render mode (plan §6).")
@@ -376,8 +397,12 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                          "(default: 2). Each one is a billed TTS call; the "
                          "count lands in extra.tts.extra_synthesis_rounds.")
     ap.add_argument("--tts-sample-rate", type=int, default=24000)
-    ap.add_argument("--tts-max-stretch", type=float, default=0.10,
-                    help="Time-stretch cap (±fraction).")
+    ap.add_argument("--tts-max-stretch", type=float, default=0.20,
+                    help="Time-stretch cap, as a +/- FRACTION of natural "
+                         "pace: 0.20 clamps each clip to 0.8x-1.2x speed "
+                         "(backend/stretch.py applies "
+                         "`max(1-cap, min(1+cap, ratio))`). Raised from "
+                         "0.10 on 2026-10-20 by request.")
     ap.add_argument("--stretch-backend", default="auto",
                     choices=("auto", "rubberband", "ffmpeg_atempo",
                              "librosa", "linear"),
@@ -482,22 +507,13 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap.add_argument("--lipsync-num-gpus", type=int, default=None,
                     help="Shard lip-sync across N GPUs (one adapter per GPU, "
                          "video+audio split in time, outputs concatenated). "
-                         "Default: use every visible CUDA device. "
-                         "1 = single-GPU (legacy path). "
-                         "Clips shorter than N*15s fall back to one GPU.")
-    ap.add_argument("--restore", default=None, choices=_restore_models(),
-                    help="Face-restoration model to run over the lip-synced "
-                         "render (codeformer). The lip-sync models rebuild "
-                         "the mouth at a small working resolution, so the "
-                         "region they touched comes back soft; this rebuilds "
-                         "the face at 512x512 and pastes it back. "
-                         "Requires --lipsync.")
-    ap.add_argument("--restore-fidelity", type=float, default=None,
-                    help="CodeFormer -w: 0 = best quality, 1 = most faithful "
-                         "to the input. Default 0.7.")
-    ap.add_argument("--restore-upscale", type=int, default=None,
-                    help="CodeFormer -s. Default 1, which restores the face "
-                         "and leaves the frame's resolution alone.")
+                         "DEFAULT: one GPU -- whichever has the most free "
+                         "memory. Sharding is opt-in because each shard does "
+                         "its own face-detection smoothing (the join can show "
+                         "as a one-frame mouth jump) and both cards then run "
+                         "near the ceiling, where another tenant OOMs a "
+                         "shard. Clips shorter than N*15s fall back to one "
+                         "GPU regardless.")
 
     # Ground-truth transcripts (for ASR/MT evaluation) -------------------
     ap.add_argument("--subtitle-langs", default=None,
@@ -669,9 +685,6 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("--mix requires --tts.")
     if args.lipsync and not args.mix:
         raise SystemExit("--lipsync requires --mix.")
-    if args.restore and not args.lipsync:
-        raise SystemExit("--restore runs over a lip-synced render; "
-                         "it requires --lipsync.")
     # Language-gate the ASR choice up-front: argparse's `choices` is built
     # before --asr-language is known, so we re-check here and refuse with a
     # suggestion rather than letting the adapter raise mid-pipeline.
@@ -700,10 +713,6 @@ def main(argv: list[str] | None = None) -> int:
         adapter_kwargs["batch_size"] = args.lipsync_batch_size
     if args.lipsync_inference_steps is not None:
         adapter_kwargs["inference_steps"] = args.lipsync_inference_steps
-    if args.restore_fidelity is not None:
-        adapter_kwargs["fidelity"] = args.restore_fidelity
-    if args.restore_upscale is not None:
-        adapter_kwargs["upscale"] = args.restore_upscale
     mux_video = not args.no_mux
 
     if args.no_eval and args.test:
@@ -760,8 +769,13 @@ def main(argv: list[str] | None = None) -> int:
         asd_model=args.asd,
         asd_on_screen_threshold=args.asd_on_screen_threshold,
         asr_model=args.asr,
-        asr_language=args.asr_language,
+        # 'auto' is the explicit way back to detection; argparse cannot
+        # express "a string, or None" on its own.
+        asr_language=(None if (args.asr_language or "").lower()
+                      in ("auto", "detect", "none", "") else args.asr_language),
         asr_full_audio=args.asr_full_audio,
+        captions_as_transcript=not args.no_captions_transcript,
+        captions_allow_auto=args.captions_allow_auto,
         align_model=args.align,
         mt_model=args.mt,
         mt_target_language=args.mt_target_language,
@@ -801,7 +815,6 @@ def main(argv: list[str] | None = None) -> int:
         mux_video=mux_video,
         lipsync_model=args.lipsync,
         lipsync_num_gpus=args.lipsync_num_gpus,
-        restore_model=args.restore,
         subtitle_langs=subtitle_langs,
         **adapter_kwargs,
     )
@@ -865,9 +878,6 @@ def main(argv: list[str] | None = None) -> int:
     if result.lipsync_model:
         print(f"lipsync        : {result.lipsync_model} → {result.lipsync_mp4}"
               + (f"  (err={result.lipsync_error})" if result.lipsync_error else ""))
-    if result.restore_model:
-        print(f"restore        : {result.restore_model}"
-              + (f"  (err={result.restore_error})" if result.restore_error else ""))
     if result.subtitles:
         print(f"subtitles      : "
               + ", ".join(f"{k}:{v['source']}" for k, v in result.subtitles.items()))

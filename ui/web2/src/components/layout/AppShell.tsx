@@ -4,6 +4,8 @@ import { JobRail } from './JobRail';
 import { SpecPanel } from './SpecPanel';
 import { Stage } from './Stage';
 import { Toasts } from '../ui/Toasts';
+import { Tooltip } from '../ui/Tooltip';
+import { IconMenu } from '../ui/Icons';
 import { useStore } from '../../store/useStore';
 import { useIsWide } from '../../hooks/useMediaQuery';
 
@@ -72,6 +74,27 @@ export function AppShell() {
             </m.aside>
           ) : null}
         </AnimatePresence>
+
+        {/* With the collapse control now INSIDE the rail, a closed rail
+            would have no way back — so the reopen affordance lives here,
+            as a thin strip on the edge the rail flies out from. */}
+        {!railOpen ? (
+          <div className="hidden shrink-0 border-r border-line bg-canvas/40 lg:block">
+            <Tooltip label="Show the job list" side="right">
+              <button
+                type="button"
+                onClick={() => setRailOpen(true)}
+                aria-label="Show the job list"
+                aria-expanded={false}
+                aria-controls="job-rail-list"
+                className="m-1.5 rounded-lg p-2 text-ink3 transition-colors
+                           hover:bg-ink/[0.07] hover:text-ink"
+              >
+                <IconMenu />
+              </button>
+            </Tooltip>
+          </div>
+        ) : null}
 
         {/* Job list, off-canvas from the LEFT below 1024 px. */}
         <AnimatePresence>

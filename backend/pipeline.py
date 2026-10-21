@@ -164,14 +164,15 @@ class PipelineResult:
     mix_wav: Optional[Path] = None
     mix_mp4: Optional[Path] = None
 
+    #: Stage 9b1 — the content register the TTS style is taken from, and
+    #: which signal decided it ("metadata", "keywords", "llm" or "none").
+    content_register: Optional[str] = None
+    content_register_tier: Optional[str] = None
+
     # Lip-sync (plan §8).
     lipsync_model: Optional[str] = None
     lipsync_mp4: Optional[Path] = None
     lipsync_error: Optional[str] = None
-    # Face restoration over the render, when one was asked for. The
-    # un-restored render stays on disk beside it so the two are comparable.
-    restore_model: Optional[str] = None
-    restore_error: Optional[str] = None
 
     # Ground-truth transcripts fetched alongside the video (lang → metadata).
     # `source` is "manual" (human-authored on YouTube), "auto" (YouTube ASR),
@@ -266,7 +267,6 @@ class PostMTResult:
     speaker_references_dir: Optional[Path] = None
     vc_errors: int = 0
     lipsync_model: Optional[str] = None
-    restore_model: Optional[str] = None
     # Timing plan (stage 9f2). Deliberately NOT mirrored onto `PipelineResult`:
     # that dataclass is serialised verbatim into `pipeline.json`, and adding a
     # field there would change the manifest bytes of every existing run. The
@@ -306,6 +306,36 @@ def _default_voice_engine(voice_engine: Optional[str],
                  "the catalog rather than leaving every speaker on the "
                  "adapter's single default voice", tts_model, implied)
     return implied
+
+
+def _speaker_face_tracks(out_root: Path, video: Path) -> Dict[str, tuple]:
+    """`{speaker: (frames, bboxes)}` from this job's stage-5 and stage-6 output.
+
+    Discovered from the job folder rather than threaded in as parameters,
+    because `run_post_mt_stages` is also the edit agent's replay entry point
+    — there the face stages ran in an EARLIER process and only their files
+    survive. Everything here is best-effort: no ASD model, no face detector,
+    a post-MT-only bootstrap, or a corrupt npz all mean the gender vote runs
+    on its two audio methods, which is a weaker answer and not a failure.
+    """
+    try:
+        npz = (sorted((out_root / "faces").glob(f"{video.stem}.*.npz"))
+               or sorted((out_root / "faces").glob("*.npz")))
+        js = (sorted((out_root / "asd").glob(f"{video.stem}.*.assignments.json"))
+              or sorted((out_root / "asd").glob("*.assignments.json")))
+        if not npz or not js:
+            log.info("voices: no face tracks + ASD assignments in %s; gender "
+                     "votes on audio alone", out_root.name)
+            return {}
+        from models.faces.base import FaceTracks
+        from .assign_faces import speaker_face_tracks
+        tracks = FaceTracks.load_npz(npz[0])
+        assignments = json.loads(js[0].read_text())
+        return speaker_face_tracks(assignments, tracks)
+    except Exception as exc:                                  # noqa: BLE001
+        log.warning("voices: could not read face tracks (%s: %s); gender "
+                    "votes on audio alone", type(exc).__name__, exc)
+        return {}
 
 
 def run_post_mt_stages(
@@ -353,7 +383,7 @@ def run_post_mt_stages(
     emotion_min_confidence: float = 0.60,
     emotion_min_run: int = 2,
     tts_sample_rate: int = 24000,
-    tts_max_stretch: float = 0.10,
+    tts_max_stretch: float = 0.20,
     stretch_backend: str = "auto",
     tts_apply_stretch: bool = True,
     # 9e engine-side speed control (method M1). Defaults are copied verbatim
@@ -394,7 +424,13 @@ def run_post_mt_stages(
     # 9h lip sync
     lipsync_model: Optional[str] = None,
     lipsync_num_gpus: Optional[int] = None,
-    restore_model: Optional[str] = None,
+    # Explicit rather than riding the shared `batch_size` adapter kwarg:
+    # stage 4 picks that one too, so a lip-sync tuning value would also be
+    # handed to the diarizer. `tests/test_ui_backend_sync.py` requires every
+    # UI kwarg to be a NAMED pipeline parameter for exactly this reason --
+    # anything reaching `**adapter_kwargs` fails deep inside an adapter
+    # instead of at the boundary.
+    lipsync_batch_size: Optional[int] = None,
     # Render only this (start_s, end_s) slice and splice it back into the
     # full timeline. None -- the default -- renders the whole video, exactly
     # as before. `backend.edits.lipsync_window` is what sets it.
@@ -550,8 +586,21 @@ def run_post_mt_stages(
         )
         out.speaker_references_dir = ref_dir
 
-        # Gender prediction from reference clips (ECAPA primary, F0 fallback).
-        gender_map = predict_genders(speaker_refs, device=device or "cpu")
+        # Gender prediction. THREE methods vote -- wav2vec2 over the
+        # reference clip, F0 median pitch over the same clip, and
+        # insightface's genderage over the face track ASD attributed to this
+        # speaker -- and the majority wins. `backend/gender.py` has the
+        # measurements; the short version is that one lecturer in the test
+        # set defeats both audio methods at once and only the face gets him
+        # right, so no single method is safe here. The face vote is optional
+        # by construction: without stage 5 + 6 it abstains.
+        face_tracks_by_speaker = _speaker_face_tracks(out_root, video)
+        gender_votes: Dict[str, dict] = {}
+        gender_map = predict_genders(
+            speaker_refs, device=device or "cpu", video=video,
+            speaker_face_tracks=face_tracks_by_speaker,
+            details_out=gender_votes,
+        )
         if gender_overrides:
             for sid, g in gender_overrides.items():
                 if gender_map.get(sid) != g:
@@ -560,6 +609,20 @@ def run_post_mt_stages(
                 gender_map[sid] = g
         for spk in speakers:
             spk["predicted_gender"] = gender_map.get(spk["id"])
+            # The whole ballot, so a finished run says WHY it cast that way
+            # without re-running three models. An edited gender is stamped
+            # over the verdict but leaves the votes visible underneath.
+            v = gender_votes.get(spk["id"])
+            if v is not None:
+                if v["gender"] != spk["predicted_gender"]:
+                    v = {**v, "gender": spk["predicted_gender"],
+                         "decided_by": "override"}
+                spk["gender_vote"] = v
+                # `assign_voices` reads this: no evidence means cast a
+                # target-language voice of the fallback gender rather than
+                # ranking a placeholder by timbre.
+                if v["decided_by"] == "fallback":
+                    spk["gender_basis"] = "fallback"
 
         if voice_engine:
             voice_assignments = assign_voices(
@@ -626,12 +689,15 @@ def run_post_mt_stages(
         # keeps its existing meaning and no manifest key changes.
         # Gender is computed here from the reference clips and then used only
         # to pick a voice — it was never written down, so the UI could not
-        # show it or offer same-gender voices without re-running ECAPA on
-        # every request. Record it alongside the voice.
+        # show it or offer same-gender voices without re-running the
+        # gender classifier on every request. Record it alongside the voice.
         for _sid, _info in speaker_voice_map.items():
             _g = gender_map.get(_sid)
             if _g and isinstance(_info, dict):
                 _info.setdefault("gender", _g)
+                _v = gender_votes.get(_sid)
+                if _v is not None:
+                    _info.setdefault("gender_vote", _v)
 
         if speaker_voice_map:
             (voices_dir / f"{video.stem}.speaker_voice_map.json").write_text(
@@ -888,27 +954,33 @@ def run_post_mt_stages(
                     pre_muxed_video=out.mix_mp4,
                     num_gpus=lipsync_num_gpus,
                     window=lipsync_window,
-                    restore=restore_model,
-                    restore_kwargs=_pick(adapter_kwargs,
-                        ("fidelity", "upscale", "detection_model",
-                         "only_center_face", "face_upsample", "bg_upsampler",
-                         "keep_frames")),
-                    lipsync_kwargs=_pick(adapter_kwargs,
-                        ("repo_path", "checkpoint", "python_bin",
-                         "unet_config_path", "unet_ckpt_path",
-                         "version", "batch_size", "fps", "bbox_shift",
-                         "pads", "resize_factor", "wav2lip_batch_size",
-                         "face_det_batch_size", "inference_steps",
-                         "guidance_scale", "seed",
-                         "model_arch", "lipgan_batch_size")),
+                    lipsync_kwargs={
+                        **_pick(adapter_kwargs,
+                                ("repo_path", "checkpoint", "python_bin",
+                                 "unet_config_path", "unet_ckpt_path",
+                                 "version", "batch_size", "fps", "bbox_shift",
+                                 "pads", "resize_factor", "wav2lip_batch_size",
+                                 "face_det_batch_size", "inference_steps",
+                                 "guidance_scale", "seed",
+                                 "model_arch", "lipgan_batch_size")),
+                        # The named parameter wins over a generic
+                        # `batch_size` that happened to be in adapter_kwargs.
+                        **({"batch_size": lipsync_batch_size}
+                           if lipsync_batch_size else {}),
+                    },
                 )
                 out.lipsync_model = ls.model
-                out.lipsync_mp4 = ls.out_video
                 out.lipsync_error = ls.error
-                rinfo = ls.extra.get("restore")
-                if rinfo:
-                    out.restore_model = rinfo.get("model_name")
-                    out.restore_error = rinfo.get("error") or rinfo.get("warning")
+                # Only record a render that exists. `ls.out_video` is the
+                # path the adapter was ASKED to write, and a failed run still
+                # carries it -- which put a nonexistent mp4 in the manifest
+                # under `result.lipsync_mp4`, where `edit_agent` and anything
+                # else reading the manifest would believe in it.
+                if ls.out_video and Path(ls.out_video).is_file():
+                    out.lipsync_mp4 = ls.out_video
+                elif not ls.error:
+                    out.lipsync_error = (
+                        f"{ls.model} produced no file at {ls.out_video}")
             except Exception as e:
                 log.warning("lipsync failed: %s", e)
                 out.lipsync_error = str(e)
@@ -1167,8 +1239,27 @@ def _run_pipeline(
     asd_on_screen_threshold: float = 0.3,
     # ASR
     asr_model: Optional[str] = None,              # None → skip ASR
-    asr_language: Optional[str] = None,
+    #: What is SPOKEN in the source. Defaults to English, which is what
+    #: this corpus is: the dubbing direction here is English -> Indic.
+    #:
+    #: It used to default to None, meaning "let the ASR detect it", and
+    #: that is unreliable at the granularity it runs at — one POST per
+    #: diarization turn, 1-5 s each. An English lecture came back on
+    #: 2026-10-17 transcribed into Telugu, Gujarati, Malayalam AND English
+    #: across nine turns, and MT then translated each as if its script were
+    #: real. Pass `None` explicitly to detect instead; the Bodhan adapter
+    #: then probes the longest turn once and pins that answer.
+    asr_language: Optional[str] = "en",
     asr_full_audio: bool = False,                 # True → transcribe raw 16k
+    # Use the uploader's own published transcript instead of running ASR,
+    # when a HUMAN-AUTHORED one exists for the ASR language. On by default:
+    # it is free, it is usually better than anything inferred from the
+    # audio, and every way it can go wrong falls back to ASR rather than
+    # failing. `captions_allow_auto` additionally accepts YouTube's
+    # auto-generated track -- off by default, because that is YouTube's own
+    # ASR and taking it would silently replace the engine we chose.
+    captions_as_transcript: bool = True,
+    captions_allow_auto: bool = False,
                                                   # mix end-to-end and skip the
                                                   # turn-intersection step
     # Forced alignment (word boundaries). Only runs when ASR did.
@@ -1205,7 +1296,7 @@ def _run_pipeline(
     emotion_min_run: int = 2,
     channel_style_overrides: Optional[Dict[str, str]] = None,
     tts_sample_rate: int = 24000,
-    tts_max_stretch: float = 0.10,
+    tts_max_stretch: float = 0.20,
     stretch_backend: str = "auto",
     tts_apply_stretch: bool = True,
     # Engine-side speed control (method M1). Forwarded straight through to
@@ -1245,8 +1336,8 @@ def _run_pipeline(
     mux_video: bool = True,
     # Lip sync (requires mix).
     lipsync_model: Optional[str] = None,           # wav2lip | musetalk | latentsync
-    lipsync_num_gpus: Optional[int] = None,       # None → use every visible CUDA
-    restore_model: Optional[str] = None,          # codeformer — post-lipsync
+    lipsync_num_gpus: Optional[int] = None,       # None → ONE gpu, the freest
+    lipsync_batch_size: Optional[int] = None,     # None → the adapter's own default
                                                   # device; 1 → single-GPU; N>1 →
                                                   # time-shard across N GPUs
     stem_model: str = "htdemucs",                 # htdemucs | htdemucs_ft |
@@ -1296,11 +1387,33 @@ def _run_pipeline(
             "vc":              vc_model,
             "voice_engine":    voice_engine,
             "lipsync":         lipsync_model,
-            "restore":         restore_model,
             "stem_model":      stem_model,
             "skip_stems":      skip_stems,
             "timing_producer": timing_producer,
             "variant_tag":     variant_tag,
+            # Every OPTIONAL stage's switch, under the key name
+            # `ui/progress.py::plan_stages` reads. These were missing, and
+            # the manifest is the only durable record of what a run did:
+            # `_run_pipeline` re-allocates here and OVERWRITES whatever the
+            # caller wrote at submission, so the UI's richer config lasted
+            # until the pipeline started and no longer. Everything that
+            # reads the manifest afterwards — `ui/spec.py`, `ui/cost.py`,
+            # `_list_jobs`, `edit_agent._config` — therefore saw a run with
+            # no resegmentation, no speaker refinement, no register, no
+            # emotion, no visemes and no face detector, none of which was
+            # true. `plan_stages` on a finished job under-planned by 7
+            # stages against a progress doc that had all 25.
+            "resegment_turns": bool(resegment_turns),
+            "refine_speakers": bool(refine_speaker_labels),
+            "face_detector":   face_detector,
+            "asd":             asd_model,
+            "translit":        translit_model,
+            "tts_style":       tts_style,
+            "emotion":         emotion_model,
+            "duration_adjust": bool(duration_adjust),
+            "tts_force_align": bool(tts_force_align),
+            "visemes":         bool(attach_visemes_stage),
+            "mix":             bool(mix),
         },
         job_id=job_id,
         argv=list(sys.argv[1:]) or None,
@@ -1324,9 +1437,12 @@ def _run_pipeline(
 
     exp_root = Path(exp_root) if exp_root is not None else job.stage("exp")
 
-    #: Filled by `resolve_input` for a URL input; stays empty for a local
-    #: file, which is exactly when the classifier falls through to its LLM
-    #: tier. Also written to the manifest so a register choice is traceable.
+    #: Filled by `resolve_input` for a URL input. A LOCAL file leaves it
+    #: empty -- and that is the normal case for a UI run, which pre-cuts the
+    #: clip and hands the pipeline a path, so `download_youtube` is never
+    #: reached here. `_recover_source_metadata` below picks the uploader's
+    #: metadata back up off disk in that case. Also written to the manifest
+    #: so a register choice is traceable.
     source_metadata: Dict[str, Any] = {}
 
     if post_mt_only_from is not None:
@@ -1526,8 +1642,34 @@ def _run_pipeline(
                 result.assignments_json = assignments_json
                 result.num_on_screen = sum(1 for a in assignments if a.on_screen)
 
-        # 7. ASR (optional).
-        if asr_model:
+        # 7. ASR (optional) -- or the uploader's own transcript, when there is
+        #    a human-authored one. A published manual caption track is free
+        #    and is usually better than anything inferred from the audio, so
+        #    the hosted ASR call per turn is pure cost in that case. Automatic
+        #    tracks are NOT accepted by default: those are YouTube's own ASR,
+        #    so taking them would swap our chosen engine for an unconfigurable
+        #    one on exactly the Indic-accented English this repo processes.
+        #    `backend/caption_asr.py` returns None for every "no" answer --
+        #    wrong language, auto-only, rolling duplication, thin coverage --
+        #    so a caption problem costs the saving, never the run.
+        caption_result = None
+        if asr_model and captions_as_transcript:
+            caption_result = _captions_from(
+                subtitles, audio_16k, diar_result, asr_full_audio,
+                language=asr_language or "en",
+                allow_auto=captions_allow_auto)
+        if caption_result is not None:
+            cap = caption_result.extra.get("captions", {})
+            # ONE line, deliberately. `ui/progress.py` scrapes these markers
+            # and `tests/test_ui_progress.py` greps the source for the
+            # literal -- a marker split across two source lines is captured
+            # without its closing `===` and silently stops being matched,
+            # which freezes the progress bar. The test caught exactly that
+            # when this line was first written wrapped.
+            log.info("=== stage 7: transcript from captions (%s, %s) ===",
+                     cap.get("source", "?"), asr_language or "en")
+            asr_result = caption_result
+        elif asr_model:
             log.info("=== stage 7: ASR (%s, full_audio=%s) ===",
                      asr_model, asr_full_audio)
             # Full-audio mode: transcribe the raw 16 kHz mix end-to-end, so
@@ -1549,6 +1691,15 @@ def _run_pipeline(
                                           "vad_onset", "vad_offset",
                                           "repo_id")),
             )
+
+        # Shared by BOTH stage-7 paths. This used to live inside the ASR
+        # branch; a caption-sourced transcript would then have produced no
+        # `asr.json`, no transcript.txt and no `result.asr_*` fields, so the
+        # manifest would describe a run with no transcript while stage 8
+        # happily aligned one. The artifacts are the durable record -- they
+        # cannot depend on which path produced the text.
+        if asr_model and asr_result is not None:
+            asr_tag = ("captions" if caption_result is not None else asr_model)
             # Fold speaker labels + face assignments into each segment.
             asd_by_seg = {a.seg_id: a for a in (assignments or [])}
             payload = asr_result.to_jsonable()
@@ -1558,14 +1709,14 @@ def _run_pipeline(
                     seg["face_track"] = a.face_track
                     seg["asd_score"] = (a.asd_score if a.asd_score != float("-inf") else None)
                     seg["on_screen"] = a.on_screen
-            asr_json = asr_dir / f"{video.stem}.{asr_model}.asr.json"
+            asr_json = asr_dir / f"{video.stem}.{asr_tag}.asr.json"
             asr_json.write_text(json.dumps(payload, indent=2))
-            asr_txt = asr_dir / f"{video.stem}.{asr_model}.transcript.txt"
+            asr_txt = asr_dir / f"{video.stem}.{asr_tag}.transcript.txt"
             asr_txt.write_text(
                 "\n".join(s["text"].strip() for s in payload["segments"] if s.get("text")) + "\n",
                 encoding="utf-8",
             )
-            result.asr_model = asr_model
+            result.asr_model = asr_tag
             result.asr_language = asr_result.language
             result.asr_json = asr_json
 
@@ -1656,6 +1807,15 @@ def _run_pipeline(
         result.manifest = variant_dir / "pipeline.json"
         post_mt_out_root = variant_dir
 
+    # The UI downloads and cuts before calling us, so `source_metadata` is
+    # empty on exactly the runs that have the richest metadata sitting next
+    # to the source video. Recover it rather than letting every UI run fall
+    # through to the LLM tier and answer "unknown".
+    if tts_style == "auto" and not source_metadata:
+        recovered = _recover_source_metadata(job_root, video)
+        if recovered:
+            source_metadata.update(recovered)
+
     # `--tts-style auto` — pick the programme's register from the uploader's
     # own metadata, falling back to an LLM read of the transcript. Resolved
     # here because this is the first point where BOTH the metadata (from the
@@ -1677,9 +1837,13 @@ def _run_pipeline(
         )
         log.info("=== stage 9b1: content register = %r (via %s) ===",
                  tts_style, tier)
-        result.extra.setdefault("classify", {}).update(
-            {"register": tts_style, "tier": tier,
-             "categories": source_metadata.get("categories")})
+        # `PipelineResult` has no `extra` field — it is a flat, JSON-
+        # serialised dataclass — so this used to raise AttributeError and
+        # fail the whole job at 9b1, after ASR, alignment and MT had
+        # already been paid for. The register is carried on the result the
+        # same way every other stage's output is: as a named field.
+        result.content_register = tts_style
+        result.content_register_tier = tier
 
     # 9b..9h — code-mix → duration → voices → TTS → VC → mix → lip-sync.
     post = run_post_mt_stages(
@@ -1735,15 +1899,7 @@ def _run_pipeline(
         mux_video=mux_video,
         lipsync_model=lipsync_model,
         lipsync_num_gpus=lipsync_num_gpus,
-        # Dropping this line meant `run_post_mt_stages` fell back to its own
-        # `restore_model=None`, so `run_lipsync`'s `if restore and ...` never
-        # fired -- while line ~1292 wrote `"restore": restore_model` into the
-        # manifest regardless. Every standard/best UI job on disk claims a
-        # restoration pass that never ran, with no error anywhere. This call
-        # forwards ~60 kwargs by hand and restore_model was the only
-        # lip-sync-related one missing; `tests/test_ui_stage_wiring.py` now
-        # checks the whole set rather than this one name.
-        restore_model=restore_model,
+        lipsync_batch_size=lipsync_batch_size,
         **adapter_kwargs,
     )
     result.mt_json = post.mt_json
@@ -1871,6 +2027,67 @@ def run_pipeline(*args, **kwargs) -> PipelineResult:
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
+
+def _captions_from(subtitles, audio_16k, diar_result, asr_full_audio,
+                   *, language: str, allow_auto: bool):
+    """The uploader's own transcript as an ASRResult, or None to run ASR.
+
+    Kept as a wrapper so stage 7 reads as one decision. Everything that can
+    say "no" -- wrong language, automatic-only, rolling duplication, thin
+    turn coverage, an unparseable file -- answers None rather than raising,
+    because the caller's fallback is to run ASR and a caption problem must
+    cost the saving, not the run.
+
+    `turns` is passed ONLY in turn-sliced mode. In full-audio mode the
+    pipeline deliberately keeps segments off the diarization grid, and
+    forcing captions onto turns there would quietly re-impose it.
+    """
+    try:
+        from .caption_asr import transcript_from_captions
+    except Exception as e:                               # noqa: BLE001
+        log.debug("captions: helper unavailable (%s)", e)
+        return None
+    turns = None if asr_full_audio else getattr(diar_result, "turns", None)
+    return transcript_from_captions(
+        subtitles, audio_path=audio_16k, turns=turns,
+        language=language, allow_auto=allow_auto)
+
+
+def _recover_source_metadata(job_root: Path, video: Optional[Path]) -> Dict[str, Any]:
+    """Find the uploader metadata a previous download left in the job folder.
+
+    `backend.downloader.download_youtube` writes `<stem>.meta.json` beside
+    whatever it fetched. When the UI pre-cuts a clip that file lands under
+    `<job>/source/`, the pipeline is handed the cut and never calls the
+    downloader, and `source_metadata` stays empty -- so stage 9b1 skipped
+    tiers 1-3 and asked an LLM to read a transcript, which answered
+    "unknown". Measured on the W3L9 lecture: `categories: ["Education"]` was
+    on disk the whole time and the run still recorded `register = None`.
+
+    Returns {} when there is nothing to find, which keeps a genuinely
+    metadata-less local file on the LLM tier where it belongs.
+    """
+    candidates: List[Path] = []
+    if video is not None:
+        # The cut keeps the source stem, so prefer a sibling of the input.
+        candidates.append(Path(video).with_suffix(".meta.json"))
+    for sub_dir in ("source", "videos"):
+        d = Path(job_root) / sub_dir
+        if d.is_dir():
+            candidates.extend(sorted(d.glob("*.meta.json")))
+    for path in candidates:
+        try:
+            if not path.exists():
+                continue
+            data = json.loads(path.read_text())
+        except Exception as e:                       # noqa: BLE001
+            log.warning("classify: could not read %s (%s)", path.name, e)
+            continue
+        if isinstance(data, dict) and data:
+            log.info("classify: recovered source metadata from %s", path.name)
+            return data
+    return {}
+
 
 def _merged_has_clips(merged_json: Path) -> bool:
     """True when every segment of `merged_json` already points at a real clip.

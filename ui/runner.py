@@ -124,6 +124,41 @@ def _terminate_children(sig: int = signal.SIGTERM) -> int:
     return len(kids)
 
 
+def _preflight_gpu() -> None:
+    """Refuse the job unless some GPU clears the free-VRAM floor.
+
+    `backend.gpu.pick_devices` applies the same rule when the render
+    actually starts; this only moves the verdict to the front so the
+    operator is told immediately instead of 20 minutes in. Raises
+    RuntimeError, which `ui/errors.py` maps to "The GPUs are busy right
+    now" with a wait-and-retry action.
+
+    Free means no OTHER process on the card. Our own CUDA context does not
+    count against us -- it is on whichever device this pipeline already
+    touched.
+
+    No GPUs at all is NOT a refusal: a CPU-only host is a deployment
+    choice, and blocking it here would be a new restriction rather than a
+    guard against a measured failure.
+    """
+    from backend.gpu import (free_devices, gpu_busy_pids,
+                             visible_cuda_devices)
+    visible = visible_cuda_devices()
+    if not visible:
+        return
+    free = free_devices()
+    if free:
+        log.info("gpu pre-flight: %d of %d free (%s)",
+                 len(free), len(visible), ", ".join(f"gpu{g}" for g in free))
+        return
+    busy = gpu_busy_pids()
+    who = ", ".join(f"gpu{g} (pid {','.join(str(x) for x in p)})"
+                    for g, p in sorted(busy.items())) or "all devices"
+    raise RuntimeError(
+        f"no GPU is free — another process is using {who}. "
+        f"Lip-sync needs a card to itself; the run cannot proceed.")
+
+
 def _install_sigterm() -> None:
     def _handler(signum, _frame):
         # Kill the children FIRST. If anything downstream still swallows the
@@ -189,30 +224,29 @@ def _cut(src: Path, job_root: Path, window: Optional[Dict[str, float]]) -> Path:
     return adopt_whole(src, videos / f"{src.stem}{src.suffix or '.mp4'}")
 
 
-def _probe_and_pick(clip: Path, requested: Optional[str]
-                    ) -> Dict[str, Any]:
-    """Resolve `"auto"` into a real model. Anything else passes through."""
-    if requested is None:
-        return {"lipsync_model": None, "reason": "Lip-sync was not requested.",
-                "face": None}
-    if requested != "auto":
-        return {"lipsync_model": requested,
-                "reason": f"{requested} was chosen explicitly.", "face": None}
+def _probe_face(clip: Path) -> Dict[str, Any]:
+    """MEASURE the face size. Does not choose anything.
+
+    This used to be `_probe_and_pick`, and resolving `"auto"` here meant the
+    most expensive stage in the pipeline was selected by a number the
+    operator never saw — and silently fell back to wav2lip whenever the
+    probe failed. Both halves of that are gone: the measurement is recorded
+    and shown on the review screen, and the model is named by the operator at
+    `POST /api/jobs/{id}/lipsync`.
+
+    A failed probe is no longer load-bearing, so it is just a missing number.
+    """
     try:
         stats = facepick.face_size_stats(clip)
-        median = stats.get("median")
-    except Exception as e:
-        # A failed probe must not lose the run. Wav2Lip is the cheap choice,
-        # so defaulting to it when the measurement is missing costs GPU hours
-        # only in the case where MuseTalk would have been better.
-        log.warning("face probe failed (%s); defaulting to wav2lip", e)
-        return {"lipsync_model": "wav2lip", "face": None,
-                "reason": (f"The face-size probe failed ({e}), so the cheaper "
-                           f"model was used. Re-run with an explicit model if "
-                           f"the speaker fills the frame.")}
-    model, reason = facepick.pick_lipsync_model(median)
-    log.info("lip-sync model: %s — %s", model, reason)
-    return {"lipsync_model": model, "reason": reason, "face": stats}
+    except Exception as e:                                    # noqa: BLE001
+        log.warning("face probe failed (%s); the review screen will say so", e)
+        return {"lipsync_model": None, "face": None,
+                "reason": f"The face-size probe failed ({e})."}
+    median = stats.get("median")
+    hint = facepick.pick_lipsync_model(median)[1] if median else None
+    log.info("face size: median=%s p90=%s", median, stats.get("p90"))
+    return {"lipsync_model": None, "face": stats,
+            "reason": hint or "No face was found in the sampled frames."}
 
 
 # ---------------------------------------------------------------------------
@@ -342,16 +376,17 @@ def run(job_id: str, *, rerun: bool = False, jobs_dir: Optional[Path] = None
     req = read_request(job_root)
     kwargs: Dict[str, Any] = dict(req.get("pipeline") or {})
     window = req.get("window")
-    requested_ls = req.get("lipsync_model")
+    # `req["lipsync_model"]` is deliberately NOT read. An older bundle still
+    # posts one and `request.json` still records what was asked for, but a
+    # submission no longer lip-syncs, so acting on it here would reinstate
+    # exactly the implicit render this change removed.
 
     plan_cfg = presets.plan_config(kwargs)
-    # `lipsync_model: "auto"` means the model is picked by the face probe a
-    # few seconds from now, so `kwargs["lipsync_model"]` is still None here.
-    # The STAGE runs either way, and the bar has to show it from the first
-    # second — otherwise every default-preset job renders a six-node bar and
-    # grows a seventh when lip-sync starts.
-    if not plan_cfg.get("lipsync") and requested_ls:
-        plan_cfg["lipsync"] = requested_ls
+    # No lip-sync node is planned any more, and that is now honest rather
+    # than a gap: phase one ends at the mix. The bar used to be padded with a
+    # seventh node here because `"auto"` meant a stage that WOULD run without
+    # being in `kwargs` yet. Lip-sync is a separate submission now, with its
+    # own progress.
     planned = plan_stages(plan_cfg, pre=list(PRE_STAGES))
     writer = ProgressWriter(job_root, job_id=job_id, planned=planned)
     _attach(writer)
@@ -359,6 +394,16 @@ def run(job_id: str, *, rerun: bool = False, jobs_dir: Optional[Path] = None
     _install_sigterm()
     state, error = "done", None
     try:
+        # GPU pre-flight, BEFORE the download. A job that cannot lip-sync
+        # should cost nothing: refusing here is seconds, whereas discovering
+        # it at stage 9h is after the download, stems, diarization, faces,
+        # ASD, and the billable Bodhan ASR/MT/TTS calls have all been paid
+        # for -- and MuseTalk answers an OOM by exiting 0, so it surfaces
+        # only as "produced no mp4". Audio-only dubs are not blocked.
+        # Phase one never lip-syncs, so there is no GPU render to clear the
+        # way for. The check moved to `POST /api/jobs/{id}/lipsync`, which is
+        # where the GPU is actually about to be spent.
+
         writer.begin("fetch", "download")
         src = _fetch(str(req["url"]), job_root)
 
@@ -366,14 +411,31 @@ def run(job_id: str, *, rerun: bool = False, jobs_dir: Optional[Path] = None
         clip = _cut(src, job_root, window)
 
         writer.begin("probe", "face size")
-        picked = _probe_and_pick(clip, requested_ls)
-        if picked["lipsync_model"]:
-            kwargs["lipsync_model"] = picked["lipsync_model"]
-            kwargs.setdefault("face_detector", "retinaface")
-        _record_pick(job_root, picked)
+        # Measured, recorded, shown — never acted on. `kwargs` is NOT given a
+        # lip-sync model here: phase one always stops at the mix.
+        _record_pick(job_root, _probe_face(clip))
 
         from backend.pipeline import run_pipeline
-        run_pipeline(str(clip), job_id=job_id, data_dir=DATA_DIR, **kwargs)
+        result = run_pipeline(str(clip), job_id=job_id, data_dir=DATA_DIR,
+                              **kwargs)
+
+        # A lip-sync failure does NOT raise. `_run_pipeline` catches it into
+        # `result.lipsync_error` and returns normally, on the reasoning that
+        # the audio dub is still a usable artifact — which it is. But the
+        # runner then wrote `done`, and the job card said done at 100% for a
+        # job with no lip-synced video in it. Two real jobs on 2026-10-17
+        # (CFymHrr5iQw, X2FV2E34Bwo) read done/100% having lost every shard
+        # to the shared-temp race in `wav2lip_adapter`.
+        #
+        # The run asked for a lip-synced dub and did not produce one, so the
+        # job failed. The message says what DID survive, because the mixed
+        # audio is worth collecting.
+        if getattr(result, "lipsync_error", None):
+            state = "failed"
+            error = (f"Lip-sync failed: {result.lipsync_error} "
+                     f"The dubbed audio and its muxed video were still "
+                     f"written — only the lip-synced render is missing.")
+            log.error("job %s: %s", job_id, error)
     except Cancelled as e:
         state, error = "cancelled", str(e)
         log.warning("job %s cancelled: %s", job_id, e)

@@ -28,7 +28,7 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-from .base import BaseLipSync, LipSyncRequest, LipSyncResult
+from .base import BaseLipSync, LipSyncRequest, LipSyncResult, resolve_env_python
 
 log = logging.getLogger(__name__)
 
@@ -59,7 +59,7 @@ class LatentSyncSync(BaseLipSync):
             or "configs/unet/stage2_512.yaml"
         self.unet_ckpt_path = unet_ckpt_path or os.getenv("LATENTSYNC_UNET_CKPT") \
             or "checkpoints/latentsync_unet.pt"
-        self.python_bin = python_bin or os.getenv("LATENTSYNC_PYTHON") or sys.executable
+        self.python_bin = resolve_env_python("latentsync", "latentsync", python_bin)
         self.inference_steps = inference_steps
         self.guidance_scale = guidance_scale
         self.seed = seed

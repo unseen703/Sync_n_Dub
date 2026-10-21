@@ -81,6 +81,18 @@ TTS_WORDS = {
     "indicf5":     "IndicF5 — cloned from each speaker",
 }
 
+#: How stage 9b1 decided the register, in operator terms. The tier is worth
+#: showing because the confidence differs sharply: `categories` is YouTube's
+#: own label for the video, while `llm` is a small model's read of the
+#: transcript and is the one to distrust.
+REGISTER_TIER_WORDS = {
+    "categories":  "From the video's own YouTube category.",
+    "channel":     "From a channel this install has a rule for.",
+    "description": "Matched wording in the uploader's description.",
+    "llm":         "Inferred from the transcript — the least certain of the "
+                   "four signals, and worth a listen before trusting it.",
+}
+
 LIPSYNC_WORDS = {
     "wav2lip":    "On — Wav2Lip",
     "musetalk":   "On — MuseTalk",
@@ -94,6 +106,7 @@ def build(job_root: Path, *, manifest: Dict[str, Any],
           progress: Optional[Dict[str, Any]] = None,
           n_speakers: Optional[int] = None) -> Dict[str, Any]:
     cfg = dict(manifest.get("config") or {})
+    result = dict(manifest.get("result") or {})
     meta = meta or {}
     lines: List[Dict[str, Any]] = []
 
@@ -142,6 +155,22 @@ def build(job_root: Path, *, manifest: Dict[str, Any],
         else:
             lines.append(_line("tone", "Tone control", "Available"))
 
+    # Stage 9b1 picks the delivery register from the uploader's metadata, so
+    # it is a decision the operator never made and would otherwise have no
+    # way to see. The tier matters as much as the value: `categories` is
+    # YouTube's own label, `llm` is a guess from the transcript.
+    register = result.get("content_register")
+    if register:
+        lines.append(_line("register", "Reading it as", register,
+                           hint=REGISTER_TIER_WORDS.get(
+                               result.get("content_register_tier") or "", "")))
+    elif tts in ("bodhan", "indic-speak") and cfg.get("tts_style") == "auto":
+        # Asked for, and nothing was confident enough to answer.
+        lines.append(_line("register", "Reading it as", "Neutral",
+                           hint="Nothing in the video's metadata identified "
+                                "the programme type, so the voice uses its "
+                                "default delivery."))
+
     ls = (cfg.get("lipsync") or "").lower()
     # Prefix match: the clip runner records `musetalk-v15`, not `musetalk`.
     ls_word = next((w for k, w in LIPSYNC_WORDS.items() if ls.startswith(k)),
@@ -154,9 +183,6 @@ def build(job_root: Path, *, manifest: Dict[str, Any],
                            hint="Picked automatically from the face size; "
                                 "you can override it on a new job."))
 
-    restore = (cfg.get("restore") or "").lower()
-    lines.append(_line("restore", "Face cleanup",
-                       f"On — {restore.title()}" if restore else "Off"))
 
     lines.append(_line("stems", "Background audio",
                        "Removed" if cfg.get("skip_stems")

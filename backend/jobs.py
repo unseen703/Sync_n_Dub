@@ -295,6 +295,13 @@ _RESULT_FIELDS = (
     "duration_model_voice", "duration_estimated_violations", "voice_engine",
     "tts_model", "tts_budget_violations", "tts_errors", "vc_model",
     "lipsync_model", "lipsync_error",
+    # Stage 9b1's answer and the tier that produced it. `PipelineResult` has
+    # carried these as named fields since 2026-10-17, but this allow-list is
+    # what the manifest actually serialises -- so a finished run recorded no
+    # register at all while the log showed 9b1 choosing one and the style
+    # reaching the engine. The field exists to make a surprising dub
+    # traceable to the signal behind it, which needs it on disk.
+    "content_register", "content_register_tier",
 )
 
 #: Result fields that are paths; recorded relative to the job root.

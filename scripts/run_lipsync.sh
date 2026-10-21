@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Run ONE lip-sync adapter on an already-dubbed mix, waiting for a free GPU.
 #
-#   scripts/run_lipsync.sh <wav2lip|musetalk|latentsync|lipgan> <stem> [--restore codeformer]
+#   scripts/run_lipsync.sh <wav2lip|musetalk|latentsync|lipgan> <stem>
 #
 # Replaces retry_wav2lip.sh / retry_latentsync.sh / run_musetalk.sh, which were
 # this same script three times over: each pinned one model, one GPU and the

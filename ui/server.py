@@ -21,6 +21,7 @@ import logging
 import os
 import re
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -35,7 +36,11 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-DATA_DIR = REPO_ROOT / "data"
+# `DUBBING_UI_DATA_DIR` moves the whole UI, not part of it. `routes_create`
+# and `routes_edits` already read it; this module did not, so with the var
+# set the write path allocated jobs into one tree while the read path
+# listed another — a job that creates successfully and never appears.
+DATA_DIR = Path(os.environ.get("DUBBING_UI_DATA_DIR") or (REPO_ROOT / "data"))
 JOBS_DIR = DATA_DIR / "jobs"
 
 #: The built Vite app, and the hand-written inspector that predates it.
@@ -272,11 +277,90 @@ def _describe_job(job_id: str) -> dict[str, Any]:
     }
 
 
+def _epoch(value: Any) -> float | None:
+    """Epoch seconds from an ISO-8601 string or a number; None if unreadable.
+
+    A NAIVE timestamp is read as UTC rather than local time. Every writer
+    here stamps with `datetime.now(timezone.utc)`, so assuming local would
+    shift those rows by the machine's offset and interleave them wrongly
+    with the tz-aware ones — a five-and-a-half-hour reordering on this host.
+    """
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.timestamp()
+
+
+def _last_activity(job_dir: Path, parsed: dict[str, Any],
+                   status: dict[str, Any] | None,
+                   manifest: dict[str, Any] | None,
+                   prog: dict[str, Any] | None) -> float:
+    """When this job last RAN, in epoch seconds. Never None.
+
+    `max()` over every stamp rather than a first-match chain, because a job
+    can be re-run: the edit agent's replay and the lip-sync step both write
+    fresh progress into a folder whose NAME still carries the original
+    allocation time. Taking the newest evidence is what makes "recent" mean
+    recently executed rather than recently created.
+
+    The folder's mtime is a FALLBACK, not a candidate. Putting it in the
+    `max()` made it win every time — it is the most recent thing about any
+    folder that has been written to at all — so the recorded stamps became
+    decorative and the ordering silently became "whatever was touched last",
+    which is not the same question. It now rescues only the job shapes with
+    no recorded stamp whatsoever: the clip runner's and the bare
+    `manifest.json` ones (CLAUDE.md §2 counts four shapes plus 16 folders
+    with none).
+    """
+    recorded = [
+        _epoch((prog or {}).get("updated")),
+        _epoch((status or {}).get("updated")),
+        _epoch((manifest or {}).get("finished_at")),
+        _epoch((manifest or {}).get("started_at")),
+        # `"2026-10-20 04:30:27"`, which `fromisoformat` accepts.
+        _epoch(parsed.get("timestamp")),
+    ]
+    usable = [s for s in recorded if s]
+    if usable:
+        return max(usable)
+    try:
+        return job_dir.stat().st_mtime
+    except OSError:                                      # pragma: no cover
+        return 0.0
+
+
 def _list_jobs() -> list[dict[str, Any]]:
+    """Every job, most recently RUN first.
+
+    The order used to be `sorted(JOBS_DIR.iterdir(), reverse=True)` — the
+    folder NAME, descending — which is right only for jobs whose name starts
+    with an allocation timestamp. It was wrong twice over:
+
+    1. A hand-named job sorts by ASCII, and lowercase letters sort ABOVE
+       digits, so `w1l2_60to100_hi_musetalk_cli` and `bench_hi_120s` pinned
+       themselves above every timestamped job on the machine no matter how
+       old they were.
+    2. The name records when a job was ALLOCATED. A re-run — an edit agent
+       replay, or the lip-sync step — leaves the name alone, so a job that
+       ran five minutes ago sorted as though it ran last week.
+
+    `JobRail.tsx` does not re-sort; it relies on this order, so this is the
+    only place it can be fixed.
+    """
     if not JOBS_DIR.is_dir():
         return []
     rows: list[dict[str, Any]] = []
-    for d in sorted(JOBS_DIR.iterdir(), reverse=True):
+    for d in JOBS_DIR.iterdir():
         if not d.is_dir():
             continue
         parsed = _parse_job_id(d.name)
@@ -314,8 +398,16 @@ def _list_jobs() -> list[dict[str, Any]]:
 
         meta = _read_json(d / "meta.json") or {}
         mcfg = (manifest or {}).get("config") or {}
+        ran_at = _last_activity(d, parsed, status, manifest, prog)
         rows.append({
             **parsed,
+            # Epoch seconds, and the key this list is ordered by. Exposed so
+            # a client can re-sort or show "3 minutes ago" without having to
+            # re-derive it from four possible stamps.
+            "last_activity": ran_at,
+            "last_activity_iso": (
+                datetime.fromtimestamp(ran_at, timezone.utc).isoformat()
+                if ran_at else None),
             # `display_name` is written at creation (URL-derived) and
             # upgraded to the real title once the probe returns. `title` is
             # kept separate so a caller can tell a real title from a
@@ -335,6 +427,11 @@ def _list_jobs() -> list[dict[str, Any]]:
                               or mcfg.get("target_language")),
             "has_final":     has_final_mp4,
         })
+    # Newest run first. The job id is the tie-break so the order is STABLE
+    # across polls — two jobs sharing a second (a batch submission, or two
+    # folders whose only stamp is the same mtime) would otherwise swap
+    # places between refreshes and make the rail jump under the cursor.
+    rows.sort(key=lambda r: (r["last_activity"], r["job_id"]), reverse=True)
     return rows
 
 
@@ -533,6 +630,8 @@ def api_options(tts: str | None = None) -> dict[str, Any]:
     """
     from . import presets
     from .langs import options as lang_options
+    from . import presets
+    from .speakers import submit_style_options
     engine = (tts or presets.default_tts()).lower()
     return {
         "languages": lang_options(engine),
@@ -541,9 +640,22 @@ def api_options(tts: str | None = None) -> dict[str, Any]:
              "supports_tone": True,
              "note": "22 Indian languages · a distinct voice per speaker"},
         ],
+        # The four delivery types the form offers, filtered from the
+        # engine's own 14 — emotions are excluded because they are
+        # per-segment moods stage 9b2 derives from the source speaker, and
+        # picking one up front flattens the whole video into it.
+        "styles": submit_style_options(),
+        # What the form should PRESELECT as the spoken language. Served
+        # rather than hardcoded in the bundle so `DUBBING_UI_SOURCE_LANGUAGE`
+        # moves the UI and the pipeline together instead of only one.
+        "default_source_language": presets.default_source_language(),
+        # No `auto` row. It meant "picked from the face size in the video",
+        # and that selection was removed on 2026-10-20: the operator names
+        # the model at `POST /api/jobs/{id}/lipsync`, against the face size
+        # the run measured and SHOWS. Leaving the row here would advertise a
+        # value nothing resolves any more — the shape of the tone-picker bug
+        # in CLAUDE.md §2, where the UI offered values the engine 422s on.
         "lipsync_models": [
-            {"id": "auto", "label": "Choose for me",
-             "note": "Picked from the face size in the video"},
             {"id": "wav2lip", "label": "Wav2Lip", "speed": "3–5× clip length"},
             {"id": "musetalk", "label": "MuseTalk", "speed": "8–21× clip length"},
             {"id": "latentsync", "label": "LatentSync", "speed": "~83× clip length"},
@@ -552,7 +664,9 @@ def api_options(tts: str | None = None) -> dict[str, Any]:
             "max_lipsync_s": MAX_LIPSYNC_S,
             "note": (f"Lip-sync is capped at {MAX_LIPSYNC_S // 60} minutes of "
                      f"video. It runs at 3–21× the clip length on this "
-                     f"machine's GPUs, so a longer clip means hours."),
+                     f"machine's GPUs, so a longer clip means hours. The cap "
+                     f"applies when you START lip-sync, not when you submit "
+                     f"the dub — a longer audio dub is fine."),
         },
     }
 
@@ -636,7 +750,8 @@ def api_log(job_id: str, tail: int = 200) -> dict[str, Any]:
 # shadowed entirely: every GET answers 404 and every POST 405, from the
 # static handler, which reads exactly like a routing typo.
 for _mod, _what in (("routes_edits", "voice/tone editing"),
-                    ("routes_create", "job creation")):
+                    ("routes_create", "job creation"),
+                    ("routes_talkinghead", "talking head page")):
     try:
         _router = __import__(f"ui.{_mod}", fromlist=["router"]).router
     except ImportError as _e:

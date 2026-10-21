@@ -1,4 +1,4 @@
-"""Benchmark F0 and ECAPA voice-gender against the FACE label.
+"""Benchmark the voice-gender classifier against the FACE label.
 
 Design, and why each step is there:
 
@@ -12,9 +12,15 @@ Design, and why each step is there:
      This is what pairs a face with a VOICE: without it, the audio under a
      face track is whoever happened to be talking, and the whole comparison
      measures nothing. Only tracks that actually speak are kept.
-  5. Cut that track's speaking span out of the audio -> run F0 and ECAPA on
-     exactly the audio that face produced.
-  6. Compare both against the face label.
+  5. Cut that track's speaking span out of the audio -> run the wav2vec2
+     classifier on exactly the audio that face produced.
+  6. Compare against the face label.
+
+Last run 2026-10-18, after F0 and ECAPA were removed from `backend/gender.py`:
+the classifier agreed with the face on 9 of 11 tracks (81.8%), against 72.7%
+for the F0 threshold and 45.5% for the ECAPA head it replaced. Both of its
+disagreements are John Wick tracks where F0 ALSO said male against a face
+label of female, so the reference is at least as likely to be wrong there.
 """
 import json
 import subprocess
@@ -37,8 +43,7 @@ import numpy as np
 
 from backend.asd import score_asd
 from backend.faces import detect_and_track
-from backend.gender import (predict_gender_ecapa, predict_gender_f0,
-                            predict_gender_face)
+from backend.gender import predict_gender_face, predict_gender_w2v2_scores
 from backend.media_io import _ffmpeg_bin, probe_duration
 
 OUT = ROOT / "data/gender_bench"
@@ -119,8 +124,12 @@ def run_one(name: str, src: Path) -> list:
         seg = cut(wav, work / f"{tid}.speech.wav", t0, max(1.0, t1 - t0),
                   audio_only=True)
 
-        f0_g = predict_gender_f0(seg)
-        ecapa_g = predict_gender_ecapa(seg)
+        scores = predict_gender_w2v2_scores(seg)
+        voice_g = max(scores, key=scores.__getitem__) if scores else None
+        # The winning probability, kept because the two catalog errors this
+        # model makes are 0.94 and 0.999 confident -- a low number here is
+        # informative, a high one is not evidence of anything.
+        voice_p = round(max(scores.values()), 3) if scores else None
         rows.append({
             "video": name, "track": tid,
             # Where this voice sample came from. `clip_*` is relative to the
@@ -131,13 +140,13 @@ def run_one(name: str, src: Path) -> list:
             "src_t0": round(start + t0, 1), "src_t1": round(start + t1, 1),
             "speech_s": round(t1 - t0, 1),
             "speaking_frames": int(speaking.sum()),
-            # Three predictions of the same thing, from three signals.
+            # Two predictions of the same thing, from two signals.
             "face": face_g, "face_conf": round(face_conf, 2), "votes": votes,
-            "f0": f0_g, "ecapa": ecapa_g,
+            "voice": voice_g, "voice_p": voice_p,
         })
         print(f"  {tid:9s} {start+t0:6.1f}-{start+t1:6.1f}s  "
-              f"face={face_g:6s}({face_conf:.2f})  f0={f0_g:6s}  "
-              f"ecapa={ecapa_g}", flush=True)
+              f"face={face_g:6s}({face_conf:.2f})  "
+              f"voice={voice_g}({voice_p})", flush=True)
     return rows
 
 

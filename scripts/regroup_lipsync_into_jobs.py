@@ -14,7 +14,6 @@ Files are MOVED, and the resulting layout mirrors what
 
     data/jobs/<ts>__<video>_<window>__<config>_<lang>/
         final.<lang>.wav2lip.mp4             raw lip-sync render
-        final.<lang>.wav2lip.codeformer.mp4  restored render
         audio/clip.dub.48k.stereo.wav        the generated dub track
         audio/clip.dub.cues.json             per-cue text + stretch sidecar
         videos/clip.dubbed.mp4               source clip carrying the dub
@@ -42,7 +41,6 @@ def main() -> int:
     ap.add_argument("--job-prefix", required=True,
                     help="e.g. 20261015T012752__dIYDPtHWBNA_240to270__wav2lip_codeformer")
     ap.add_argument("--model", default="wav2lip")
-    ap.add_argument("--restore", default="codeformer")
     ap.add_argument("--data-dir", type=Path, default=ROOT / "data")
     ap.add_argument("--config-json", type=Path, default=None,
                     help="JSON file copied into each job folder as config.json")
@@ -78,8 +76,6 @@ def main() -> int:
 
         plan: list[tuple[Path, Path]] = [
             (lipsync_dir / f"{stem}.{args.model}.lipsync.mp4", final_raw),
-            (lipsync_dir / f"{stem}.{args.model}.{args.restore}.mp4",
-             job / f"final.{lg}.{args.model}.{args.restore}.mp4"),
             (mix_dir / f"{stem}.dubbed.wav", job / "audio" / "clip.dub.48k.stereo.wav"),
             (mix_dir / f"{stem}.dubbed.cues.json", job / "audio" / "clip.dub.cues.json"),
             (mix_dir / f"{stem}.dubbed.mp4", job / "videos" / "clip.dubbed.mp4"),
@@ -97,7 +93,7 @@ def main() -> int:
 
         cfg = dict(base_cfg)
         cfg.update({"language": lg, "job_id": job.name,
-                    "lipsync_model": args.model, "restore_model": args.restore})
+                    "lipsync_model": args.model})
         (job / "config.json").write_text(json.dumps(cfg, indent=1,
                                                     ensure_ascii=False))
         (job / "DUB_PROVENANCE.json").write_text(json.dumps({

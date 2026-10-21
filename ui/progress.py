@@ -317,17 +317,37 @@ class ProgressWriter(logging.Handler):
         stages = self._doc["stages"]
         idx = next((i for i, s in enumerate(stages)
                     if s["key"] == key and s["state"] == "pending"), None)
-        if idx is None:
-            # Unplanned stage: the plan drifted from the pipeline. Append it
-            # rather than dropping it — reality wins over the forecast.
-            stages.append({"key": key, "title": title, "label": label_for(key, title),
-                           "state": "pending", "started_at": None, "wall_s": None})
-            idx = len(stages) - 1
-        else:
+        if idx is not None:
             # Anything still pending before this one was conditionally skipped.
             for s in stages[:idx]:
                 if s["state"] == "pending":
                     s["state"] = "skipped"
+        else:
+            # No PENDING entry for this key. Two different situations, and
+            # they used to be collapsed into "append":
+            #
+            #  * the key is already in the list in a terminal state — this is
+            #    a RE-RUN re-entering a stage the previous attempt had
+            #    already passed, skipped or failed. `--rerun` and the edit
+            #    agent's replay both land here, as does any second attempt
+            #    on the same job folder. Appending produced a SECOND row with
+            #    the same key, and every reader takes the first match, so the
+            #    UI showed the stale verdict: stage 9b2 read "skipped" on a
+            #    run whose log says it executed for 11.9 s.
+            #  * the key is absent entirely — the plan drifted from the
+            #    pipeline. Appending is right there: reality beats forecast.
+            idx = next((i for i, s in enumerate(stages)
+                        if s["key"] == key), None)
+            if idx is None:
+                stages.append({"key": key, "title": title,
+                               "label": label_for(key, title),
+                               "state": "pending", "started_at": None,
+                               "wall_s": None})
+                idx = len(stages) - 1
+            else:
+                # Re-entering: clear the previous attempt's verdict so the
+                # row reports THIS attempt rather than the last one.
+                stages[idx]["wall_s"] = None
         st = stages[idx]
         st.update(state="running", title=title or st.get("title"),
                   label=label_for(key, title), started_at=_now(),

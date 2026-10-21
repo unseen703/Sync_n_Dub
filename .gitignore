@@ -72,3 +72,27 @@ logs/
 
 # repo_checkup.py state (machine-local; README.md is the tracked artifact)
 .repo-state.json
+
+# >>> dubbing media and vendored trees (2026-10-20)
+# Regenerable or gigabytes, and `data/jobs/` is written by live runs.
+# `data/talking_head/dialogues.json` is SOURCE (the dialogue catalogue the
+# Talking Head page reads), so it is un-ignored explicitly — git will not
+# descend into an ignored directory, hence the four-line dance.
+data/*
+!data/DATA_LAYOUT.md
+!data/talking_head/
+data/talking_head/*
+!data/talking_head/dialogues.json
+
+# Vendored upstream repos. Local patches are exported to patches/ instead.
+third_party/
+!patches/
+
+# Run logs, build output, model weights
+logs/
+ui/web-dist/
+*.pth
+*.onnx
+*.ckpt
+*.safetensors
+# <<< dubbing media

@@ -1,6 +1,6 @@
 import { useStore } from '../../store/useStore';
 import { Button, DemoChip } from '../ui/Button';
-import { IconKeyboard, IconMenu, IconMoon, IconPanel, IconPlus, IconSun } from '../ui/Icons';
+import { IconKeyboard, IconMoon, IconPanel, IconPlus, IconSun } from '../ui/Icons';
 import { Tooltip } from '../ui/Tooltip';
 import { cn } from '../../lib/cn';
 import { MOCKED } from '../../api';
@@ -18,12 +18,9 @@ export function BrandBar() {
   const setNewJobOpen = useStore((s) => s.setNewJobOpen);
   const toggleSpec = useStore((s) => s.toggleSpec);
   const specOpen = useStore((s) => s.specOpen);
-  const setRailOpen = useStore((s) => s.setRailOpen);
-  const railOpen = useStore((s) => s.railOpen);
   const theme = useStore((s) => s.theme);
   const toggleTheme = useStore((s) => s.toggleTheme);
   const selected = useStore((s) => s.selected);
-  const nJobs = useStore((s) => s.jobs.length);
   const setShortcutsOpen = useStore((s) => s.setShortcutsOpen);
 
   return (
@@ -106,20 +103,6 @@ export function BrandBar() {
           </button>
         </Tooltip>
 
-        <Tooltip label={railOpen ? 'Hide the job list' : 'Show the job list'}>
-          <button
-            type="button"
-            onClick={() => setRailOpen(!railOpen)}
-            aria-label={`${railOpen ? 'Hide' : 'Show'} the job list (${nJobs} jobs)`}
-            aria-pressed={railOpen}
-            className={cn(
-              'rounded-lg p-2 transition-colors hover:bg-ink/[0.07] hover:text-ink',
-              railOpen ? 'text-ink' : 'text-ink3',
-            )}
-          >
-            <IconMenu />
-          </button>
-        </Tooltip>
       </div>
     </header>
   );

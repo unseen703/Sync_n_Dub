@@ -139,8 +139,14 @@ def from_llm(transcript: str, client=None, *, max_chars: int = 4000) -> Optional
         return None
     if client is None:
         try:
-            from .llm import get_client
-            client = get_client()
+            # `llm.get_client` was deleted on 2026-10-17 as a dead
+            # definition "with zero references anywhere in the repo". This
+            # line is that reference — the grep that justified the deletion
+            # missed it, and the only symptom was this `except` quietly
+            # logging "no LLM client" and leaving the register unset, so
+            # stage 9b1 degraded to `None` on every run without failing.
+            from .llm import OpenRouterClient
+            client = OpenRouterClient()
         except Exception as e:                      # noqa: BLE001
             log.info("classify: no LLM client (%s)", e)
             return None
@@ -158,6 +164,7 @@ def from_llm(transcript: str, client=None, *, max_chars: int = 4000) -> Optional
             [{"role": "system", "content": _LLM_SYSTEM},
              {"role": "user", "content": user}],
             temperature=0.0,
+            trace_name="classify.register",
         )
     except Exception as e:                          # noqa: BLE001
         log.warning("classify: LLM call failed (%s); leaving register unset", e)

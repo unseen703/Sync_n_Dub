@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { useStore } from '../../store/useStore';
 import { Button } from '../ui/Button';
 import { StateBadge } from '../ui/StateBadge';
-import { IconStop } from '../ui/Icons';
+import { IconStop, IconSparkle } from '../ui/Icons';
 import { fmtElapsed, jobTitle, normalizeState } from '../../lib/format';
 import { useNow } from '../../hooks/useNow';
 import { cancelJob, MOCKED } from '../../api';
@@ -59,6 +59,21 @@ export function TopBar() {
             </span>
           ) : null}
           <StateBadge state={progress.state} />
+          {/* The agent edits a FINISHED dub — it replays stages 9b..9h over
+              the run's merged ASR+MT JSON, which only exists once the run
+              has got that far. Offering it mid-run would stage edits
+              against a transcript still being written. */}
+          {!running && selected ? (
+            <a
+              href={`#/job/${encodeURIComponent(selected)}/edit`}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-edge/70
+                         px-2.5 py-1.5 text-[12px] text-ink2 transition-colors
+                         hover:border-edge hover:text-ink"
+            >
+              <IconSparkle width={13} height={13} />
+              Edit via agent
+            </a>
+          ) : null}
           {running ? (
             <Button
               size="sm"

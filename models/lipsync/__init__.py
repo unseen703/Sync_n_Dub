@@ -2,6 +2,9 @@
 
   - lipgan      : Rudrabha/LipGAN — ACM MM 2019 baseline (non-commercial)
   - wav2lip     : Rudrabha/Wav2Lip — ECCV 2020 baseline (non-commercial)
+  - wav2lip_hd  : saifhassan/Wav2Lip-HD — the SAME Wav2Lip render, then a
+                  Real-ESRGAN x4plus + GFPGAN pass over every frame. Not a
+                  higher-resolution model; a restoration second pass.
   - musetalk    : TMElyralab/MuseTalk 1.5 — latent inpainting, 256x256, fast
   - latentsync  : bytedance/LatentSync 1.6 — audio-conditioned latent
                   diffusion, 512x512, highest fidelity
@@ -19,6 +22,7 @@ from .base import BaseLipSync, LipSyncRequest, LipSyncResult
 _REGISTRY_SPEC: dict[str, tuple[str, str]] = {
     "lipgan":     (".lipgan_adapter", "LipGANSync"),
     "wav2lip":    (".wav2lip_adapter", "Wav2LipSync"),
+    "wav2lip_hd": (".wav2lip_hd_adapter", "Wav2LipHDSync"),
     "musetalk":   (".musetalk_adapter", "MuseTalkSync"),
     "latentsync": (".latentsync_adapter", "LatentSyncSync"),
 }

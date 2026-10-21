@@ -13,13 +13,11 @@ const loadMotionFeatures = () =>
   import('./lib/motionFeatures').then((mod) => mod.default);
 
 /**
- * Both dialogs are loaded on demand. Neither is on the path to first
- * paint, and the new-dub form is the larger of the two — it carries the
- * range picker, the probe flow and the options fetch.
+ * The shortcuts dialog is loaded on demand — it is not on the path to
+ * first paint. The new-dub form is no longer a dialog at all: it lives on
+ * the landing page, so there is one place to start a dub instead of two
+ * that drifted apart.
  */
-const NewJobDialog = lazy(() =>
-  import('./components/newjob/NewJobDialog').then((m) => ({ default: m.NewJobDialog })),
-);
 const ShortcutsDialog = lazy(() =>
   import('./components/ui/ShortcutsDialog').then((m) => ({ default: m.ShortcutsDialog })),
 );
@@ -28,7 +26,6 @@ export default function App() {
   const bootstrap = useStore((s) => s.bootstrap);
   const selected = useStore((s) => s.selected);
   const specOpen = useStore((s) => s.specOpen);
-  const newJobOpen = useStore((s) => s.newJobOpen);
   const shortcutsOpen = useStore((s) => s.shortcutsOpen);
   const setShortcutsOpen = useStore((s) => s.setShortcutsOpen);
 
@@ -58,11 +55,6 @@ export default function App() {
       <MotionConfig reducedMotion="user">
         <TooltipProvider delayDuration={300} skipDelayDuration={200}>
           <AppShell />
-          {newJobOpen ? (
-            <Suspense fallback={null}>
-              <NewJobDialog />
-            </Suspense>
-          ) : null}
           {shortcutsOpen ? (
             <Suspense fallback={null}>
               <ShortcutsDialog open onOpenChange={setShortcutsOpen} />

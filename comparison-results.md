@@ -196,8 +196,9 @@ Whisper model size (from the sweep ASR, deduplicated):
 **`whisperx-medium` is a sharp regression, not a midpoint** — it recovers 34 %
 fewer words than large-v3 on the 60 s clip and 64 % fewer on the 10 min clip, and
 is *worse than small*. Whatever is wrong with the medium checkpoint in this
-environment, it should not be offered as a quality/speed tradeoff until it is
-investigated. Use large-v3; fall back to small, never medium.
+environment, it does not hold up as a quality/speed tradeoff while it remains
+uninvestigated. large-v3 leads, with small as the lighter option; medium sits
+below both.
 
 ---
 
@@ -267,7 +268,7 @@ whole-audio transcript across every turn instead of slicing per turn. All 128
 sweep MT outputs are therefore translations of 4–10× duplicated input. Their
 *expansion ratios* are still internally comparable (numerator and denominator are
 inflated together), which is why §5–§7 use them, but their absolute segment and
-word counts are meaningless and none of them should be synthesized.
+word counts are meaningless, and none of them carry over into synthesis.
 
 ### 9b. The ASR/MT eval scores in `data/eval/` are measured against a broken reference
 
@@ -303,7 +304,7 @@ MT eval exists at all for `nllb` or `indictrans2` — only `bodhan` was ever sco
 - **`indicf5` TTS never ran.** Only `edge` and `bodhan` have output directories.
 - **Tamil never reached audio.** All `ta` evidence is text-stage.
 
-### 9d. An oracle baseline exists and should be used
+### 9d. An oracle baseline exists
 
 `scripts/fetch_indic_audio.py` pulls the official YouTube Hindi dub track, and
 several artifacts compare against it (`data/audio/NAG_deeplearning_course.downloaded_hi.wav`,
@@ -327,8 +328,9 @@ yet; the artifacts so far feed the lip-sync track only.
 | TTS | `edge` | 1.15–1.38× overflow vs 1.42× for indic-speak, and no API retry failures |
 | Mix | `global_tempo` | +0.4 %…+2.7 % drift vs +11.6 %…+40.8 % for shift-only |
 
-Avoid: `whisperx-medium` (§6), `indicconformer` for English source (§6),
-`bodhan` ASR/TTS where a run must not fail (§8).
+Measured poorly on this corpus: `whisperx-medium` (§6), `indicconformer` for
+English source (§6), and `bodhan` ASR/TTS where a run has no tolerance for
+failure (§8).
 
 ---
 

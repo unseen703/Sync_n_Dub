@@ -29,6 +29,13 @@ _RULES: List[Tuple[str, str, str, Optional[str]]] = [
      "Add HF_TOKEN to .env and accept the model's licence at "
      "hf.co/pyannote/speaker-diarization-community-1."),
 
+    (r"no GPU is free|another process is using gpu",
+     "The GPUs are busy right now",
+     "Another job is using every graphics card, and lip-sync needs one to "
+     "itself.",
+     "Wait for the running job to finish and start this one again. Nothing "
+     "was lost — the check runs before any work begins."),
+
     (r"CUDA out of memory|CUDA error: out of memory|OutOfMemoryError",
      "Ran out of GPU memory",
      "The lip-sync render needed more video memory than this machine's "
@@ -56,9 +63,24 @@ _RULES: List[Tuple[str, str, str, Optional[str]]] = [
      "region-locked or removed.",
      "Check the link opens in a browser while signed out."),
 
-    (r"HTTP Error 40[13]|Forbidden",
+    # 401 really is "not accessible". 403 on a MEDIA url usually is not —
+    # it is YouTube rate-limiting the download host, and the same link
+    # fetches fine minutes later. Telling the operator to "check the link
+    # is public" sends them to verify something that was never wrong: on
+    # 2026-10-17 a job died here in 2 s and the identical URL downloaded
+    # 127 MiB unchanged shortly after. The downloader now retries with
+    # backoff, so reaching this card means the retries were exhausted too.
+    (r"HTTP Error 403|Forbidden",
+     "The video host refused the download",
+     "YouTube returned 403 after the retries ran out. This is usually "
+     "rate limiting rather than a private video — the metadata probe that "
+     "found the title had already succeeded.",
+     "Wait a few minutes and start it again. If it keeps failing, check "
+     "the link opens in a browser while signed out."),
+
+    (r"HTTP Error 401",
      "That video is not accessible",
-     "The video host refused the request.",
+     "The video host refused the request outright.",
      "Check the link is public."),
 
     (r"No space left on device|Disk quota",

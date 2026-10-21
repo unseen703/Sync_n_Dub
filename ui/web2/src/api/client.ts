@@ -13,10 +13,17 @@ import type {
   CreateJobResult,
   EditPlan,
   JobList,
+  LipsyncReadiness,
+  LipsyncStarted,
   Media,
   Options,
   PendingEdit,
+  AgentParams,
+  AgentScript,
+  AgentTurn,
   ProbeResult,
+  ScriptEdit,
+  UploadResult,
   Progress,
   Spec,
   SpeakerLabels,
@@ -101,6 +108,28 @@ export const getOptions = (tts?: string) =>
 export const probeYouTube = (url: string) =>
   req<ProbeResult>('/api/youtube/probe', { method: 'POST', body: JSON.stringify({ url }) });
 
+/**
+ * Upload a local video. Multipart, so it does NOT go through `req()` —
+ * that sets `Content-Type: application/json`, and a hand-set content type
+ * on a FormData body omits the multipart boundary the server needs.
+ */
+export const uploadVideo = async (file: File): Promise<UploadResult> => {
+  const body = new FormData();
+  body.append('file', file);
+  const r = await fetch('/api/uploads', { method: 'POST', body });
+  if (!r.ok) {
+    let detail = `Upload failed (${r.status})`;
+    try {
+      const j = await r.json();
+      if (j?.detail) detail = typeof j.detail === 'string' ? j.detail : detail;
+    } catch {
+      /* a non-JSON error body is not more informative than the status */
+    }
+    throw new Error(detail);
+  }
+  return (await r.json()) as UploadResult;
+};
+
 export const createJob = (payload: CreateJobRequest) =>
   req<CreateJobResult>('/api/jobs', { method: 'POST', body: JSON.stringify(payload) });
 
@@ -109,10 +138,30 @@ export const cancelJob = (id: string) =>
 
 export const getEdits = (id: string) => req<EditPlan>(`/api/jobs/${enc(id)}/edits`);
 
+// --- the plain-language edit agent -----------------------------------------
+// `backend/edit_agent.py` behind three routes. `agentSend` STAGES; it never
+// re-renders. `applyEdits` is still the only call that spends GPU time.
+export const getAgentParams = (id: string) =>
+  req<AgentParams>(`/api/jobs/${enc(id)}/agent/params`);
+
+export const getAgentScript = (id: string, limit = 2000) =>
+  req<AgentScript>(`/api/jobs/${enc(id)}/agent/script?limit=${limit}`);
+
+export const agentSend = (id: string, message: string, replace = false) =>
+  req<EditPlan & { turns?: AgentTurn[]; source?: string }>(
+    `/api/jobs/${enc(id)}/agent`,
+    { method: 'POST', body: JSON.stringify({ message, replace }) },
+  );
+
+// The body key is `edits`, NOT `pending`. This sent `{ pending }` while
+// `ui/routes_edits.py::stage_edits` read `body.get("edits")`, so every voice
+// and tone change answered 422 and the following apply answered 409. The
+// backend now accepts both, but this is the documented key and the one
+// `tests/test_ui_edits.py` posts.
 export const stageEdits = (id: string, pending: PendingEdit[]) =>
   req<EditPlan>(`/api/jobs/${enc(id)}/edits`, {
     method: 'POST',
-    body: JSON.stringify({ pending }),
+    body: JSON.stringify({ edits: pending }),
   });
 
 export const discardEdits = (id: string) =>
@@ -130,5 +179,32 @@ export const setSpeakerLabel = (id: string, speakerId: string, label: string) =>
     body: JSON.stringify({ label }),
   });
 
+// Hand-edited script lines. The user typed the wording, so unlike the agent's
+// `set_text` -- where an LLM invents it -- the quoted cost is the applied
+// cost. Staging only; `applyEdits` is still the single call that spends GPU.
+export const stageScript = (id: string, edits: ScriptEdit[]) =>
+  req<EditPlan>(`/api/jobs/${enc(id)}/script`, {
+    method: 'POST',
+    body: JSON.stringify({ edits }),
+  });
+
 export const applyEdits = (id: string) =>
   req<ApplyResult>(`/api/jobs/${enc(id)}/edits/apply`, { method: 'POST' });
+
+/**
+ * What the lip-sync step needs: blockers, the models, and the face size ASD
+ * measured. Read-only — safe to poll while edits are being staged.
+ */
+export const getLipsyncReadiness = (id: string) =>
+  req<LipsyncReadiness>(`/api/jobs/${enc(id)}/lipsync/readiness`);
+
+/**
+ * Start the lip-sync render. `model` is REQUIRED — the server 422s without
+ * one rather than defaulting, because musetalk is 8-21x clip length here
+ * against wav2lip's 3-5x and guessing costs real hours.
+ */
+export const startLipsync = (id: string, model: string) =>
+  req<LipsyncStarted>(`/api/jobs/${enc(id)}/lipsync`, {
+    method: 'POST',
+    body: JSON.stringify({ model }),
+  });

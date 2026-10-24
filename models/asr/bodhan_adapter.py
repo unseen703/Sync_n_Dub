@@ -19,23 +19,22 @@ spec names it differently, change this one line.
 from __future__ import annotations
 
 import logging
-import os
 import time
 from pathlib import Path
 from typing import List, Optional, Tuple
 
 import numpy as np
 
+from .._bodhan import BodhanClientMixin
 from .base import ASRResult, ASRSegment, BaseASR, Word
 
 log = logging.getLogger(__name__)
 
 
-DEFAULT_URL = "https://api.bodhan.ai/v1"
 DEFAULT_MODEL = "indic-transcribe-core"
 
 
-class BodhanASR(BaseASR):
+class BodhanASR(BodhanClientMixin, BaseASR):
     name = "bodhan"
 
     def __init__(
@@ -52,34 +51,24 @@ class BodhanASR(BaseASR):
         max_backoff_s: float = 60.0,
     ):
         super().__init__(device=device)
-        self.base_url = (base_url or os.getenv("BODHAN_ASR_URL") or DEFAULT_URL).rstrip("/")
-        self.api_key = api_key or os.getenv("BODHAN_ASR_KEY")
-        self.model = model or os.getenv("BODHAN_ASR_MODEL") or DEFAULT_MODEL
         self.render_mode = render_mode   # None → server default
-        self.timeout_s = timeout_s
-        self.max_retries = int(os.getenv("BODHAN_MAX_RETRIES", max_retries))
-        self.min_interval_s = float(os.getenv("BODHAN_MIN_INTERVAL_S", min_interval_s))
-        self.max_backoff_s = float(os.getenv("BODHAN_MAX_BACKOFF_S", max_backoff_s))
-        self._session = None
-        self._last_post_ts = 0.0
+        self._init_bodhan(
+            env_prefix="ASR", default_model=DEFAULT_MODEL,
+            base_url=base_url, api_key=api_key, model=model,
+            timeout_s=timeout_s, max_retries=max_retries,
+            min_interval_s=min_interval_s, max_backoff_s=max_backoff_s,
+        )
 
     def _ensure_loaded(self) -> None:
-        if self._loaded:
-            return
-        if not self.api_key:
-            raise RuntimeError(
+        # No Content-Type: this is the one Bodhan service that posts
+        # multipart, and `requests` has to set the boundary itself.
+        if not self._ensure_bodhan_session(
+            missing_key_message=(
                 "BODHAN_ASR_KEY is not set. Add it to .env or pass api_key=…"
-            )
-        try:
-            import requests
-        except ImportError as e:
-            raise RuntimeError("`pip install requests` for the Bodhan adapter.") from e
-        self._session = requests.Session()
-        self._session.headers.update({
-            "Authorization": f"Bearer {self.api_key}",
-            "Accept": "application/json",
-        })
-        self._loaded = True
+            ),
+            content_type=None,
+        ):
+            return
         log.info("bodhan asr: base_url=%s model=%s render_mode=%s",
                  self.base_url, self.model, self.render_mode or "default")
 
@@ -269,15 +258,3 @@ class BodhanASR(BaseASR):
             f"Bodhan ASR failed after {self.max_retries} retries at {url}"
         )
 
-    def _pace(self) -> None:
-        gap = time.monotonic() - self._last_post_ts
-        if gap < self.min_interval_s:
-            time.sleep(self.min_interval_s - gap)
-
-    def _backoff(self, attempt: int, retry_after: Optional[str]) -> float:
-        if retry_after:
-            try:
-                return max(float(retry_after), 1.0)
-            except ValueError:
-                pass
-        return min(2 ** attempt, self.max_backoff_s)

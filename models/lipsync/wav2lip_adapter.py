@@ -9,8 +9,10 @@ librosa / numpy / torch and importing it in-process clashes with the
 rest of the pipeline.
 
 Env:
-  WAV2LIP_REPO       (default: third_party/Wav2Lip)
-  WAV2LIP_CHECKPOINT (default: third_party/Wav2Lip/checkpoints/wav2lip_gan.pth)
+  WAV2LIP_REPO       (default: models/lipsync/vendor/wav2lip, falling
+                      back to third_party/Wav2Lip)
+  WAV2LIP_CHECKPOINT (default: <repo>/checkpoints/wav2lip_gan.pth, derived
+                      from whichever repo path resolved)
   WAV2LIP_PYTHON     (default: current python; set if Wav2Lip lives in a
                       separate venv to avoid dependency conflicts)
 
@@ -31,14 +33,98 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+from backend.media_io import probe_video as _probe_video
 from . import coords
-from .base import BaseLipSync, LipSyncRequest, LipSyncResult
+from .base import (BaseLipSync, LipSyncRequest, LipSyncResult,
+                   resolve_vendor_repo)
 
 log = logging.getLogger(__name__)
 
 
 DEFAULT_REPO = "third_party/Wav2Lip"
 DEFAULT_CKPT = "third_party/Wav2Lip/checkpoints/wav2lip_gan.pth"
+
+#: The default output ceiling, in scanlines. A source at or below this renders
+#: at NATIVE resolution; anything above it is halved. Overridable per process
+#: with `WAV2LIP_MAX_HEIGHT`.
+#:
+#: This replaced a flat `resize_factor = 2` on 2026-10-22. That default cost
+#: every run half its resolution to protect against one case: a 4K source,
+#: where `inference.py:118` raises "Image too big to run face detection on
+#: GPU" (measured 2026-10-18 — shard 1 of a 2-GPU split died there while
+#: shard 2 succeeded). But that error is **an OOM fallback, not a pixel
+#: limit** — the loop above it halves `face_det_batch_size` on every
+#: RuntimeError and only gives up at a batch of 1. So the constraint is VRAM
+#: against frame size, and a flat 2 was answering it by downscaling 1080p
+#: sources that never needed it.
+#:
+#: 1080 is the ceiling because 2 is the only factor applied: 2160/2 is
+#: exactly 1080, so a 4K source lands on the ceiling rather than under it.
+#:
+#: Wav2Lip repaints a 96x96 mouth crop at ANY factor, so the mouth itself is
+#: unaffected either way — what the old default cost was the other 99% of the
+#: frame. VRAM tracks the change and is the thing to watch: ~1.2 GiB at
+#: factor 2 versus ~4.0 GiB at 1 on 720p, and 1080p is 2.25x the pixels of
+#: 720p. The OOM fallback absorbs the overshoot by halving the detection
+#: batch, so the failure mode is a slower render, not a dead one.
+MAX_OUTPUT_HEIGHT = int(os.getenv("WAV2LIP_MAX_HEIGHT") or 1080)
+
+
+def cap_dims(dims: tuple[int, int],
+             max_height: int = MAX_OUTPUT_HEIGHT) -> tuple[int, int]:
+    """Scale `(w, h)` down to `max_height`, keeping aspect, both sides even.
+
+    A CEILING, never an upscale: a 720p source stays 720p. Inventing pixels
+    to reach a nominal 1080p would make every small source render slower and
+    look no better.
+    """
+    w, h = int(dims[0]), int(dims[1])
+    if h <= max_height or h <= 0:
+        return (w, h)
+    scale = max_height / float(h)
+    # Even on both axes -- libx264 with yuv420p refuses odd dimensions, and
+    # this is the one place a derived size can land on one.
+    return (max(2, int(round(w * scale)) // 2 * 2),
+            max(2, int(round(h * scale)) // 2 * 2))
+
+
+def resolve_resize_factor(
+    video: Path,
+    explicit: Optional[int] = None,
+    *,
+    max_height: int = MAX_OUTPUT_HEIGHT,
+) -> tuple[int, str]:
+    """`(factor, reason)` for one source video.
+
+    `explicit` wins untouched. Otherwise: at or below the ceiling render
+    native (1), above it halve (2).
+
+    **A failed probe returns 2, not 1.** `_video_dims` answers None when
+    ffprobe is missing or the file is unreadable, and None is a silent answer
+    in every caller here (CLAUDE.md §1). Guessing "native" on an unknown
+    source risks the OOM at stage 9h, after ASR, MT, TTS and the mix have all
+    been paid for; guessing "halve" costs resolution on a file we could not
+    read. The cheap mistake is the right default.
+    """
+    if explicit is not None:
+        return int(explicit), f"explicit resize_factor={int(explicit)}"
+    from backend.lipsync import _video_dims
+    dims = _video_dims(Path(video))
+    if not dims:
+        return 2, (f"could not probe {Path(video).name}; kept the safe "
+                   f"factor 2 rather than risk an out-of-memory at render")
+    w, h = dims
+    if h <= max_height:
+        return 1, f"source {w}x{h} is within the {max_height}p ceiling"
+    out_h = h // 2
+    if out_h > max_height:
+        # 8K and up. The rule applies only factor 2, so this lands above the
+        # ceiling. Said out loud rather than silently escalating to 4, which
+        # would quarter a source nobody asked to quarter.
+        return 2, (f"source {w}x{h} is above {max_height}p; factor 2 gives "
+                   f"{w // 2}x{out_h}, still above the ceiling — face "
+                   f"detection may fall back to a smaller batch")
+    return 2, f"source {w}x{h} is above {max_height}p; halving to {w // 2}x{out_h}"
 
 
 class Wav2LipSync(BaseLipSync):
@@ -53,23 +139,12 @@ class Wav2LipSync(BaseLipSync):
         checkpoint: Optional[str] = None,
         python_bin: Optional[str] = None,
         pads: str = "0,10,0,0",
-        # 2, not 1. At 1 the vendored S3FD refuses a large frame outright --
-        # `inference.py:81` raises "Image too big to run face detection on
-        # GPU. Please use the --resize_factor argument" -- and it does so
-        # AFTER the pipeline has paid for ASR, MT, TTS and the mix. Measured
-        # 2026-10-18 on a 4K source: shard 1 died exactly there while shard 2
-        # of the same run succeeded, so it is frame size alone, not the model
-        # or the environment.
-        #
-        # The cost is real and worth stating: resize_factor halves the whole
-        # OUTPUT, so 1080p renders at 960x540. Wav2Lip repaints a 96x96 mouth
-        # crop either way, so the mouth itself loses nothing -- but the rest
-        # of the frame is downscaled, which reads as a quality drop next to
-        # MuseTalk, which composites at full resolution. Pass
-        # `resize_factor=1` for a small-frame source where full resolution
-        # matters and S3FD will not baulk. VRAM also tracks this: ~1.2 GiB at
-        # 2 versus ~4.0 GiB at 1 on 720p.
-        resize_factor: int = 2,
+        # None means AUTO: cap the output at 1080p. See
+        # `resolve_resize_factor` for the rule and why it replaced a flat 2.
+        # An explicit int still wins and is passed through untouched, so the
+        # adapter-kwarg path (`--adapter-kwargs`, `experiment.py`) is
+        # unchanged in meaning.
+        resize_factor: Optional[int] = None,
         wav2lip_batch_size: int = 16,
         face_det_batch_size: int = 4,
         # Reuse per-frame face boxes across runs of the same clip. Wav2Lip
@@ -81,10 +156,17 @@ class Wav2LipSync(BaseLipSync):
         cuda_device: Optional[int] = None,
     ):
         super().__init__(device=device, cuda_device=cuda_device)
-        self.repo_path = Path(repo_path or os.getenv("WAV2LIP_REPO") or DEFAULT_REPO)
-        self.checkpoint = Path(checkpoint
-                                or os.getenv("WAV2LIP_CHECKPOINT")
-                                or DEFAULT_CKPT)
+        self.repo_path = resolve_vendor_repo(
+            "wav2lip", "WAV2LIP_REPO", repo_path, legacy=DEFAULT_REPO)
+        # DERIVED from the resolved repo, not a second hardcoded path.
+        # `DEFAULT_CKPT` named `third_party/Wav2Lip/...` outright, so after
+        # the vendor move the repo would resolve to its new home while the
+        # weights still pointed at the old one -- and the failure is the
+        # expensive kind: `_ensure_loaded` raises at stage 9h, after ASR,
+        # MT, TTS and the mix have been paid for.
+        self.checkpoint = Path(
+            checkpoint or os.getenv("WAV2LIP_CHECKPOINT")
+            or (self.repo_path / "checkpoints" / "wav2lip_gan.pth"))
         self.python_bin = python_bin or os.getenv("WAV2LIP_PYTHON") or sys.executable
         self.pads = pads
         self.resize_factor = resize_factor
@@ -116,6 +198,16 @@ class Wav2LipSync(BaseLipSync):
         out = Path(request.out_path)
         out.parent.mkdir(parents=True, exist_ok=True)
 
+        # Resolved PER VIDEO now, not read off the instance. `backend/
+        # lipsync.py` shards a render across the GPUs by time, so every shard
+        # is a cut of the same source and resolves the same factor -- but the
+        # value has to be computed here, where the video is known, rather
+        # than at construction, where it is not.
+        resize_factor, why = resolve_resize_factor(
+            Path(request.video), self.resize_factor)
+        log.info("wav2lip[gpu=%s]: resize_factor=%d (%s)",
+                 self.cuda_device, resize_factor, why)
+
         cmd = [
             self.python_bin, "inference.py",
             "--checkpoint_path", str(self.checkpoint.resolve()),
@@ -123,7 +215,7 @@ class Wav2LipSync(BaseLipSync):
             "--audio", str(Path(request.audio).resolve()),
             "--outfile", str(out.resolve()),
             "--pads", *self.pads.split(","),
-            "--resize_factor", str(self.resize_factor),
+            "--resize_factor", str(resize_factor),
             "--wav2lip_batch_size", str(self.wav2lip_batch_size),
             "--face_det_batch_size", str(self.face_det_batch_size),
             "--nosmooth",
@@ -132,8 +224,14 @@ class Wav2LipSync(BaseLipSync):
         # The boxes depend on pads and resize_factor (both change the box),
         # and on nosmooth (we always pass it, so it is constant -- recorded
         # anyway so the key stays correct if that ever changes).
+        #
+        # The RESOLVED factor, not `self.resize_factor`. Keying on the
+        # instance attribute would write every auto-resolved run under the
+        # same `None`, so a 4K render's half-size boxes would be loaded for a
+        # 720p clip and painted at the wrong scale -- at exit code 0, since
+        # upstream only checks the box COUNT against the frame count.
         coord_params = {"pads": self.pads,
-                        "resize_factor": self.resize_factor,
+                        "resize_factor": resize_factor,
                         "nosmooth": True}
         video_abs = Path(request.video).resolve()
         coord_file = None
@@ -209,38 +307,3 @@ class Wav2LipSync(BaseLipSync):
                    "checkpoint": str(self.checkpoint)},
         )
 
-
-def _probe_video(path: Path) -> tuple[float, float]:
-    """Return (fps, duration_s) using ffprobe when available, else zeros."""
-    # media_io._ffprobe_bin() rather than shutil.which: there is no
-    # ffprobe on this host's PATH, and which() returning None here
-    # silently degrades to "unknown" instead of failing (CLAUDE.md §1).
-    from backend.media_io import _ffprobe_bin
-    ffprobe = _ffprobe_bin()
-    if not ffprobe or not Path(path).exists():
-        return (0.0, 0.0)
-    try:
-        proc = subprocess.run(
-            [ffprobe, "-v", "error",
-             "-select_streams", "v:0",
-             "-show_entries", "stream=r_frame_rate",
-             "-show_entries", "format=duration",
-             "-of", "default=noprint_wrappers=1:nokey=1",
-             str(path)],
-            capture_output=True, text=True, check=True,
-        )
-        lines = [l.strip() for l in proc.stdout.strip().splitlines() if l.strip()]
-        fps = 0.0
-        dur = 0.0
-        if lines:
-            rate = lines[0]
-            if "/" in rate:
-                n, d = rate.split("/", 1)
-                fps = float(n) / float(d) if float(d) else 0.0
-            else:
-                fps = float(rate)
-        if len(lines) > 1:
-            dur = float(lines[1])
-        return (fps, dur)
-    except Exception:
-        return (0.0, 0.0)

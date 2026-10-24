@@ -49,6 +49,26 @@ log = logging.getLogger(__name__)
 
 EDITS_VERSION = 1
 
+
+def _lipsync_model_ids() -> str:
+    """The registered lip-sync model names, for the op catalogue.
+
+    Read from the registry rather than typed out. The hand-written list said
+    "wav2lip | musetalk | latentsync" while five adapters were registered, so
+    the LLM was never told `wav2lip_hd` or `lipgan` could be asked for — and
+    an op catalogue that under-reports is indistinguishable, from the model's
+    side, from the feature not existing.
+
+    Falls back to the literal set if the registry will not import: this is a
+    prompt string, and a failed import here must not take down an edit that
+    has nothing to do with lip-sync.
+    """
+    try:
+        from models.lipsync import available_models
+        return " | ".join(available_models())
+    except Exception:                               # noqa: BLE001
+        return "wav2lip | musetalk | latentsync"
+
 #: Post-MT chain, in execution order. See `run_post_mt_stages`.
 STAGE_ORDER: Tuple[str, ...] = (
     "codemix", "duration", "voices", "tts", "vc", "timing", "mix", "lipsync",
@@ -344,10 +364,15 @@ OP_SPECS: List[OpSpec] = [
     ),
     OpSpec(
         name="set_voice", dirty_from="voices",
-        params={"voice": "engine voice id, e.g. hi-IN-MadhurNeural or Aditi",
+        # `indic-speak` voices are BARE NAMES (Amit, Kavya, Suhani). This
+        # read "hi-IN-MadhurNeural", the Azure/Edge shape, for as long as
+        # Edge was registered — and kept reading it for six days after Edge
+        # was deleted on 2026-10-17, so both the LLM and the regex fallback
+        # were being shown a pattern no voice in the catalogue matches.
+        params={"voice": "engine voice id, e.g. Amit or Kavya",
                 "engine": "tts engine, only if it changes"},
         summary="Pin a specific TTS voice for the scoped segments or speaker.",
-        examples=["use hi-IN-MadhurNeural for SPEAKER_00"],
+        examples=["use Amit for SPEAKER_00"],
     ),
     OpSpec(
         name="set_speed", dirty_from="tts",
@@ -359,11 +384,15 @@ OP_SPECS: List[OpSpec] = [
     ),
     OpSpec(
         name="lipsync_window", dirty_from="lipsync",
-        params={"model": "wav2lip | musetalk | latentsync, only if it changes"},
+        # Read FROM the registry, not transcribed from it. Spelling it out by
+        # hand is what left `wav2lip_hd` and `lipgan` unadvertised for three
+        # days after they were registered.
+        params={"model": f"{_lipsync_model_ids()}, only if it changes"},
         summary="Lip-sync only the scoped time window instead of the whole "
                 "video, splicing the render back into the full timeline.",
         examples=["lip-sync only from 1:00 to 1:30",
-                  "run musetalk on the last 20 seconds"],
+                  "run musetalk on the last 20 seconds",
+                  "redo the lip-sync with wav2lip"],
     ),
 ]
 
@@ -950,6 +979,18 @@ def _h_set_tone(data, seg_ids, op, applied, ctx, res):
         seg["tts_style"] = tone
         applied.changes.append(f"{sid}: style={tone}")
 
+    # "Neutral" is the absence of a register, not a register to write toward.
+    # `models.tts.resolve_style` turns the sentinel into "send no style", and
+    # there is nothing for an LLM to rewrite the wording INTO -- asking it to
+    # would get a paraphrase at best and, because a paraphrase is a different
+    # length, a different timing fit for no stated reason.
+    from models.tts import NEUTRAL_STYLE
+    if rewrite and tone.strip().lower() == NEUTRAL_STYLE:
+        applied.warnings.append(
+            "neutral removes the delivery style rather than setting one, so "
+            "the wording was left exactly as it is")
+        rewrite = False
+
     if rewrite:
         if ctx.rewriter is None:
             applied.warnings.append(
@@ -1315,6 +1356,17 @@ def _h_lipsync_window(data, seg_ids, op, applied, ctx, res):
     res.lipsync_window = (start, end)
     model = op.params.get("model") or ctx.lipsync_model
     if model:
+        # Checked HERE rather than at the render. An unregistered name used
+        # to travel all the way to `get_lipsync`, which raises only after the
+        # replay has been committed and launched — so a typo or an invented
+        # model (a 12B model writing structured output does invent them)
+        # surfaced as a failed background job rather than a refused edit.
+        from models.lipsync import available_models
+        known = available_models()
+        if str(model) not in known:
+            raise EditError(
+                f"unknown lip-sync model {model!r}. "
+                f"Available: {', '.join(known)}")
         res.lipsync_model = str(model)
     applied.segments = seg_ids
     applied.changes.append(

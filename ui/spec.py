@@ -22,6 +22,7 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from . import lipsync_models as _ls_models
 from .langs import describe as describe_lang
 
 log = logging.getLogger("ui.spec")
@@ -93,12 +94,13 @@ REGISTER_TIER_WORDS = {
                    "four signals, and worth a listen before trusting it.",
 }
 
-LIPSYNC_WORDS = {
-    "wav2lip":    "On — Wav2Lip",
-    "musetalk":   "On — MuseTalk",
-    "latentsync": "On — LatentSync",
-    "lipgan":     "On — LipGAN",
-}
+#: Derived from `ui/lipsync_models.py`, which is also what fixes the bug this
+#: table used to have: the old prefix loop tested `wav2lip` before
+#: `wav2lip_hd`, and `"wav2lip_hd".startswith("wav2lip")` is True — so an HD
+#: run, which is Wav2Lip PLUS a per-frame restoration pass, reported itself
+#: on the summary page as a plain Wav2Lip run.
+LIPSYNC_WORDS = {k: f"On — {v['label']}"
+                 for k, v in _ls_models.FACTS.items()}
 
 
 def build(job_root: Path, *, manifest: Dict[str, Any],
@@ -172,9 +174,10 @@ def build(job_root: Path, *, manifest: Dict[str, Any],
                                 "default delivery."))
 
     ls = (cfg.get("lipsync") or "").lower()
-    # Prefix match: the clip runner records `musetalk-v15`, not `musetalk`.
-    ls_word = next((w for k, w in LIPSYNC_WORDS.items() if ls.startswith(k)),
-                   None)
+    # `normalise` handles the variant the clip runner records (`musetalk-v15`,
+    # not `musetalk`) AND matches the longest key first, so `wav2lip_hd` is
+    # not swallowed by `wav2lip`.
+    ls_word = LIPSYNC_WORDS.get(_ls_models.normalise(ls) or "")
     lines.append(_line("lipsync", "Lip-sync",
                        ls_word or "Off (dubbed audio only)"))
     if ls and cfg.get("lipsync_auto_reason"):

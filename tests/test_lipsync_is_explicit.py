@@ -58,11 +58,36 @@ def test_an_unknown_preset_is_still_rejected():
 
 @pytest.mark.parametrize("preset", ["dub", "draft", "standard", "best"])
 def test_no_submission_configures_lip_sync(preset):
+    """CONFIGURES, which is the property that matters: no submission commits
+    the GPU, so `lipsync_model` is None and the pipeline will stop at the mix.
+
+    It is separately DRAWN on the progress bar, pending, since 2026-10-21 —
+    see `test_the_bar_still_shows_the_stage_it_is_waiting_for` below. The two
+    are not in tension: one is about what this run will do, the other about
+    what the operator is told is still to come.
+    """
     kw = P.build_kwargs(preset, target_language="hi")
     assert "lipsync_model" not in kw or kw["lipsync_model"] is None
-    keys = [s["key"] for s in plan_stages(P.plan_config(kw))]
-    assert "9h" not in keys, "a submission planned lip-sync"
-    assert keys[-1] == "9g", f"phase one must end at the mix, ended at {keys[-1]}"
+
+    stages = plan_stages(P.plan_config(kw))
+    ran = [s["key"] for s in stages if not s.get("deferred")]
+    assert "9h" not in ran, "a submission planned lip-sync as work it will do"
+    assert ran[-1] == "9g", f"phase one must end at the mix, ended at {ran[-1]}"
+
+
+@pytest.mark.parametrize("preset", ["dub", "draft", "standard", "best"])
+def test_the_bar_still_shows_the_stage_it_is_waiting_for(preset):
+    """The converse, and the reason the test above had to be rephrased.
+
+    Dropping 9h from the plan entirely made a finished draft render a
+    six-node bar reading "Finished · all 6 stages" — indistinguishable from a
+    dub that will never be lip-synced, for one that is waiting to be. The
+    node is drawn and left pending instead.
+    """
+    kw = P.build_kwargs(preset, target_language="hi")
+    ls = [s for s in plan_stages(P.plan_config(kw)) if s["key"] == "9h"]
+    assert len(ls) == 1, "the bar does not show the lip-sync stage"
+    assert ls[0]["state"] == "pending" and ls[0]["deferred"] is True
 
 
 def test_auto_is_gone_from_the_runner():

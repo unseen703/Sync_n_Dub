@@ -170,36 +170,26 @@ def pick_lipsync_model(median_frac: Optional[float],
                        ) -> Tuple[str, str]:
     """`(model, reason)` — the reason is shown to the operator verbatim.
 
-    The reason says what was measured, what the threshold was, and that the
-    threshold is calibrated on three clips from one video. An operator who
-    disagrees overrides the model; an operator who is not told the basis
-    cannot.
+    One clause, by request (2026-10-21). It used to recite the measured
+    percentage, the threshold, both crop sizes, both runtime multipliers and
+    the three-clip caveat — five facts to deliver one recommendation, in a
+    panel that already prints the measured size and the per-model estimates
+    directly above it. The evidence behind the threshold has not gone
+    anywhere; it is in this module's docstring, next to `CALIBRATION`, which
+    is where someone deciding whether to move the number will look.
+
+    SUGGESTION language, not decision language: since 2026-10-20 this only
+    informs a choice the operator makes, and the reason sits beside a list
+    with nothing selected.
     """
     thr = configured_threshold() if threshold is None else float(threshold)
-    # SUGGESTION language, not decision language. This used to read "Using
-    # MuseTalk…" because the function picked the model; since 2026-10-20 it
-    # only informs a choice the operator makes, and the reason now sits
-    # beside a list with nothing selected. Text that says a model is being
-    # used, next to controls saying none is, reads as a bug.
-    caveat = ("This rule is calibrated on three clips from one video, so "
-              "treat it as a starting point rather than an answer.")
 
     if not median_frac:
         return ("wav2lip",
-                "No faces were found in the sampled frames, so there is no "
-                "close-up to justify MuseTalk's 8-21x render time. Wav2Lip "
-                "(3-5x) is the cheaper fit. " + caveat)
-
-    pct = 100.0 * float(median_frac)
-    thr_pct = 100.0 * float(thr)
+                "No faces were found in the sampled frames — Wav2Lip is the "
+                "safer fit.")
     if median_frac >= thr:
         return ("musetalk",
-                f"Faces fill about {pct:.0f}% of the frame height (threshold "
-                f"{thr_pct:.0f}%), so this is a close-up and the extra "
-                f"resolution would show. MuseTalk suits it (256x256 crop, "
-                f"8-21x clip length). " + caveat)
+                "Larger faces in frame — MuseTalk performs better here.")
     return ("wav2lip",
-            f"Faces fill about {pct:.0f}% of the frame height (threshold "
-            f"{thr_pct:.0f}%), so this is a wide shot and MuseTalk's extra "
-            f"resolution would not be visible. Wav2Lip suits it (96x96 mouth "
-            f"crop, 3-5x clip length instead of 8-21x). " + caveat)
+            "Smaller faces in frame — Wav2Lip works better here.")

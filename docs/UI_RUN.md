@@ -50,6 +50,15 @@ rather than None, because the model is chosen from the face size after stage
 marker arrives. Writing `None` there would read as "lip-sync is off" to both
 the planner and the pipeline.
 
+> **Out of date from here down in two ways.** Submissions no longer choose a
+> lip-sync model at all (2026-10-20): every preset ends at the mix and
+> lip-sync is a separate `POST /api/jobs/{id}/lipsync` the operator starts
+> after reviewing the dub. And since 2026-10-21 `plan_stages` appends `9h`
+> unconditionally, carrying `deferred: True` when no model was configured,
+> so the bar always shows all seven phases and the Lip sync node sits
+> `pending` until that second submission opens it. The stage-by-stage table
+> below is still correct about which marker lands in which group.
+
 ## 3. The stage plan for a default run
 
 `preset=standard`, 22 planned. The right column is the progress bar's group —

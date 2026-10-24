@@ -346,18 +346,41 @@ def test_language_is_checked_against_the_engine(client, probe_ok):
 def test_picker_reproduces_the_measured_clips(clip, median, expected):
     """The three clips the threshold was drawn from. Nothing errors when this
     flips — the only symptom is MuseTalk's 8-21x spent on a wide shot, or
-    Wav2Lip's 96x96 crop on a close-up."""
-    model, reason = facepick.pick_lipsync_model(median)
+    Wav2Lip's 96x96 crop on a close-up.
+
+    The MODEL is what this guards. The reason text was cut to one clause on
+    2026-10-21 and is asserted separately below; asserting the measured
+    percentage appeared in it, as this used to, tied the calibration test to
+    a wording decision it has no stake in.
+    """
+    model, _reason = facepick.pick_lipsync_model(median)
     assert model == expected, f"{clip}: median {median} -> {model}"
-    assert f"{100 * median:.0f}%" in reason
 
 
-def test_picker_states_its_basis():
-    """The caveat is load-bearing: three clips from one video is a default,
-    not a validated classifier, and an operator who is not told that cannot
-    judge whether to override it."""
-    _, reason = facepick.pick_lipsync_model(0.42)
-    assert "three clips from one video" in reason
+@pytest.mark.parametrize("median,model,word", [
+    (0.42, "musetalk", "Larger"),
+    (0.10, "wav2lip", "Smaller"),
+])
+def test_picker_names_the_model_and_why_in_one_clause(median, model, word):
+    """One sentence, naming the model, by request.
+
+    The panel already prints the measured face size and a per-model runtime
+    estimate directly above this line, so repeating the percentage, the
+    threshold, both crop sizes and both multipliers here was five facts in
+    service of one recommendation. A long reason also makes the whole panel
+    read as a warning.
+
+    The evidence for the threshold has not gone anywhere — it is in
+    `ui/facepick.py`'s docstring beside `CALIBRATION`, which is where someone
+    deciding whether to MOVE the number would look.
+    """
+    got_model, reason = facepick.pick_lipsync_model(median)
+    assert got_model == model
+    assert word in reason
+    assert model.replace("wav2lip", "Wav2Lip").replace(
+        "musetalk", "MuseTalk") in reason
+    # Short enough to sit on one line next to the model it recommends.
+    assert len(reason) < 80, reason
 
 
 def test_picker_handles_no_faces():
@@ -526,7 +549,12 @@ def test_the_batch_size_is_recorded_at_submit(client, probe_ok):
     r = client.post("/api/jobs", json=_body())
     kw = json.loads((client.jobs_dir / r.json()["job_id"]
                      / "request.json").read_text())["pipeline"]
-    assert kw["lipsync_batch_size"] == 10
+    # The VALUE lives in `ui/presets.py` and is a VRAM tuning knob — 8 since
+    # 2026-10-20. Asserting a literal here is what made lowering it from 10
+    # a three-test failure, so this checks only that it is carried through.
+    from ui import presets
+    expected = presets.build_kwargs("dub", target_language="hi")["lipsync_batch_size"]
+    assert kw["lipsync_batch_size"] == expected
 
 
 def test_a_long_audio_only_dub_is_never_capped(client, probe_ok, monkeypatch):
@@ -557,14 +585,29 @@ def test_no_preset_asks_for_face_restoration(client, probe_ok):
         assert not any("restore" in k for k in kw), (preset, sorted(kw))
 
 
-def test_the_restore_stage_is_gone_from_the_registries(client):
-    """Removed, not merely unreferenced — an importable adapter would come
-    back the first time someone added a flag for it."""
+def test_the_codeformer_restore_stage_is_still_gone(client):
+    """CodeFormer stays removed; `models.restore` came back without it.
+
+    The package was deleted on 2026-10-17 on cost grounds (CodeFormer
+    measured ~13x clip length) and this test pinned that. It was reinstated
+    2026-10-23 for GFPGAN, deliberately and with a different shape: a
+    separate STAGE (9i, `--restore gfpgan`) rather than a lip-sync variant,
+    gated to the frames lip-sync actually changed, and never implied by
+    `--lipsync`. The cost objection is answered by the gate -- 1156 s for
+    every frame against ~130 s for the 15% that moved.
+
+    What must not come back is CodeFormer itself, or an adapter importable
+    without being registered: either would return the first time someone
+    added a flag for it.
+    """
     import importlib
 
-    for mod in ("models.restore", "models.restore.codeformer_adapter"):
-        with pytest.raises(ModuleNotFoundError):
-            importlib.import_module(mod)
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module("models.restore.codeformer_adapter")
+
+    from models.restore import available_models
+    assert available_models() == ["gfpgan"], (
+        "the restore registry grew beyond the one adapter that was reviewed")
 
 
 def test_a_retired_preset_id_no_longer_pins_a_model(client, probe_ok):

@@ -34,13 +34,18 @@ from __future__ import annotations
 import os
 from typing import Any, Dict, Optional, Tuple
 
+from backend import speed as _speed
+from . import lipsync_models as _ls_models
+
 #: Measured wall time as a multiple of clip length, on this host's 2x16 GiB
 #: Blackwell cards. From `.claude/skills/clip-run`.
+#:
+#: Now DERIVED from `ui/lipsync_models.py` rather than written out again.
+#: This table and three others each described the same five models, and
+#: `wav2lip_hd` reached none of them — see that module's docstring. Kept as a
+#: name because `routes_create` and the tests read it.
 LIPSYNC_FACTORS: Dict[str, Tuple[float, float]] = {
-    "wav2lip":    (3.0, 5.0),
-    "musetalk":   (8.0, 21.0),
-    "latentsync": (75.0, 90.0),     # measured "~83x"
-    "lipgan":     (5.0, 15.0),      # torch port, ~10 it/s; least characterised
+    k: v["rate"] for k, v in _ls_models.FACTS.items() if v.get("rate")
 }
 
 #: Everything before lip-sync — download, stems, diarization, ASR, MT, TTS,
@@ -218,18 +223,15 @@ UI_STAGE_DEFAULTS: Dict[str, Any] = {
 #: The three companion keys are NOT optional. `backend/tts.py` stretches each
 #: clip to its target and the timing plan fits it again in the mix; leaving
 #: `tts_apply_stretch` on would stretch every clip twice to the same slot.
-UI_TIMING_DEFAULTS: Dict[str, Any] = {
-    "timing_producer": "naive_slot",
-    "timing_params": {
-        "max_tempo": 1.5,
-        "min_tempo": 1.0 / 1.5,
-        "safety_margin_s": 0.0,         # any margin is itself a pause
-        "use_target_duration": True,    # honour stage 9c / speed edits
-    },
-    "tts_apply_stretch": False,
-    "mix_strategy": "timing_plan",
-    "mix_clip_source": "raw",
-}
+#: What a UI submission adds to the pipeline kwargs to pace the dub.
+#:
+#: This was a hand-kept COPY of what `backend.cli.resolve_speed_setup` builds
+#: for `--speed-mode segment`, with `tests/test_speed_mode.py` checking the
+#: two still agreed. Both sides call `backend.speed` now, so the UI and a
+#: bare CLI run are the same values by construction. Taking no arguments is
+#: the point: the UI does not expose these bounds, so it gets the same
+#: defaults `--speed-cap` / `--speed-floor` carry.
+UI_TIMING_DEFAULTS: Dict[str, Any] = _speed.segment_timing_kwargs()
 
 
 def build_kwargs(preset: str, *, target_language: str,
@@ -285,6 +287,25 @@ def build_kwargs(preset: str, *, target_language: str,
         # keys off presence, so stage 9b is simply not part of the run.
         "mt_target_script": "codemix",
         "duration_adjust": True,
+        # 9c2, ON for every UI run since 2026-10-22 by request. The CLI
+        # leaves it off; the UI does not, because a UI run has nobody
+        # watching stage 9c's overrun warnings scroll past and the first
+        # sign of the problem is a finished dub that drifts off the mouth.
+        #
+        # It only fires past `condense_speed_cap`, so an ordinary run where
+        # the tempo stretch can absorb the overrun costs ZERO LLM calls --
+        # the gate is evaluated from 9c's estimates before any request is
+        # made. Measured on svwrTOm55y4 (50.9s of Hindi for 30.6s of slots,
+        # 1.66x against a 1.5x cap): 3 of 5 segments clamped and the dub ran
+        # ~8s long, which is exactly the case this catches.
+        #
+        # Requires `duration_adjust` above -- it reads 9c's per-segment
+        # estimates -- and OPENROUTER_API_KEY. Without the key the stage
+        # logs and leaves every line as it was; it never fails a dub.
+        "condense_overlong_text": True,
+        # 1.5, not the 1.8 the mixer is allowed to reach. See
+        # `backend/condense.py`: those are two different questions.
+        "condense_speed_cap": 1.5,
         # saying it
         "voice_engine": voice_engine_for(engine),
         "tts_model": engine,
@@ -338,7 +359,27 @@ def build_kwargs(preset: str, *, target_language: str,
 
 
 def plan_config(kwargs: Dict[str, Any]) -> Dict[str, Any]:
-    """Manifest-shaped config, which is what `progress.plan_stages` reads."""
+    """Manifest-shaped config.
+
+    Read by `progress.plan_stages` (which stages to draw) AND, since
+    2026-10-22, by `backend.edit_agent.rerun` (how to re-pace a replay).
+
+    The second reader is why the pacing block at the bottom exists.
+    `rerun` recovers a run's timing setup by re-parsing its argv — but a UI
+    job HAS no pipeline argv: `ui/runner.py` is invoked with the job id and
+    nothing else, so `recover_args` gets `['<job_id>']`, the pipeline parser
+    exits on it, and the replay fell through to CLI DEFAULTS. Those defaults
+    are not this submission's settings: `timing_params` became None (so
+    `naive_slot` ran with `use_target_duration=False`), `mix_strategy` became
+    `global_tempo` and `tts_apply_stretch` became True.
+
+    `use_target_duration=False` is the one that bites, because
+    `backend/edits.py::set_speed` works ENTIRELY by writing
+    `target_duration_s` — `backend/timing.py` says so in its own docstring.
+    With it off, the shortened slot was ignored, every clip was re-fitted to
+    its original `end - start`, and a speed edit applied, re-rendered and
+    came back at exactly the original speed.
+    """
     return {
         "diarization":     kwargs.get("diarization_model"),
         "asr":             kwargs.get("asr_model"),
@@ -354,6 +395,11 @@ def plan_config(kwargs: Dict[str, Any]) -> Dict[str, Any]:
         "face_detector":   kwargs.get("face_detector"),
         "asd":             kwargs.get("asd_model"),
         "lipsync":         kwargs.get("lipsync_model"),
+        # 9i is never part of a submission -- there is nothing to restore
+        # until a render exists, so the UI reaches it through
+        # `POST .../enhance` on a finished job. Recorded as None so the key
+        # exists and `plan_stages` can read it either way.
+        "restore":         kwargs.get("restore_model"),
         "mix":             kwargs.get("mix"),
         "skip_stems":      kwargs.get("skip_stems"),
         "timing_producer": kwargs.get("timing_producer"),
@@ -362,10 +408,25 @@ def plan_config(kwargs: Dict[str, Any]) -> Dict[str, Any]:
         # appends four unplanned nodes as they arrive.
         "resegment_turns": kwargs.get("resegment_turns"),
         "refine_speakers": kwargs.get("refine_speaker_labels"),
+        # 9c2. `plan_stages` reads this name together with `duration_adjust`;
+        # without it the stage runs and arrives as an UNPLANNED node, which
+        # is the "12 of 14 then four extra" shape the comment above describes.
+        "condense_overlong_text": kwargs.get("condense_overlong_text"),
         "tts_style":       kwargs.get("tts_style"),
         "emotion":         kwargs.get("emotion_model"),
         "tts_force_align": kwargs.get("tts_force_align"),
         "visemes":         kwargs.get("attach_visemes_stage"),
+        # -- how this run was PACED, for the replay --------------------------
+        # Not read by `plan_stages`; read by `edit_agent._setup_from_config`
+        # when there is no argv to re-parse. Every key here is one the replay
+        # would otherwise take from a CLI default that this run never used.
+        # `tests/test_ui_backend_sync.py` asserts the two sides agree.
+        "timing_params":     kwargs.get("timing_params"),
+        "tts_apply_stretch": kwargs.get("tts_apply_stretch"),
+        "mix_strategy":      kwargs.get("mix_strategy"),
+        "mix_clip_source":   kwargs.get("mix_clip_source"),
+        "mix_tempo_cap":     kwargs.get("mix_tempo_cap"),
+        "tts_max_stretch":   kwargs.get("tts_max_stretch"),
     }
 
 
@@ -375,30 +436,47 @@ def plan_config(kwargs: Dict[str, Any]) -> Dict[str, Any]:
 
 def estimate_runtime(duration_s: float, *,
                      lipsync_model: Optional[str] = None) -> Dict[str, Any]:
-    """`{low_s, high_s, text, exact}` for a clip of `duration_s`.
+    """`{low_s, high_s, text, exact, lipsync_measured}` for a clip.
 
     `exact=False` always: the base band is not measured the way the lip-sync
     factors are, and lip-sync itself spans 8-21x on the same model. The text
     is written to be read as a range, not a promise.
+
+    **`lipsync_measured` is the load-bearing field.** A model with no band
+    used to fall through silently and return the dub-only estimate as an
+    ordinary "about X to Y" — so an un-timed model advertised as the FASTEST
+    option on the list, which is how `wav2lip_hd` came to look cheaper than
+    plain Wav2Lip. The caller is now told, and `text` says so itself, because
+    the readiness panel renders `text` and nothing else.
     """
     d = max(0.0, float(duration_s or 0.0))
     low = max(BASE_FLOOR_S, d * BASE_FACTOR[0])
     high = max(BASE_FLOOR_S * 2, d * BASE_FACTOR[1])
 
     parts = ["the dub itself"]
-    ls = (lipsync_model or "").lower()
-    if ls in LIPSYNC_FACTORS:
-        lo, hi = LIPSYNC_FACTORS[ls]
+    asked = bool((lipsync_model or "").strip())
+    ls = _ls_models.normalise(lipsync_model)
+    band = _ls_models.rate_band(ls) if ls else None
+    if band:
+        lo, hi = band
         low += d * lo
         high += d * hi
         parts.append(f"{ls} at {lo:g}-{hi:g}x")
 
+    text = f"about {human_duration(low)} to {human_duration(high)}"
+    if asked and not band:
+        # Never a bare number for a model nobody timed. `ui/cost.py` already
+        # warns by name in this case; this is the same honesty one layer up.
+        text = (f"{text} for the dub, plus the {ls or lipsync_model} render "
+                f"— not timed on this host")
+
     return {
         "low_s": int(round(low)),
         "high_s": int(round(high)),
-        "text": f"about {human_duration(low)} to {human_duration(high)}",
+        "text": text,
         "basis": "Measured on this host: " + ", ".join(parts) + ".",
         "exact": False,
+        "lipsync_measured": bool(band),
     }
 
 

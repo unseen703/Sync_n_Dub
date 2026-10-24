@@ -8,6 +8,9 @@
  * owns the cadence; this file only speaks HTTP.
  */
 import type {
+  EnhanceOptions,
+  EnhanceReadiness,
+  EnhanceStatus,
   ApplyResult,
   CreateJobRequest,
   CreateJobResult,
@@ -192,6 +195,16 @@ export const applyEdits = (id: string) =>
   req<ApplyResult>(`/api/jobs/${enc(id)}/edits/apply`, { method: 'POST' });
 
 /**
+ * Remove ONE staged change and keep the rest. `DELETE .../edits` throws the
+ * whole set away; this drops a single turn and re-prices what is left, so a
+ * misparsed sentence no longer costs the four good ones beside it.
+ */
+export const dropStagedTurn = (id: string, index: number) =>
+  req<EditPlan>(`/api/jobs/${enc(id)}/agent/turns/${index}`, {
+    method: 'DELETE',
+  });
+
+/**
  * What the lip-sync step needs: blockers, the models, and the face size ASD
  * measured. Read-only — safe to poll while edits are being staged.
  */
@@ -207,4 +220,25 @@ export const startLipsync = (id: string, model: string) =>
   req<LipsyncStarted>(`/api/jobs/${enc(id)}/lipsync`, {
     method: 'POST',
     body: JSON.stringify({ model }),
+  });
+
+/** Stage 9i readiness — drives the Enhance resolution button's state. */
+export const getEnhanceReadiness = (id: string, render?: string) =>
+  req<EnhanceReadiness>(
+    `/api/jobs/${enc(id)}/enhance/readiness`
+    + (render ? `?render=${encodeURIComponent(render)}` : ''));
+
+/** Poll one job's enhancement. The server treats the FILE as the arbiter. */
+export const getEnhanceStatus = (id: string) =>
+  req<EnhanceStatus>(`/api/jobs/${enc(id)}/enhance`);
+
+/**
+ * Start the pass. Returns immediately — it is a background thread, because
+ * even gated and split over both GPUs this is minutes, and an inline
+ * request would die to a browser timeout while the GPU work carried on.
+ */
+export const startEnhance = (id: string, opts: EnhanceOptions = {}) =>
+  req<EnhanceStatus>(`/api/jobs/${enc(id)}/enhance`, {
+    method: 'POST',
+    body: JSON.stringify({ gated: true, scale: 'same', ...opts }),
   });

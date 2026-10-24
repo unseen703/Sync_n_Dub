@@ -6,12 +6,13 @@ on-screen faces are animated to match the driving audio. Content stays
 the same; only the mouth / lower-face region is re-rendered.
 
 The three adapters we ship — Wav2Lip, MuseTalk 1.5, LatentSync 1.6 —
-each wrap an external third-party repo (see `third_party/`). None of
+each wrap an external upstream clone (see `models/lipsync/vendor/`). None of
 them have a usable PyPI install; the adapter is responsible for cloning
 the repo and loading its checkpoints via env vars.
 """
 from __future__ import annotations
 
+import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -154,3 +155,10 @@ class BaseLipSync(ABC):
     @abstractmethod
     def sync(self, request: LipSyncRequest) -> LipSyncResult:
         """Render a lip-synced video. Returns metadata about the output."""
+
+
+# `VENDOR_ROOT` / `resolve_vendor_repo` moved to `models/_vendor.py` on
+# 2026-10-23: TalkNet (models/asd/) needs the same resolution, and importing
+# the lip-sync base from the ASD package to get it would be the wrong
+# dependency entirely. Re-exported here so existing imports keep working.
+from .._vendor import VENDOR_ROOT, resolve_vendor_repo  # noqa: E402,F401

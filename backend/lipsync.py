@@ -21,11 +21,28 @@ from typing import Optional
 
 from models.lipsync import LipSyncRequest, available_models, get_lipsync
 
-from .gpu import (concat_videos, gpu_busy_pids, gpu_free_memory,
+from .gpu import (concat_videos, gpu_busy_pids, gpu_free_memory, gpu_load,
                   pick_devices, split_video_audio, visible_cuda_devices)
 from .media_io import _ffmpeg_bin, probe_duration
 
 log = logging.getLogger(__name__)
+
+# How far a target list may fall short of the clip it covers before the
+# shortfall stops being rounding and starts being a real disagreement.
+#
+# Two frames, because that is all rounding can produce: a window slice
+# rounds its start and end independently (±1 frame between them), and
+# `_cut_video` re-encodes, so ffmpeg decides for itself whether the frame
+# on the boundary is in or out (±1 more). Past that the list and the clip
+# disagree about something — a different fps, a different source — and
+# padding would be guessing at which frames the boxes belong to, which is
+# the misalignment the whole module refuses elsewhere.
+#
+# A shortfall inside the tolerance is filled by REPEATING THE LAST BOX, not
+# by the `(0,0,0,0)` untouched sentinel: a window that ends mid-sentence
+# would otherwise freeze the mouth for its final frame, which is the
+# stutter `lipsync_targets.MAX_GAP_FILL` exists to smooth out.
+_COORD_PAD_FRAMES = 2
 
 
 @dataclass
@@ -50,7 +67,7 @@ def run_lipsync(
     num_gpus: Optional[int] = None,
     window: Optional[tuple] = None,
     coord_list: Optional[list] = None,
-    max_segment_s: float = 120.0,
+    max_segment_s: float = 60.0,
 ) -> LipSyncOutput:
     """Lip-sync `source_video` (or `pre_muxed_video`) to `driving_audio`.
 
@@ -104,11 +121,20 @@ def run_lipsync(
     from the raw source would leave the untouched stretches speaking the
     ORIGINAL language.
 
-    `max_segment_s` (default 120, 0 disables) caps how much video goes
-    through the model at once. Anything longer is cut into <=2 min pieces,
+    `max_segment_s` (default 60, 0 disables) caps how much video goes
+    through the model at once. Anything longer is cut into <=1 min pieces,
     rendered ONE AFTER ANOTHER, and concatenated. This is a MEMORY bound,
     not a speed one -- it makes peak RAM a function of the segment length
     instead of the clip length.
+
+    Lowered 120 -> 60 on 2026-10-23 by request. It buys RAM headroom and
+    COSTS wall time, which is the trade to know before moving it: every
+    segment pays a fresh model load per shard, and that fixed cost is the
+    dominant term at this clip length. Measured on job 20261023-011027
+    (150s, 1080p25, 2 GPUs, 348 of 3775 frames animated), a 37.48s shard
+    took 4m55s-6m13s whether it animated 348 frames or none at all -- so
+    the render is paying for process startup, decode and re-encode, not for
+    the UNet. Halving the segment adds a third round of that.
 
     It exists because both vendored models load the whole clip into RAM:
     MuseTalk's `read_imgs()` and Wav2Lip's `full_frames.append(frame)` each
@@ -170,6 +196,28 @@ def run_lipsync(
                                    work / "window.wav")
         log.info("lipsync: window %.2f-%.2fs of %.2fs -> rendering %.2fs",
                  w_start, w_end, full_dur, w_end - w_start)
+        if coord_list:
+            # The cut clip renumbers frames from zero, so a list indexed
+            # against the whole video would animate the wrong frames here —
+            # the same hazard sharding and segmenting refuse below, except
+            # that this one cannot be answered by "render in one pass". It
+            # CAN be answered exactly: we know the window and the fps, so
+            # slice the list to match the clip the model will actually see.
+            # The FULL video's fps, not the cut's: `f0` is an index into the
+            # original timeline. They are the same today (`_cut_video`
+            # re-encodes at the source rate), but if that ever stopped being
+            # true the offset would be computed against the wrong clock.
+            fps_probe = _probe_fps(splice_into) or _probe_fps(face_video) or 0.0
+            if fps_probe <= 0:
+                log.warning("lipsync[%s]: cannot read the fps, so the %d "
+                            "supplied target boxes cannot be aligned to the "
+                            "window; dropping them rather than animating the "
+                            "wrong frames.", model, len(coord_list))
+                coord_list = None
+            else:
+                coord_list = _slice_coords_to_window(
+                    coord_list, face_video, w_start, w_end, fps_probe,
+                    model=model)
 
     gpus = pick_devices(num_gpus)
     if not gpus and visible_cuda_devices():
@@ -180,25 +228,33 @@ def run_lipsync(
         # TTS and the mix have all been paid for. Refuse up front instead.
         free = gpu_free_memory()
         busy = gpu_busy_pids()
-        who = ", ".join(f"gpu{g} busy (pid {','.join(str(x) for x in p)})"
-                        for g, p in sorted(busy.items())) or "all devices busy"
+        # Since 2026-10-22 the gate is a LOAD test, not "is anyone there", so
+        # the refusal has to quote the numbers it judged on -- a bare pid
+        # reads as the old one-tenant rule and sends the operator looking for
+        # a process to kill when the card is merely working.
+        load = gpu_load()
+        if load:
+            who = ", ".join(
+                f"gpu{g} at {u:.0f}% util, {m} MiB foreign"
+                + (f" (pid {','.join(str(x) for x in busy[g])})" if busy.get(g) else "")
+                for g, (u, m, _t) in sorted(load.items()))
+        else:
+            who = ", ".join(f"gpu{g} busy (pid {','.join(str(x) for x in p)})"
+                            for g, p in sorted(busy.items())) or "all devices busy"
         return LipSyncOutput(
             model=model, out_video=out_video, duration_s=0.0, fps=0.0,
             error=(f"no GPU is free — {who}. Lip-sync needs a card to "
                    f"itself; waiting is safer than sharing one."),
             extra={"gpu_free_mib": free, "gpu_busy_pids": busy},
         )
-    if len(gpus) > 1 and coord_list:
-        # The shards are cut by TIME and each adapter re-numbers frames from
-        # zero, so a list indexed against the whole video would land on the
-        # wrong frames in every shard but the first -- mouths animated in the
-        # wrong places, at exit code 0. Losing the second GPU is the cheaper
-        # failure, and saying so beats discovering it in the render.
-        log.warning("lipsync[%s]: %d supplied target boxes are indexed "
-                    "against the whole video, which sharding re-numbers; "
-                    "running on one GPU instead of %d.",
-                    model, len(coord_list), len(gpus))
-        gpus = gpus[:1]
+    # Sharding and segmenting both used to be DISABLED whenever targets were
+    # supplied, because each cuts the clip and renumbers frames from zero,
+    # so a whole-video list landed on the wrong frames in every piece but
+    # the first. That cost the second GPU and, worse, the memory bound —
+    # `_run_lipsync_segmented` exists to keep peak RSS a function of the
+    # segment rather than the clip, and turning it off put a long render
+    # back on course to OOM. `_split_coords` cuts the list the same way the
+    # video is cut, so neither has to be given up.
     # Refuse up front if the host is ALREADY out of memory. The per-render
     # watchdog protects against growth during a render; this one costs
     # nothing and avoids loading a model into a machine that cannot hold
@@ -220,22 +276,12 @@ def run_lipsync(
     # seconds long: the split/concat overhead and an extra model load cost
     # more than the memory a sliver saves.
     want_segments = seg_s > 0 and seg_dur > seg_s * 1.05
-    if want_segments and coord_list:
-        # Same reason sharding refuses it: segments renumber frames from
-        # zero, so a whole-video list animates the wrong frames in every
-        # segment but the first -- at exit code 0.
-        log.warning("lipsync[%s]: %d supplied target boxes are indexed "
-                    "against the whole video, which segmenting renumbers; "
-                    "rendering in one pass (peak RAM will track the clip "
-                    "length, not %.0fs).", model, len(coord_list), seg_s)
-        want_segments = False
-
     if want_segments:
         result = _run_lipsync_segmented(
             model=model, face_video=face_video, driving_audio=driving_audio,
             out_video=out_video, out_dir=out_dir, gpus=gpus,
             lipsync_kwargs=lipsync_kwargs or {},
-            seg_s=seg_s, duration_s=seg_dur,
+            seg_s=seg_s, duration_s=seg_dur, coord_list=coord_list,
         )
     else:
         result = _render_one(
@@ -419,6 +465,153 @@ def _ff_run(cmd: list, what: str) -> None:
             f"{proc.stderr.strip()[:400]}")
 
 
+def _probe_fps(media: Optional[Path]) -> float:
+    """Frames per second, or 0.0 when it cannot be determined.
+
+    cv2 rather than ffprobe, deliberately. `media_io._ffprobe_bin()` can
+    answer `None`, and `None` is a SILENT answer in every caller — CLAUDE.md
+    §1 records `fps=0.0` on a file that plays perfectly as exactly this bug.
+    The one caller here treats 0.0 as "unknown" and drops the target boxes
+    rather than aligning them against a guess, so a wrong number would be
+    worse than no number.
+    """
+    if media is None:
+        return 0.0
+    try:
+        import cv2
+
+        cap = cv2.VideoCapture(str(media))
+        try:
+            fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
+        finally:
+            cap.release()
+        return fps if fps > 0 else 0.0
+    except Exception as e:                                # noqa: BLE001
+        log.debug("could not probe fps for %s: %s", media, e)
+        return 0.0
+
+
+def _probe_frames(media: Path) -> int:
+    """Frame count, or 0 when it cannot be determined.
+
+    Used to split a `coord_list` across the pieces a sharded or segmented
+    render is cut into. Counting ACTUAL frames beats recomputing time
+    boundaries: `split_video_audio` divides by duration and gives the last
+    chunk whatever is left over, so the arithmetic would have to reproduce
+    both that asymmetry and ffmpeg's own rounding. A frame count cannot
+    drift from the file it was read off.
+    """
+    try:
+        import cv2
+
+        cap = cv2.VideoCapture(str(media))
+        try:
+            n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        finally:
+            cap.release()
+        return max(0, n)
+    except Exception as e:                                # noqa: BLE001
+        log.debug("could not probe frame count for %s: %s", media, e)
+        return 0
+
+
+def _slice_coords_to_window(coord_list: list, window_video: Path,
+                            w_start: float, w_end: float, fps: float,
+                            *, model: str) -> Optional[list]:
+    """The slice of `coord_list` covering the cut window clip.
+
+    The OFFSET is arithmetic — `f0` indexes the original timeline, which
+    only the window and the fps describe. The LENGTH is probed off the clip
+    that was actually cut, with the arithmetic as a fallback when the probe
+    cannot read it.
+
+    The length used to be arithmetic too (`round(w_end*fps) - f0`), and the
+    two rulers disagreed by a frame whenever the window's ends rounded in
+    opposite directions. Measured 2026-10-23 on job 20261023-011027: a
+    0.672-150.556s window at 25 fps sliced 3747 boxes for a clip ffmpeg had
+    cut to 3748 frames. `_split_coords` measures with the probe, found
+    itself one box short on the second of two segments, and answered by
+    dropping the targeting for that whole segment — so 75 s of a 150 s dub
+    rendered on MuseTalk's own `d = d[0]` first face, at exit code 0, with
+    every artifact looking correct. Measuring both with the probe is what
+    stops the shortfall arising in the first place; `_COORD_PAD_FRAMES`
+    absorbs what ffmpeg's own rounding can still add.
+    """
+    f0 = int(round(w_start * fps))
+    want = _probe_frames(window_video) or (int(round(w_end * fps)) - f0)
+    sliced = list(coord_list)[f0:f0 + want]
+    short = want - len(sliced)
+    if 0 < short <= _COORD_PAD_FRAMES and sliced:
+        sliced.extend([sliced[-1]] * short)
+        note = f", last box repeated x{short} to cover the clip"
+    elif short > 0:
+        note = (f", {short} SHORT of the clip's {want} frame(s) — too many "
+                f"to be rounding, so any piece this is split into may "
+                f"render ungated")
+    else:
+        note = ""
+    log.info("lipsync[%s]: target boxes sliced to the window "
+             "(frames %d-%d of %d, %d kept%s)",
+             model, f0, f0 + want, len(coord_list), len(sliced), note)
+    return sliced or None
+
+
+def _split_coords(coord_list: Optional[list], pairs: list,
+                  *, model: str, what: str) -> list:
+    """One slice of `coord_list` per (video, audio) pair, in order.
+
+    The list is POSITIONAL and indexed against the clip it was built from:
+    entry `i` is the box for frame `i`. Every path that cuts the clip
+    renumbers frames from zero, so each piece needs its own slice or the
+    boxes land on the wrong frames — silently, at exit code 0.
+
+    Walks a cursor over the pieces' real frame counts. Returns a list the
+    same length as `pairs`, holding None where the slice cannot be trusted
+    (an unreadable frame count, or a list that ran out), because dropping
+    the targeting for one piece is recoverable and misaligning it is not.
+    """
+    if not coord_list:
+        return [None] * len(pairs)
+    out: list = []
+    cursor = 0
+    for i, (v, _a) in enumerate(pairs):
+        n = _probe_frames(Path(v))
+        if n <= 0:
+            log.warning("lipsync[%s]: cannot read the frame count of %s "
+                        "%d; it renders without ASD targeting",
+                        model, what, i + 1)
+            out.append(None)
+            cursor = -1 if cursor < 0 else cursor
+            continue
+        short = (cursor + n) - len(coord_list)
+        if cursor >= 0 and 0 < short <= _COORD_PAD_FRAMES \
+                and cursor < len(coord_list):
+            # A rounding-sized shortfall on the final piece. Dropping the
+            # targeting for a whole shard over one frame is the expensive
+            # answer to the cheap problem: it costs every frame in that
+            # piece, not the frame that is missing.
+            piece = list(coord_list[cursor:])
+            piece.extend([piece[-1]] * short)
+            log.info("lipsync[%s]: %s %d runs %d frame(s) past the target "
+                     "list; repeating the last box rather than dropping the "
+                     "targeting for all %d of its frames",
+                     model, what, i + 1, short, n)
+            out.append(piece)
+            cursor = len(coord_list)
+            continue
+        if cursor < 0 or short > 0:
+            log.warning("lipsync[%s]: target list is %d frame(s) but %s %d "
+                        "needs frames %d-%d; it renders without ASD "
+                        "targeting", model, len(coord_list), what, i + 1,
+                        cursor, cursor + n)
+            out.append(None)
+            cursor = -1
+            continue
+        out.append(list(coord_list[cursor:cursor + n]))
+        cursor += n
+    return out
+
+
 def _cut_video(src: Path, start: float, end: float, out: Path) -> Path:
     """Re-encoded cut, so the slice starts on a keyframe.
 
@@ -591,8 +784,10 @@ def _conform_to_source(rendered: Path, source: Path, driving_audio: Path, *,
              "-pix_fmt", "yuv420p", str(head)], "conform head")
 
     # The tail must match the RENDER's dimensions, not the source's. Wav2Lip
-    # writes at `resize_factor` scale -- 960x540 from a 1920x1080 input at
-    # the default of 2 -- and ffmpeg's concat demuxer requires identical
+    # writes at `resize_factor` scale -- which since 2026-10-22 is resolved
+    # per source against a 1080p ceiling, so a 4K input renders 1920x1080
+    # while a 1080p input renders at its own size -- and ffmpeg's concat
+    # demuxer requires identical
     # parameters, so a full-size tail is silently dropped: measured
     # 2026-10-19, the conform logged "+3 frames" and the file gained none.
     dims = _video_dims(rendered) or _video_dims(source)
@@ -809,7 +1004,7 @@ def _render_one(
         return _run_lipsync_sharded(
             model=model, face_video=face_video, driving_audio=driving_audio,
             out_video=out_video, out_dir=out_dir, gpus=gpus,
-            lipsync_kwargs=lipsync_kwargs,
+            lipsync_kwargs=lipsync_kwargs, coord_list=coord_list,
         )
     pinned_kwargs = dict(lipsync_kwargs)
     if gpus:
@@ -835,6 +1030,7 @@ def _run_lipsync_segmented(
     lipsync_kwargs: dict,
     seg_s: float,
     duration_s: float,
+    coord_list: Optional[list] = None,
 ):
     """Render a long clip as <=`seg_s` pieces, SEQUENTIALLY, then join.
 
@@ -867,8 +1063,10 @@ def _run_lipsync_segmented(
         return _render_one(
             model=model, face_video=face_video, driving_audio=driving_audio,
             out_video=out_video, out_dir=out_dir, gpus=gpus,
-            lipsync_kwargs=lipsync_kwargs,
+            lipsync_kwargs=lipsync_kwargs, coord_list=coord_list,
         )
+
+    seg_coords = _split_coords(coord_list, pairs, model=model, what="segment")
 
     log.info("lipsync[%s]: %.0fs -> %d segment(s) of <=%.0fs, rendered one "
              "at a time (peak RAM tracks the segment, not the clip)",
@@ -894,12 +1092,14 @@ def _run_lipsync_segmented(
                        f"{i} segment(s) already rendered under "
                        f"{seg_dir}."),
             )
-        log.info("lipsync[%s]: segment %d/%d (%s)",
-                 model, i + 1, len(pairs), v.name)
+        log.info("lipsync[%s]: segment %d/%d (%s)%s",
+                 model, i + 1, len(pairs), v.name,
+                 f" ({len(seg_coords[i])} target boxes)"
+                 if seg_coords[i] else "")
         r = _render_one(
             model=model, face_video=v, driving_audio=a,
             out_video=part_out, out_dir=seg_dir, gpus=gpus,
-            lipsync_kwargs=lipsync_kwargs,
+            lipsync_kwargs=lipsync_kwargs, coord_list=seg_coords[i],
         )
         if r.error:
             # Stop at the first failure rather than paying for the rest.
@@ -957,11 +1157,18 @@ def _run_lipsync_sharded(
     out_dir: Path,
     gpus: list,
     lipsync_kwargs: dict,
+    coord_list: Optional[list] = None,
 ):
     """Fan one job across `gpus`: split in time, run in parallel, concat.
 
     Returns a LipSyncResult-like object (model_name, out_video, duration_s,
     fps, error, extra) assembled from the final concat.
+
+    A `coord_list` is split across the shards by frame count — see
+    `_split_coords`. This used to cost the second GPU: `run_lipsync` forced
+    a single device whenever targets were supplied, because a whole-video
+    list applied to a shard that renumbers frames from zero animates the
+    wrong frames.
     """
     from models.lipsync import LipSyncResult
     n = len(gpus)
@@ -971,22 +1178,32 @@ def _run_lipsync_sharded(
     pairs = split_video_audio(face_video, driving_audio, n, shard_dir)
     if len(pairs) == 1:
         # Clip too short to shard profitably — fall back to the single GPU.
+        # The list still applies: nothing was cut, so it is still indexed
+        # against the clip the model sees.
         pinned_kwargs = dict(lipsync_kwargs); pinned_kwargs["cuda_device"] = gpus[0]
         lipsync = get_lipsync(model, **pinned_kwargs)
         log.info("lipsync[%s, gpu=%s, sharded→fallback]: %s → %s",
                  model, gpus[0], face_video, out_video)
         return lipsync.sync(LipSyncRequest(
             video=face_video, audio=driving_audio, out_path=out_video,
+            extra=({"coord_list": coord_list} if coord_list else {}),
         ))
+
+    shard_coords = _split_coords(coord_list, pairs, model=model, what="shard")
 
     def _one(i_gpu_pair):
         i, gpu, (v, a) = i_gpu_pair
         pinned_kwargs = dict(lipsync_kwargs); pinned_kwargs["cuda_device"] = gpu
         lipsync = get_lipsync(model, **pinned_kwargs)
         part_out = shard_dir / f"part{i:02d}.lipsync.mp4"
-        log.info("lipsync[%s, gpu=%d, shard=%d/%d]: %s → %s",
-                 model, gpu, i + 1, len(pairs), v.name, part_out.name)
-        return lipsync.sync(LipSyncRequest(video=v, audio=a, out_path=part_out))
+        coords = shard_coords[i]
+        log.info("lipsync[%s, gpu=%d, shard=%d/%d]: %s → %s%s",
+                 model, gpu, i + 1, len(pairs), v.name, part_out.name,
+                 f" ({len(coords)} target boxes)" if coords else "")
+        return lipsync.sync(LipSyncRequest(
+            video=v, audio=a, out_path=part_out,
+            extra=({"coord_list": coords} if coords else {}),
+        ))
 
     jobs = [(i, gpus[i], pair) for i, pair in enumerate(pairs)]
     with ThreadPoolExecutor(max_workers=n) as pool:

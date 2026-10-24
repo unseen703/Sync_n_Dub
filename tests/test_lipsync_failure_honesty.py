@@ -26,7 +26,7 @@ from pathlib import Path
 import pytest
 
 import backend.lipsync as L
-from conftest import write_tone
+from conftest import write_tiny_mp4, write_tone
 
 
 class _StubAdapter:
@@ -48,7 +48,9 @@ class _StubAdapter:
 
 @pytest.fixture
 def job(tmp_path):
-    src = tmp_path / "src.mp4"; src.write_bytes(b"\0" * 1024)
+    # A REAL container: `run_lipsync` probes the source's duration to decide
+    # whether to segment, and a byte-blob cannot answer that.
+    src = write_tiny_mp4(tmp_path / "src.mp4")
     wav = write_tone(tmp_path / "drive.wav", 1.0, sample_rate=16000)
     merged = tmp_path / "merged.json"
     merged.write_text(json.dumps({"segments": [], "extra": {}}))

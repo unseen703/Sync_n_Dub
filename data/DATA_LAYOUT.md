@@ -18,6 +18,7 @@ data/
     audio/ stems/           extracted audio, HTDemucs stems
     diarization/ faces/ asd/
     asr/ align/ mt/         transcripts, word alignment, translation
+    mt/versions/            every version of the merged JSON (see below)
     voices/ tts/ vc/        speaker refs, synthesized clips, voice conversion
     mix/ lipsync/           final dubbed audio, muxed video
     eval/ exp/              scores; per-variant subtrees for a sweep
@@ -27,6 +28,47 @@ data/
 `<job_id>` is `<timestamp>__<input-slug>__<diar>.<asr>.<align>.<mt>.<lang>`, so `ls` sorts
 chronologically and re-running the same video with the same settings never overwrites the
 previous run.
+
+## `mt/` and `mt/versions/`
+
+The merged ASR+MT JSON is the document the whole post-MT half of the pipeline
+rewrites **in place**. One live file, read and written by every stage:
+
+```
+mt/<stem>.<engine>.<lang>.mt.json          ← the live document; stages read THIS
+mt/<stem>.<engine>.<lang>.transcript.txt
+```
+
+Every writer also snapshots, so no version is lost (`backend/mt_versions.py`):
+
+```
+mt/versions/<stem>.<engine>.<lang>.v000.original.json    straight out of MT
+mt/versions/<stem>.<engine>.<lang>.v001.codemix.json     stage 9b
+mt/versions/<stem>.<engine>.<lang>.v002.condense.json    stage 9c2
+mt/versions/<stem>.<engine>.<lang>.v003.emotion.json     stage 9b2
+mt/versions/<stem>.<engine>.<lang>.v004.tts.json         stage 9e
+mt/versions/<stem>.<engine>.<lang>.v005.edit_000.json    an applied edit
+mt/versions/index.json                                   producer, bytes, segments, time
+```
+
+Four naming rules, each defensive rather than cosmetic:
+
+1. **A subdirectory, not `mt/`.** `edit_agent._find_merged_json` globs
+   `mt/*.mt.json` and, when several match, takes **the newest by mtime** with
+   only a log line. A snapshot is newer than the live file by construction, so
+   in `mt/` it would win — silently becoming the document every later edit is
+   applied to. `glob` is not recursive, so a subdirectory is invisible to it.
+2. **No version ends in `.mt.json`.** Belt and braces for (1): the suffix is
+   `.<producer>.json`, and `mt` is a *reserved* producer name.
+3. **Zero-padded to three digits.** `v10` sorts before `v9` unpadded, which is
+   how a history silently starts reading in the wrong order past ten entries.
+4. **The producer is in the name**, so the history reads without opening a file.
+   An applied edit carries the same `NNN` as its `edits/edit_NNN.json` journal
+   entry, so the request and the resulting document line up by name.
+
+A snapshot never overwrites: the same producer twice (a re-run, a replay) takes
+the next free number. Failures are logged and swallowed — a job that cannot
+write a snapshot still renders, it just has a thinner history.
 
 ```bash
 python -m backend.cli --input <url-or-file> ...   # one input per run; creates a job

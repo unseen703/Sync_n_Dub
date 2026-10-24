@@ -1,7 +1,7 @@
 import { MotionConfig } from 'framer-motion';
 import { TopBar } from './TopBar';
 import { Landing } from './Landing';
-import { EditAgentPage } from '../agent/EditAgentPage';
+import { EditPanel } from '../agent/EditPanel';
 import { TalkingHeadPage } from '../talkinghead/TalkingHeadPage';
 import { StageRibbon } from '../progress/StageRibbon';
 import { FailureCard } from '../progress/FailureCard';
@@ -12,6 +12,7 @@ import { Button } from '../ui/Button';
 import { IconAlert } from '../ui/Icons';
 import { useStore } from '../../store/useStore';
 import { deriveCentreState } from '../../lib/centre';
+import { normalizeState } from '../../lib/format';
 
 /**
  * The centre column. The video is central, and everything else arranges
@@ -26,6 +27,12 @@ import { deriveCentreState } from '../../lib/centre';
  * a user-facing product, and `progress.failure` (from `ui/errors.py`) says
  * what went wrong in a sentence. The raw log is still on disk for whoever
  * is debugging a render.
+ *
+ * Everything that CHANGES the dub is on this page too, under the player, as
+ * of 2026-10-21 — the cast, the chat box, the script, and the lip-sync
+ * control, in `EditPanel`. They used to be a separate page at
+ * `#/job/<id>/edit`, which meant judging a voice from memory: the video was
+ * on one screen and the controls that change it on another.
  */
 export function Stage() {
   const selected = useStore((s) => s.selected);
@@ -33,10 +40,17 @@ export function Stage() {
   const media = useStore((s) => s.media);
   const jobError = useStore((s) => s.jobError);
   const refreshProgress = useStore((s) => s.refreshProgress);
-  const editing = useStore((s) => s.editing);
 
   const talkingHead = useStore((s) => s.talkingHead);
   const centre = deriveCentreState(progress, media);
+
+  // The agent replays stages 9b..9h over the run's merged ASR+MT JSON, which
+  // only exists once the run has got that far. Offering it mid-run would
+  // stage edits against a transcript still being written — the rule that
+  // used to gate the top bar's "Edit via agent" button, now gating the panel
+  // that replaced it.
+  const running = normalizeState(progress?.state) === 'running'
+    || normalizeState(progress?.state) === 'queued';
 
   // Checked before the no-selection branch: this page has no job behind it,
   // so it would otherwise fall through to the landing page.
@@ -55,17 +69,6 @@ export function Stage() {
       <MotionConfig reducedMotion="user">
         <div className="min-h-0 flex-1 overflow-y-auto px-4 lg:px-6">
           <Landing />
-        </div>
-      </MotionConfig>
-    );
-  }
-
-  if (editing) {
-    return (
-      <MotionConfig reducedMotion="user">
-        <TopBar />
-        <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3 lg:px-5 lg:py-4">
-          <EditAgentPage jobId={selected} />
         </div>
       </MotionConfig>
     );
@@ -115,7 +118,11 @@ export function Stage() {
             </section>
           ) : null}
 
-          <SpeakerTable />
+          {/* Everything you can do to the dub, directly under the dub.
+              While the run is still going there is nothing to edit yet, so
+              only the cast appears — it fills in from diarization onward,
+              several stages before the agent has a transcript to work on. */}
+          {running ? <SpeakerTable /> : <EditPanel jobId={selected} />}
 
           <div className="h-4" />
         </div>

@@ -383,6 +383,27 @@ def summarize(plan: TimingPlan, *, source_duration_s: Optional[float] = None) ->
 # producer: naive_slot -- the control arm
 # ---------------------------------------------------------------------------
 
+#: What to do with a cue whose slot starts inside the previous cue's slot.
+#: "serialize" is the historical behaviour -- the shift-forward cursor pushes
+#: it past the cue it overlaps. "keep" places it where the source put it.
+OVERLAP_POLICIES = ("serialize", "keep")
+
+
+def _next_slot_start(plans: List["SegmentPlan"], i: int) -> Optional[float]:
+    """Where the next NON-overlapping slot begins, or None at the end.
+
+    Nested cues are skipped on purpose. The caller uses this to measure the
+    source gap after slot `i`, and a cue that starts *inside* slot `i` does
+    not end it -- taking the next slot in list order would measure a negative
+    gap for exactly the segments that are followed by music.
+    """
+    end = plans[i].slot.end
+    for j in range(i + 1, len(plans)):
+        if plans[j].slot.start >= end - 1e-3:
+            return plans[j].slot.start
+    return None
+
+
 def plan_naive_slot(
     merged_json: Path,
     *,
@@ -391,6 +412,8 @@ def plan_naive_slot(
     min_tempo: float = 0.90,
     shift_forward: bool = True,
     use_target_duration: bool = False,
+    overlap_policy: str = "serialize",
+    gap_barrier_s: float = 0.0,
     out_json: Optional[Path] = None,
 ) -> TimingPlan:
     """Reproduce today's behaviour AS A TIMING PLAN.
@@ -420,7 +443,33 @@ def plan_naive_slot(
     without it a per-segment speed edit is silently ignored by this producer.
     It defaults to False so the m2 control arm keeps the exact semantics it
     was measured with.
+
+    `overlap_policy="keep"` stops the cursor serialising SIMULTANEOUS SPEECH.
+    A cue whose slot starts inside the previous cue's slot is a second voice
+    talking over the first, not a cue that follows it, and the monotone cursor
+    cannot express that: it pushes the nested cue past the one it overlaps,
+    which on job 20261022-044302 moved a 0.35 s backchannel (26.22-26.58,
+    inside a 23.93-30.73 turn) out to ~32.2 s -- into the middle of a 7.2 s
+    stretch of music. `keep` places such a cue at its own slot start and does
+    NOT advance the cursor, so the cue it overlaps still owns the timeline.
+    The mix renders this already: `backend.mix._ffmpeg_mix_plan` is one
+    `adelay` per clip into `amix` and has never required non-overlap.
+    `summarize` then reports the overlap honestly instead of reporting zero
+    because the overlap was displaced rather than absent.
+
+    `gap_barrier_s` (0.0 = off) stops the cascade walking into that music in
+    the first place. A source gap at least this long after a cue is a wall:
+    the cue's target is shortened to whatever is left before its slot ends,
+    so it is sped up (within `max_tempo`) rather than allowed to run on over
+    non-speech audio. Whatever the cap still cannot absorb is recorded as
+    `qc["overrun_into_gap_s"]` -- the clip is never truncated, because losing
+    a line is worse than a short bleed. Clamping the cue also resets the
+    cursor for free: it now ends before the gap, so the next cue is placed at
+    its own slot start instead of inheriting the drift.
     """
+    if overlap_policy not in OVERLAP_POLICIES:
+        raise ValueError(f"unknown overlap_policy {overlap_policy!r}; "
+                         f"choose one of {OVERLAP_POLICIES}")
     merged_json = Path(merged_json)
     data = json.loads(merged_json.read_text())
     plan = TimingPlan(producer="naive_slot", params={
@@ -428,17 +477,36 @@ def plan_naive_slot(
         "max_tempo": max_tempo, "min_tempo": min_tempo,
         "shift_forward": shift_forward,
         "use_target_duration": use_target_duration,
+        "overlap_policy": overlap_policy,
+        "gap_barrier_s": gap_barrier_s,
     })
 
+    # Built up front because the gap barrier needs to look AHEAD at the next
+    # slot, which the old one-pass loop could not do.
+    segs = list(data.get("segments", []))
+    plans = [_base_segment_plan(s, pause_min_s=DEFAULT_PAUSE_MIN_S) for s in segs]
+
     cursor = 0.0
-    for seg in data.get("segments", []):
-        sp = _base_segment_plan(seg, pause_min_s=DEFAULT_PAUSE_MIN_S)
+    # End of the last slot that advanced the cursor. A nested cue must not
+    # become the thing the NEXT cue is tested against, or one overlap would
+    # cascade into a chain of them.
+    prev_slot_end: Optional[float] = None
+    for i, (seg, sp) in enumerate(zip(segs, plans)):
         raw = raw_clip_duration(seg)
         if raw is None or raw <= 0:
             sp.qc["no_audio"] = True
             plan.segments.append(sp)
             continue
 
+        # 1. where it goes
+        nested = (overlap_policy == "keep" and prev_slot_end is not None
+                  and sp.slot.start < prev_slot_end - 1e-3)
+        if nested:
+            placed = sp.slot.start
+        else:
+            placed = max(sp.slot.start, cursor) if shift_forward else sp.slot.start
+
+        # 2. how long it is allowed to be
         slot_dur = sp.slot.dur
         if use_target_duration and seg.get("target_duration_s") is not None:
             try:
@@ -446,8 +514,20 @@ def plan_naive_slot(
             except (TypeError, ValueError):
                 pass
         target = max(0.01, slot_dur - safety_margin_s)
+
+        barrier = False
+        if gap_barrier_s > 0 and not nested:
+            nxt = _next_slot_start(plans, i)
+            if nxt is not None and nxt - sp.slot.end >= gap_barrier_s:
+                barrier = True
+                sp.qc["gap_after_s"] = round(nxt - sp.slot.end, 3)
+                # Run to the music and not one frame past it. `placed` is
+                # already the drifted position, so this is what is actually
+                # left, not the slot's nominal length.
+                target = max(0.01, min(target, sp.slot.end - placed))
+
+        # 3. how fast
         tempo, capped = _clamp_tempo(raw / target, min_tempo, max_tempo)
-        placed = max(sp.slot.start, cursor) if shift_forward else sp.slot.start
         sp.pieces = [Piece(src_span=Span(0.0, raw), dst_start=placed,
                            local_tempo=tempo, anchor="whole",
                            text=seg.get("final_text") or seg.get("mt_text") or "")]
@@ -461,7 +541,18 @@ def plan_naive_slot(
                 sp.qc["unfilled_s"] = round(unfilled, 4)
         if placed > sp.slot.start + 1e-3:
             sp.qc["shifted_s"] = round(placed - sp.slot.start, 4)
-        cursor = placed + sp.pieces[0].dst_dur
+        if barrier:
+            over = (placed + sp.pieces[0].dst_dur) - sp.slot.end
+            if over > 1e-3:
+                sp.qc["overrun_into_gap_s"] = round(over, 4)
+        if nested:
+            # Deliberately does NOT touch the cursor: the cue this one talks
+            # over still owns the timeline.
+            sp.qc["overlap_kept"] = True
+        else:
+            cursor = placed + sp.pieces[0].dst_dur
+            prev_slot_end = (sp.slot.end if prev_slot_end is None
+                             else max(prev_slot_end, sp.slot.end))
         plan.segments.append(sp)
 
     plan.summary = summarize(plan)

@@ -16,7 +16,6 @@ Open:  http://127.0.0.1:7861/
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import os
 import re
@@ -30,6 +29,7 @@ from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 
+from . import lipsync_models as _ls_models
 from .auth import basic_auth
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -117,11 +117,7 @@ def _parse_job_id(job_id: str) -> dict[str, Any]:
     }
 
 
-def _read_json(path: Path) -> dict[str, Any] | None:
-    try:
-        return json.loads(path.read_text())
-    except (OSError, json.JSONDecodeError):
-        return None
+from ._io import read_json as _read_json
 
 
 # ---------------------------------------------------------------------------
@@ -512,12 +508,18 @@ def _job_config(job_root: Path) -> dict[str, Any]:
         cfg.setdefault(k, v)
 
     # `musetalk-v15` -> `musetalk`, so label lookups and the registry agree.
+    #
+    # Through `lipsync_models.normalise`, which tests the LONGEST key first.
+    # The loop this replaces tried `wav2lip` before `wav2lip_hd`, so an HD run
+    # had `cfg["lipsync"]` rewritten to `"wav2lip"` right here — and every
+    # reader downstream (the job list, `spec.py`, `cost.py`) then described a
+    # plain Wav2Lip run. The truth survived in `lipsync_variant`, which
+    # nothing read.
     ls = str(cfg.get("lipsync") or "").lower()
-    for known in ("wav2lip", "musetalk", "latentsync", "lipgan"):
-        if ls.startswith(known):
-            cfg["lipsync"] = known
-            cfg.setdefault("lipsync_variant", ls)
-            break
+    known = _ls_models.normalise(ls)
+    if known:
+        cfg["lipsync"] = known
+        cfg.setdefault("lipsync_variant", ls)
     return cfg
 
 
@@ -655,11 +657,12 @@ def api_options(tts: str | None = None) -> dict[str, Any]:
         # the run measured and SHOWS. Leaving the row here would advertise a
         # value nothing resolves any more — the shape of the tone-picker bug
         # in CLAUDE.md §2, where the UI offered values the engine 422s on.
-        "lipsync_models": [
-            {"id": "wav2lip", "label": "Wav2Lip", "speed": "3–5× clip length"},
-            {"id": "musetalk", "label": "MuseTalk", "speed": "8–21× clip length"},
-            {"id": "latentsync", "label": "LatentSync", "speed": "~83× clip length"},
-        ],
+        # Built from the REGISTRY, not hand-written. This list carried three
+        # rows while `models/lipsync/__init__.py` registered five, so
+        # `wav2lip_hd` and `lipgan` were absent from the only place that
+        # claims to enumerate the models — the same shape as the tone picker
+        # in CLAUDE.md §2, inverted: a real option nothing advertised.
+        "lipsync_models": _ls_models.options(),
         "limits": {
             "max_lipsync_s": MAX_LIPSYNC_S,
             "note": (f"Lip-sync is capped at {MAX_LIPSYNC_S // 60} minutes of "
@@ -751,7 +754,8 @@ def api_log(job_id: str, tail: int = 200) -> dict[str, Any]:
 # static handler, which reads exactly like a routing typo.
 for _mod, _what in (("routes_edits", "voice/tone editing"),
                     ("routes_create", "job creation"),
-                    ("routes_talkinghead", "talking head page")):
+                    ("routes_talkinghead", "talking head page"),
+                    ("routes_enhance", "resolution enhancement")):
     try:
         _router = __import__(f"ui.{_mod}", fromlist=["router"]).router
     except ImportError as _e:

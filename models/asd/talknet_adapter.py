@@ -44,10 +44,33 @@ class TalkNetASD(BaseASD):
         target_fps: float = 25.0,
     ):
         super().__init__(device=device)
-        env_repo = os.getenv("TALKNET_REPO")
-        self.repo_path = Path(repo_path or env_repo or "").expanduser() if (repo_path or env_repo) else None
+        # Resolved the same way the lip-sync upstreams are, so TalkNet moved
+        # under `models/asd/vendor/` with them on 2026-10-23 and nothing in
+        # `models/` reaches outside it. There was no in-code default here at
+        # all -- `.env` carried the only path -- so a move would have broken
+        # it outright; `resolve_vendor_repo` also treats an env var pointing
+        # at a path that no longer exists as a stale pin rather than an
+        # instruction.
+        from .._vendor import resolve_vendor_repo
+        self.repo_path = resolve_vendor_repo(
+            "talknet", "TALKNET_REPO",
+            str(repo_path) if repo_path else None,
+            legacy="third_party/TalkNet-ASD",
+            vendor_root="models/asd/vendor")
         env_ckpt = os.getenv("TALKNET_CHECKPOINT")
-        self.checkpoint = Path(checkpoint or env_ckpt).expanduser() if (checkpoint or env_ckpt) else None
+        if checkpoint or env_ckpt:
+            ck = Path(checkpoint or env_ckpt).expanduser()
+            # Same stale-pin rule as the repo: `.env` names the checkpoint
+            # INSIDE the clone, so the move relocates it and a pin that
+            # outlives its target would fail at stage 6 with "checkpoint not
+            # found" while the file sits beside the repo we just resolved.
+            if not ck.exists():
+                moved = self.repo_path / Path(ck).name
+                if moved.exists():
+                    ck = moved
+            self.checkpoint = ck
+        else:
+            self.checkpoint = self.repo_path / "pretrain_TalkSet.model"
         self.crop_size = crop_size
         self.target_fps = target_fps
         self._model = None

@@ -87,17 +87,99 @@ def test_every_stage_key_is_grouped_or_deliberately_hidden():
         f"HIDDEN_KEYS if they produce no part of the dub")
 
 
-def test_the_bar_shows_the_seven_named_stages():
-    """The pipeline as a person describes it. Seven, in order, no tree.
+def test_the_bar_shows_the_eight_named_stages():
+    """The pipeline as a person describes it. Eight, in order, no tree.
 
     Pinned because the grouping is the one place the UI editorialises about
     the pipeline, and a stage quietly appearing or being renamed changes
     what the whole product looks like it does.
+
+    `Enhance resolution` was added 2026-10-23 by request. It is its own pill
+    rather than a substage of `Lip sync` because it runs on the finished
+    render from any model and costs 2.6x the MuseTalk pass it cleans
+    (1156 s vs 447 s, measured 2026-10-22) -- folding it in would make a lit
+    `Lip sync` mean two different amounts of work.
     """
     assert [label for _id, label, _keys in P.PHASE_GROUPS] == [
         'Download video', 'Speaker annotation', 'Transcribe', 'Translate',
-        'Speech generation', 'Mix', 'Lip sync',
+        'Speech generation', 'Mix', 'Lip sync', 'Enhance resolution',
     ]
+
+
+def test_the_bar_is_always_nine_pills_whatever_the_config():
+    """Eight groups plus `Finished`, identical on every run.
+
+    `_group_phases` used to drop a group with no planned substages, and
+    `plan_stages` is config-driven — so a run enabling few optional stages
+    rendered a bar with one or two pills on it, and the bar's length changed
+    between two runs of the same video. An operator cannot tell "this
+    pipeline has no transcribe step" from "the bar is broken".
+    """
+    expected = ['Download video', 'Speaker annotation', 'Transcribe',
+                'Translate', 'Speech generation', 'Mix', 'Lip sync',
+                'Enhance resolution', 'Finished']
+    for cfg in ({'asr': 'whisperx'},
+                {'asr': 'whisperx', 'mt': 'bodhan'},
+                {'asr': 'bodhan', 'mt': 'bodhan', 'tts': 'bodhan',
+                 'mix': True, 'lipsync': 'musetalk'},
+                {}):
+        labels = [ph['label'] for ph in P._group_phases(P.plan_stages(cfg))]
+        assert labels == expected, f"config {cfg} drew {labels}"
+
+
+def test_an_unplanned_group_reads_skipped_not_pending():
+    """The pipeline HAS the step; this run is not taking it. `pending` would
+    read as "still to come" and leave a finished run looking unfinished."""
+    phases = {p['id']: p for p in
+              P._group_phases(P.plan_stages({'asr': 'whisperx'}))}
+    assert phases['translate']['state'] == 'skipped'
+    assert phases['lipsync']['state'] == 'skipped'
+
+
+def test_finished_waits_for_a_deferred_lipsync():
+    """The load-bearing case. A draft run leaves 9h pending-and-deferred
+    because lip-sync is a separate explicit act; lighting `Finished` over it
+    would be the screen asserting something false."""
+    stages = P.plan_stages({"asr": "bodhan", "mt": "bodhan", "tts": "bodhan",
+                            "mix": True, "lipsync": None})
+    for s in stages:                      # everything the run DID do
+        if s["key"] != "9h":
+            s["state"] = "done"
+    phases = {p['id']: p for p in P._group_phases(stages)}
+    assert phases['lipsync']['state'] == 'pending'
+    assert phases[P.FINISHED_ID]['state'] == 'pending'
+
+
+def test_finished_lights_when_every_stage_is_done_or_skipped():
+    stages = P.plan_stages({"asr": "bodhan", "mt": "bodhan", "tts": "bodhan",
+                            "mix": True, "lipsync": "musetalk"})
+    for s in stages:
+        s["state"] = "done"
+    phases = {p['id']: p for p in P._group_phases(stages)}
+    assert phases[P.FINISHED_ID]['state'] == 'done'
+
+
+def test_finished_carries_no_wall_time():
+    """The ribbon sums `wall_s` across phases for elapsed time, so a total
+    on this pill would report double the real runtime."""
+    stages = P.plan_stages({"asr": "bodhan", "mt": "bodhan"})
+    for s in stages:
+        s["state"], s["wall_s"] = "done", 5.0
+    fin = [p for p in P._group_phases(stages) if p["id"] == P.FINISHED_ID][0]
+    assert fin["wall_s"] is None
+
+
+def test_a_failure_anywhere_fails_the_finished_pill():
+    stages = P.plan_stages({"asr": "bodhan", "mt": "bodhan"})
+    stages[0]["state"] = "failed"
+    fin = [p for p in P._group_phases(stages) if p["id"] == P.FINISHED_ID][0]
+    assert fin["state"] == "failed"
+
+
+def test_finished_is_not_a_pipeline_marker():
+    """It is synthetic. Putting it in `PHASE_GROUPS` would make the
+    marker-grep test below fail it for having no `=== stage ===` line."""
+    assert P.FINISHED_ID not in {gid for gid, _l, _k in P.PHASE_GROUPS}
 
 
 def test_evaluation_stages_stay_off_the_bar():
@@ -110,7 +192,9 @@ def test_evaluation_stages_stay_off_the_bar():
              for k in P.HIDDEN_KEYS]
     labels = [ph['label'] for ph in P._group_phases(plan)]
     assert 'Checks' not in labels
-    assert len(labels) <= 7
+    # Eight groups + `Finished`, and nothing else. The QA pass must not
+    # become a tenth pill.
+    assert len(labels) == 9
 
 
 # ---------------------------------------------------------------------------
@@ -139,7 +223,11 @@ def test_writer_tracks_the_running_stage(tmp_path):
     w.finish("done")
     doc = json.loads((tmp_path / "progress.json").read_text())
     assert doc["state"] == "done"
-    assert all(s["state"] in ("done", "skipped") for s in doc["stages"])
+    # Every stage the run was responsible for is resolved. A `deferred` one is
+    # not: this config asks for no lip-sync, so 9h is planted pending and left
+    # that way for the separate lip-sync submission to open.
+    assert all(s["state"] in ("done", "skipped")
+               for s in doc["stages"] if not s.get("deferred"))
 
 
 def test_writer_marks_a_skipped_stage(tmp_path):
@@ -319,17 +407,46 @@ def test_a_finished_job_reports_a_finished_render():
     # -- `--mix` with no `--lipsync`, which is how the scaling benchmarks
     # built one dub for six separate lip-sync passes to share -- has an empty
     # `lipsync/` by design, and asserting a render for it fails the suite for
-    # doing exactly what it was asked to do. Keyed off the planned stage list
-    # rather than the manifest config, because `read_progress` normalises
-    # four different on-disk job shapes and the stage list is the one thing
-    # all four agree on.
+    # doing exactly what it was asked to do. Keyed off the stage list rather
+    # than the manifest config, because `read_progress` normalises four
+    # different on-disk job shapes and the stage list is the one thing all
+    # four agree on.
+    #
+    # The test is the STATE of 9h, not its PRESENCE. Presence used to mean
+    # "lip-sync was configured", and stopped meaning it on 2026-10-21: 9h is
+    # now planned on every job so a draft dub can show the stage it is
+    # waiting for. A row still `pending` is that case and has no render to
+    # report; `done` is the one that claims it finished, which is precisely
+    # the claim this guards.
     ran_lipsync = [(d, p) for d, p in done
-                   if any(s.get("key") == "9h" for s in p.get("stages", []))]
+                   if any(s.get("key") == "9h" and s.get("state") == "done"
+                          for s in p.get("stages", []))]
     if not ran_lipsync:
-        pytest.skip("no finished jobs on disk that configured lip-sync")
+        pytest.skip("no finished jobs on disk that ran lip-sync")
+
+    # A REFUSAL is not a missing render. `run_lipsync` declines rather than
+    # sharing a card -- "no GPU is free, gpu0 busy (pid …)" -- and records
+    # that in `result.lipsync_error` while the audio dub, which did finish,
+    # keeps the job at done. 32 jobs on this host are in exactly that state
+    # from one batch that outran the GPUs, and every one of them recorded
+    # its reason.
+    #
+    # Which is the point the assertion has to make: the bug this guards
+    # against is lip-sync producing NOTHING while claiming success, so the
+    # failing case is a missing render with NO recorded error. Flagging the
+    # ones that said why would fail the suite for the honest-failure
+    # machinery working (CLAUDE.md §4).
+    def _recorded_error(job_dir):
+        try:
+            manifest = json.loads((job_dir / "manifest.json").read_text())
+        except (OSError, ValueError):
+            return None
+        return (manifest.get("result") or {}).get("lipsync_error")
+
     bad = [d.name for d, p in ran_lipsync
-           if not p["milestones"]["lipsync_ready"]]
-    assert not bad, f"finished jobs whose render was not found: {bad[:5]}"
+           if not p["milestones"]["lipsync_ready"] and not _recorded_error(d)]
+    assert not bad, (
+        f"finished jobs with no render and no recorded reason: {bad[:5]}")
 
 
 # ---------------------------------------------------------------------------
@@ -352,23 +469,98 @@ def test_lipsync_is_planned_when_the_model_is_still_auto():
     assert "Lip sync" in labels
 
 
-def test_no_lipsync_node_when_none_was_requested():
-    """The converse: an audio-only dub must not show a stage it will skip."""
-    labels = [ph["label"] for ph in P._group_phases(
-        P.plan_stages({"asr": "whisperx", "mt": "bodhan", "tts": "edge",
-                       "mix": True, "lipsync": None}))]
-    assert "Lip sync" not in labels
+def test_lipsync_node_is_shown_even_when_the_run_will_not_do_it():
+    """A draft dub still draws the Lip sync node — pending, not absent.
+
+    This asserts the OPPOSITE of what it used to, deliberately. A `draft`
+    submission sets `lipsync: None` and stops at the mix, with lip-sync a
+    separate explicit act afterwards. Dropping the node made that job render a
+    six-node bar reading "Finished · all 6 stages" — identical to a dub that
+    will never be lip-synced, for one that is waiting to be.
+    """
+    stages = P.plan_stages({"asr": "whisperx", "mt": "bodhan", "tts": "bodhan",
+                            "mix": True, "lipsync": None})
+    labels = [ph["label"] for ph in P._group_phases(stages)]
+    assert "Lip sync" in labels
+    ls = next(s for s in stages if s["key"] == "9h")
+    assert ls["state"] == "pending"
+    # The flag is what carries "not yet" through the two places that would
+    # otherwise resolve a leftover pending stage to `skipped`.
+    assert ls["deferred"] is True
 
 
-def test_the_runner_plans_the_requested_lipsync():
-    """Pins the call site, not just `plan_stages` — the bug lived there."""
+def test_a_deferred_lipsync_stage_survives_a_successful_finish(tmp_path):
+    """`finish("done")` must not call the un-run stage `skipped`.
+
+    `StageRibbon.isDone` counts `skipped` as done, so resolving it that way
+    would complete the bar for a dub that has not been lip-synced at all.
+    """
+    w = _writer(tmp_path, P.plan_stages({"asr": "bodhan", "mt": "bodhan",
+                                         "tts": "bodhan", "mix": True,
+                                         "lipsync": None}))
+    _log(w, "=== stage 9g: mix ===")
+    w.finish("done")
+    doc = P.read_progress(tmp_path)
+    ls = next(s for s in doc["stages"] if s["key"] == "9h")
+    assert ls["state"] == "pending", "the deferred stage was marked skipped"
+    assert doc["n_done"] < doc["n_total"]
+    lip = next(p for p in doc["phases"] if p["id"] == "lipsync")
+    assert lip["state"] == "pending"
+
+
+def test_a_configured_lipsync_stage_is_not_deferred():
+    """The flag is about the SUBMISSION, not about the stage.
+
+    A job that asked for lip-sync and then skipped past it really was
+    skipped, and must still resolve that way.
+    """
+    stages = P.plan_stages({"asr": "whisperx", "mt": "bodhan", "tts": "bodhan",
+                            "mix": True, "lipsync": "musetalk"})
+    ls = next(s for s in stages if s["key"] == "9h")
+    assert "deferred" not in ls
+
+
+def test_the_later_lipsync_run_reuses_the_deferred_row(tmp_path):
+    """`POST .../lipsync` completes the bar rather than appending an 8th node.
+
+    `_open` reuses an existing row for a key, so the pending 9h planted by the
+    draft run is the row the real stage marker opens.
+    """
+    w = _writer(tmp_path, P.plan_stages({"asr": "bodhan", "mt": "bodhan",
+                                         "tts": "bodhan", "mix": True,
+                                         "lipsync": None}))
+    w.finish("done")
+    w2 = _writer(tmp_path, P.plan_stages({"asr": "bodhan", "mt": "bodhan",
+                                          "tts": "bodhan", "mix": True,
+                                          "lipsync": "musetalk"}))
+    _log(w2, "=== stage 9h: lip sync (musetalk) ===")
+    w2.finish("done")
+    doc = P.read_progress(tmp_path)
+    assert [s["key"] for s in doc["stages"]].count("9h") == 1
+    # `Finished` is the trailing pill now, so Lip sync is the one before it.
+    assert doc["phases"][-1]["id"] == P.FINISHED_ID
+    lip = next(p for p in doc["phases"] if p["id"] == "lipsync")
+    assert lip["state"] == "done"
+
+
+def test_the_runner_plans_no_lipsync_node():
+    """The inverse of the old guard, and for the same reason: the bar must
+    match the run.
+
+    It used to pad the plan with a Lip sync node because `"auto"` meant a
+    stage that WOULD run without being in `kwargs` yet. Since 2026-10-20 a
+    submission ends at the mix, so padding it would promise a stage this run
+    never reaches. Lip-sync is its own submission with its own progress.
+    """
     import inspect
 
     from ui import runner
     src = inspect.getsource(runner)
-    assert 'plan_cfg["lipsync"] = requested_ls' in src, (
-        "ui/runner.py no longer carries the requested lip-sync model into the "
-        "stage plan; an `auto` job will render a bar with no Lip sync node")
+    assert 'plan_cfg["lipsync"] = requested_ls' not in src, (
+        "ui/runner.py is padding the stage plan with a lip-sync node again")
+    # By attribute, not by string: the NAME survives in the comment that
+    # records why the function went, and should.
+    assert not hasattr(runner, "_probe_and_pick"), "auto selection is back"
 
 
 @pytest.mark.parametrize("name", sorted(P.CLIP_PHASE_LABELS) + ["P5_SEGMENT"])

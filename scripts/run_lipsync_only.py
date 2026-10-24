@@ -26,7 +26,7 @@ from models.lipsync import LipSyncRequest, get_lipsync
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", required=True,
-                    choices=("wav2lip", "musetalk", "latentsync", "lipgan"))
+                    choices=("wav2lip", "musetalk", "latentsync"))
     ap.add_argument("--stem", default="2vxQaT0Fy-c_1min",
                     help="Video stem under data/mix/<stem>.dubbed.{mp4,wav}")
     ap.add_argument("--data-dir", default=str(ROOT / "data"))
@@ -63,8 +63,14 @@ def main() -> int:
     elif args.model == "latentsync":
         kwargs["python_bin"] = "/data1/dipak_data/miniconda3/envs/latentsync/bin/python"
     elif args.model == "wav2lip":
-        # cut peak RAM/VRAM by half.
-        kwargs["resize_factor"] = int(os.environ.get("WAV2LIP_RESIZE_FACTOR", "2"))
+        # Unset by default since 2026-10-22, so the adapter's own ceiling
+        # applies (native at or below 1080p, halved above). This used to
+        # default the env var to "2", which passed an EXPLICIT 2 on every run
+        # -- and an explicit value wins over the ceiling, so this script
+        # alone would have kept halving 720p sources after the default
+        # changed. Set WAV2LIP_RESIZE_FACTOR to pin it deliberately.
+        if os.environ.get("WAV2LIP_RESIZE_FACTOR"):
+            kwargs["resize_factor"] = int(os.environ["WAV2LIP_RESIZE_FACTOR"])
         kwargs["wav2lip_batch_size"] = int(os.environ.get("WAV2LIP_BATCH", "4"))
         kwargs["face_det_batch_size"] = int(os.environ.get("WAV2LIP_FD_BATCH", "4"))
 

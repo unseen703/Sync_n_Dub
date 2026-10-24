@@ -1,63 +1,27 @@
 """Face-tracker registry — currently ByteTrack only (plan.md default)."""
 from __future__ import annotations
 
-import importlib
-import inspect
-from typing import Type
-
+from ..._registry import make_registry
 from ..base import BaseFaceTracker, FaceTracks
 
 _REGISTRY_SPEC: dict[str, tuple[str, str]] = {
     "bytetrack": (".bytetrack_adapter", "ByteTrackTracker"),
 }
 
+# `pass_device=False`: a tracker is pure geometry over boxes the detector
+# already produced, so `get_tracker` has no `device` parameter at all.
+_registry = make_registry(
+    package=__name__,
+    spec=_REGISTRY_SPEC,
+    noun="face tracker",
+    base=BaseFaceTracker,
+    import_noun="Face tracker",
+    import_detail="is not installed. Install with `pip install supervision`.",
+    pass_device=False,
+)
 
-def _load(key: str) -> Type[BaseFaceTracker]:
-    module_path, cls_name = _REGISTRY_SPEC[key]
-    module = importlib.import_module(module_path, package=__name__)
-    return getattr(module, cls_name)
-
-
-def available_trackers() -> list[str]:
-    return sorted(_REGISTRY_SPEC)
-
-
-def _accepted_kwargs(cls: Type[BaseFaceTracker]) -> set[str]:
-    sig = inspect.signature(cls.__init__)
-    if any(p.kind is p.VAR_KEYWORD for p in sig.parameters.values()):
-        return set()
-    return {
-        p.name for p in sig.parameters.values()
-        if p.name != "self"
-        and p.kind in (p.KEYWORD_ONLY, p.POSITIONAL_OR_KEYWORD)
-    }
-
-
-def get_tracker(name: str, **kwargs) -> BaseFaceTracker:
-    key = name.strip().lower()
-    if key not in _REGISTRY_SPEC:
-        raise ValueError(
-            f"Unknown face tracker {name!r}. "
-            f"Available: {', '.join(available_trackers())}"
-        )
-    try:
-        cls = _load(key)
-    except ImportError as e:
-        raise ImportError(
-            f"Face tracker {key!r} is not installed. "
-            f"Install with `pip install supervision`. Original error: {e}"
-        ) from e
-    accepted = _accepted_kwargs(cls)
-    if accepted:
-        unknown = set(kwargs) - accepted
-        if unknown:
-            import warnings
-            warnings.warn(
-                f"{cls.__name__} does not accept kwargs {sorted(unknown)!r}; dropping."
-            )
-        kwargs = {k: v for k, v in kwargs.items() if k in accepted}
-    return cls(**kwargs)
-
+available_trackers = _registry.available
+get_tracker = _registry.get
 
 __all__ = [
     "BaseFaceTracker",

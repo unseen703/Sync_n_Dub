@@ -674,3 +674,71 @@ def test_apply_after_a_successful_stage_is_not_a_409(client, monkeypatch):
 
     r = client.post(f"/api/jobs/{root.name}/edits/apply")
     assert r.status_code != 409, f"still 409 after a good stage: {r.text}"
+
+
+# ---------------------------------------------------------------------------
+# per-cue speed: shown on the script, and actually applied by the replay
+# ---------------------------------------------------------------------------
+
+def test_an_untouched_cue_reports_speed_1(client):
+    """`slot / target_duration_s`, and stage 9c makes those equal."""
+    root = _job(client.data_dir, **BODHAN)
+    rows = client.get(f"/api/jobs/{root.name}/agent/script").json()["segments"]
+    assert rows and all(r["speed"] == 1.0 for r in rows)
+    assert all(r["staged_speed"] is None for r in rows)
+
+
+def test_a_staged_speed_change_is_visible_on_its_cues(client):
+    """The factor is knowable without running anything — `set_speed` names
+    its segments — so the script can show it before a GPU minute is spent."""
+    root = _job(client.data_dir, **BODHAN)
+    pending = root / "edits" / "pending.json"
+    pending.parent.mkdir(parents=True, exist_ok=True)
+    pending.write_text(json.dumps({
+        "version": 1, "job_id": root.name, "ops": [
+            {"op": "set_speed", "scope": {"segments": ["seg001", "seg002"]},
+             "params": {"factor": 1.2}},
+        ], "segments": ["seg001", "seg002"], "turns": [{"message": "faster"}],
+    }))
+    rows = {r["id"]: r for r in
+            client.get(f"/api/jobs/{root.name}/agent/script").json()["segments"]}
+    assert rows["seg001"]["staged_speed"] == 1.2
+    assert rows["seg002"]["staged_speed"] == 1.2
+    assert rows["seg000"]["staged_speed"] is None
+    assert rows["seg003"]["staged_speed"] is None
+
+
+def test_set_speed_shortens_the_slot_the_timing_plan_reads():
+    """The mechanism, asserted directly.
+
+    `set_speed` does not speed anything up by itself — it shortens
+    `target_duration_s`, and `backend/timing.py::naive_slot` then fits the
+    same clip into the smaller slot. That only happens when the producer was
+    given `use_target_duration=True`, which is why losing `timing_params` on
+    a replay made this op a no-op end to end (see
+    `tests/test_ui_backend_sync.py`).
+    """
+    from backend import edits as E
+
+    data = {"segments": [
+        {"id": "a", "start": 0.0, "end": 10.0, "target_duration_s": 10.0,
+         "final_text": "x"},
+    ]}
+    op = E.EditOp(op="set_speed", scope=E.Scope(segments=["a"]),
+                  params={"factor": 2.0})
+
+    # The handler directly: the point is the arithmetic, not the plumbing.
+    class _Applied:
+        changes: list = []
+        warnings: list = []
+        dirty_from = "tts"
+
+    E._h_set_speed(data, ["a"], op, _Applied(), None, None)
+
+    seg = data["segments"][0]
+    assert seg["target_duration_s"] == 5.0, "a 2x speed-up must halve the slot"
+    assert seg["tts_rate_override"] == 2.0
+    # The cap travels with it, or the stretch clamps the edit back to +-10%
+    # and it arrives as a budget_violation instead of as the speed-up asked
+    # for.
+    assert seg["tts_max_stretch"] >= 1.0

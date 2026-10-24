@@ -1,9 +1,10 @@
 """Bodhan Indic-Transliterate adapter.
 
 Same chat-shaped endpoint as MT, with `model=indic-transliterate`. Input and
-output are the same language — only `target_script` changes (plan §5 /
-reference.py). Falls back to the MT endpoint when a dedicated translit
-endpoint is not configured.
+output are the same language — only `target_script` changes (plan §5; the
+`reference.py` snippet this used to cite was deleted on 2026-10-23, the live
+shape is in `_post_one` below). Falls back to the MT endpoint when a
+dedicated translit endpoint is not configured.
 
 Env (loaded from `.env`):
   BODHAN_TRANSLIT_URL   (default: BODHAN_MT_URL or https://api.bodhan.ai/v1)
@@ -13,19 +14,18 @@ Env (loaded from `.env`):
 from __future__ import annotations
 
 import logging
-import os
 import time
 from typing import List, Optional
 
+from .._bodhan import BodhanClientMixin
 from .base import BaseTransliterator, TranslitRequest, TranslitResult, TranslitSegment
 
 log = logging.getLogger(__name__)
 
-DEFAULT_URL = "https://api.bodhan.ai/v1"
 DEFAULT_MODEL = "indic-transliterate"
 
 
-class BodhanTransliterate(BaseTransliterator):
+class BodhanTransliterate(BodhanClientMixin, BaseTransliterator):
     name = "bodhan"
 
     def __init__(
@@ -41,44 +41,26 @@ class BodhanTransliterate(BaseTransliterator):
         max_backoff_s: float = 60.0,
     ):
         super().__init__(device=device)
-        self.base_url = (
-            base_url
-            or os.getenv("BODHAN_TRANSLIT_URL")
-            or os.getenv("BODHAN_MT_URL")
-            or DEFAULT_URL
-        ).rstrip("/")
-        self.api_key = (
-            api_key
-            or os.getenv("BODHAN_TRANSLIT_KEY")
-            or os.getenv("BODHAN_MT_KEY")
+        # Transliteration shares MT's host, and most installs only ever set
+        # the MT pair — so `BODHAN_MT_URL` / `BODHAN_MT_KEY` are accepted as
+        # the fallback for this service's own variables.
+        self._init_bodhan(
+            env_prefix="TRANSLIT", default_model=DEFAULT_MODEL,
+            base_url=base_url, api_key=api_key, model=model,
+            timeout_s=timeout_s, max_retries=max_retries,
+            min_interval_s=min_interval_s, max_backoff_s=max_backoff_s,
+            url_fallback_env="BODHAN_MT_URL",
+            key_fallback_env="BODHAN_MT_KEY",
         )
-        self.model = model or os.getenv("BODHAN_TRANSLIT_MODEL") or DEFAULT_MODEL
-        self.timeout_s = timeout_s
-        self.max_retries = int(os.getenv("BODHAN_MAX_RETRIES", max_retries))
-        self.min_interval_s = float(os.getenv("BODHAN_MIN_INTERVAL_S", min_interval_s))
-        self.max_backoff_s = float(os.getenv("BODHAN_MAX_BACKOFF_S", max_backoff_s))
-        self._session = None
-        self._last_post_ts = 0.0
 
     def _ensure_loaded(self) -> None:
-        if self._loaded:
-            return
-        if not self.api_key:
-            raise RuntimeError(
+        if not self._ensure_bodhan_session(
+            missing_key_message=(
                 "BODHAN_TRANSLIT_KEY (or BODHAN_MT_KEY) is not set. "
                 "Add it to .env or pass api_key=…"
-            )
-        try:
-            import requests
-        except ImportError as e:
-            raise RuntimeError("`pip install requests` for the Bodhan adapter.") from e
-        self._session = requests.Session()
-        self._session.headers.update({
-            "Authorization": f"Bearer {self.api_key}",
-            "Accept": "application/json",
-            "Content-Type": "application/json",
-        })
-        self._loaded = True
+            ),
+        ):
+            return
         log.info("bodhan translit: base_url=%s model=%s", self.base_url, self.model)
 
     def transliterate(
@@ -161,15 +143,3 @@ class BodhanTransliterate(BaseTransliterator):
             f"Bodhan translit failed after {self.max_retries} retries at {url}"
         )
 
-    def _pace(self) -> None:
-        gap = time.monotonic() - self._last_post_ts
-        if gap < self.min_interval_s:
-            time.sleep(self.min_interval_s - gap)
-
-    def _backoff(self, attempt: int, retry_after: Optional[str]) -> float:
-        if retry_after:
-            try:
-                return max(float(retry_after), 1.0)
-            except ValueError:
-                pass
-        return min(2 ** attempt, self.max_backoff_s)

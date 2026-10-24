@@ -28,6 +28,13 @@ export interface Stage {
   state: StageState;
   started_at: string | null;
   wall_s: number | null;
+  /**
+   * Planned but deliberately not run by THIS submission — stage 9h on a
+   * draft job, where lip-sync is a separate, explicit act. It stays
+   * `pending` when the run finishes rather than resolving to `skipped`, so
+   * the ribbon can say "still to come" instead of counting it as done.
+   */
+  deferred?: boolean;
 }
 
 /** One pill in the ribbon. `ui/progress.py::PHASE_GROUPS` sets the order. */
@@ -280,6 +287,12 @@ export interface LipsyncModelOption {
   label: string;
   note?: string;
   speed?: string;
+  /**
+   * False when nobody has timed this model on this host. The estimate beside
+   * it is then the dub alone, and saying so is the point: an unmeasured
+   * model used to render as the cheapest row on the list.
+   */
+  measured?: boolean;
 }
 
 /** One of the four delivery types the new-job form offers. */
@@ -412,7 +425,14 @@ export interface LipsyncReadiness {
   already_rendered: boolean;
   /** Always true: the operator names the model, and the POST 422s without one. */
   model_required: boolean;
+  /** Registry ids. What the POST accepts. */
   models: string[];
+  /**
+   * The same ids with a label and a caveat. Optional because a job page can
+   * be open against a server that predates it — the panel falls back to
+   * `models`, which is why that field stays.
+   */
+  model_rows?: LipsyncModelOption[];
   clip_s: number | null;
   max_lipsync_s: number;
   estimates: Record<string, string | null>;
@@ -551,7 +571,16 @@ export interface AgentField<T> {
 export interface AgentSpeaker {
   id: string;
   label: string | null;
-  gender: string | null;
+  /**
+   * `{current, staged}` like the other two, not a bare string.
+   *
+   * A gender edit typed into the chat box was the one staged change with
+   * nowhere on screen to appear — "make SPEAKER_00 female" looked like it
+   * had done nothing until it was applied and the dub came back in a
+   * different voice. `_h_set_gender` also picks a voice for the new gender,
+   * and that half arrives separately through `voice.staged`.
+   */
+  gender: AgentField<string>;
   speech_s: number | null;
   voice: AgentField<string>;
   tone: AgentField<string>;
@@ -612,6 +641,23 @@ export interface AgentScriptRow {
   tts_style: string | null;
   /** The pending set would rewrite this cue. */
   staged: boolean;
+  /**
+   * The staged wording, when it is known without running anything — a
+   * `set_text` the user typed. `null` for a change whose result only exists
+   * after the LLM runs (`retranslate`, `set_tone`), so the panel can tell
+   * "this will change, text unknown" from "this will read exactly thus".
+   */
+  staged_text: string | null;
+  /**
+   * How fast this cue is spoken, as a factor of its own slot — 1.0 unless an
+   * edit moved it. Derived server-side from `slot / target_duration_s`,
+   * which is the ratio the listener hears, rather than from
+   * `tts_rate_override` (the rate the ENGINE was asked for, which on a UI
+   * run is never sent at all).
+   */
+  speed: number;
+  /** The factor a staged `set_speed` would apply. Null when none is staged. */
+  staged_speed: number | null;
 }
 
 export interface AgentScript {
@@ -647,4 +693,63 @@ export interface AgentAction {
 export interface AgentPrompt {
   text: string;
   does: string;
+}
+
+/**
+ * Stage 9i — face restoration over a finished lip-sync render.
+ *
+ * `can_start` and `blockers` come from the server rather than being
+ * re-derived here, so the button's disabled state and its tooltip cannot
+ * drift from what `POST .../enhance` enforces. Same contract as
+ * `LipsyncReadiness`.
+ */
+export interface EnhanceReadiness {
+  can_start: boolean;
+  blockers: string[];
+  already: boolean;
+  status: EnhanceStatus;
+  /**
+   * Every lip-sync output in the job, DIRECTORY-QUALIFIED
+   * (`lipsync_asd/x.mp4`). Restoration never reads which adapter drew the
+   * mouths, so which render to clean is a choice — and an A/B'd job holds
+   * the same stem in two folders, where a bare name picks one at random.
+   */
+  renders: string[];
+  render_id?: string | null;
+  render_name?: string | null;
+  render?: string | null;
+  width?: number | null;
+  height?: number | null;
+  frames?: number | null;
+  /** `[low, high]` seconds restoring only the changed frames. */
+  estimate_s: [number, number] | null;
+  /** The same for every frame — roughly 5x the gated band. */
+  estimate_s_ungated: [number, number] | null;
+}
+
+export interface EnhanceStatus {
+  state: 'idle' | 'running' | 'done' | 'failed';
+  error?: string;
+  video?: string;
+  frames?: number;
+  restored?: number;
+  passed_through?: number;
+  changed_frames?: number | null;
+  gated?: boolean;
+  strength?: number;
+  wall_s?: number;
+  s_per_frame?: number;
+  expected_s?: number | null;
+  started_at?: number;
+}
+
+export interface EnhanceOptions {
+  /** 0..1 blend toward the original. NOT GFPGAN's `weight`, which is inert. */
+  strength?: number;
+  /** Restore only the frames lip-sync changed. Default true. */
+  gated?: boolean;
+  scale?: 'same' | '2x';
+  only_center_face?: boolean;
+  /** Directory-qualified id from `EnhanceReadiness.renders`. */
+  render?: string;
 }

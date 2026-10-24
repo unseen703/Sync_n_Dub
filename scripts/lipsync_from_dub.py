@@ -46,6 +46,11 @@ def main() -> int:
                     help="video carrying the DUBBED audio track")
     ap.add_argument("--job-id", required=True)
     ap.add_argument("--model", default="musetalk")
+    # Kept apart from the ASD-gated run by DIRECTORY: `run_lipsync` names
+    # the output file itself, so two renders of one job into `lipsync/`
+    # would collide and the second would silently win.
+    ap.add_argument("--out-dir", default=None,
+                    help="where to write; defaults to <job>/lipsync")
     ap.add_argument("--gpus", type=int, default=2,
                     help="time-shard across this many cards. Each shard does "
                          "its own face-detection smoothing, so the join can "
@@ -101,9 +106,11 @@ def main() -> int:
         merged.write_text(json.dumps({"segments": [], "extra": {}}))
 
     t0 = time.time()
+    out_dir = Path(a.out_dir) if a.out_dir else (job / "lipsync")
+    out_dir.mkdir(parents=True, exist_ok=True)
     r = run_lipsync(merged, model=a.model, source_video=src,
                     driving_audio=wav, pre_muxed_video=dub,
-                    out_dir=job / "lipsync", num_gpus=a.gpus)
+                    out_dir=out_dir, num_gpus=a.gpus)
     dt = time.time() - t0
 
     out = Path(r.out_video) if r.out_video else None

@@ -48,7 +48,8 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 from . import jobs as _jobs
 from .align import (align_asr, align_tts_segments, apply_alignment_to_asr,
                     attach_visemes)
-from .asd import assign_faces_to_turns, assignments_to_jsonable, score_asd
+from .asd import (SCORES_SUFFIX as ASD_SCORES_SUFFIX, assign_faces_to_turns,
+                  assignments_to_jsonable, save_scores_npz, score_asd)
 from .asr import transcribe as asr_transcribe
 from .codemix import codemix_segments
 from .diarize import diarize as diarize_stage
@@ -338,6 +339,84 @@ def _speaker_face_tracks(out_root: Path, video: Path) -> Dict[str, tuple]:
         return {}
 
 
+#: Lip-sync models that honour a supplied per-frame target list. MuseTalk
+#: takes it through its own `--use_saved_coord` pickle; Wav2Lip and
+#: LatentSync ignore it rather than half-honouring it, so building one for
+#: them would spend a landmark pass per frame to produce nothing.
+COORD_LIST_MODELS = ("musetalk",)
+
+
+def _asd_coord_list(out_root: Path, video: Path, model: str, *,
+                    bbox_shift: int = 0, device: Optional[str] = None):
+    """Per-frame boxes for the SPEAKING face, or None.
+
+    Nothing in the lip-sync adapters picks the speaking face. Wav2Lip takes
+    the first S3FD detection (`d = d[0]`) and MuseTalk vendors the same
+    face_detection lineage plus a whole-frame DWPose estimate that is never
+    matched to the box it is paired with — so on a multi-face shot both
+    animate an arbitrary face, and a person who is listening gets a moving
+    mouth. `backend/lipsync_targets.py` answers both halves on our side.
+
+    Discovered from the job folder rather than threaded in, for the reason
+    `_speaker_face_tracks` above gives: `run_post_mt_stages` is also the edit
+    agent's replay entry point, and there stages 5 and 6 ran in an EARLIER
+    process and only their files survive. Best-effort throughout — a missing
+    detector, a missing ASD pass or a corrupt file all mean the adapter
+    falls back to its own choice, which is a worse answer and not a failure.
+
+    Returns `(coord_list, stats)` or None.
+    """
+    if model not in COORD_LIST_MODELS:
+        return None
+    try:
+        npz = (sorted((out_root / "faces").glob(f"{video.stem}.*.npz"))
+               or sorted((out_root / "faces").glob("*.npz")))
+        scores = (sorted((out_root / "asd").glob(
+                      f"{video.stem}.*{ASD_SCORES_SUFFIX}"))
+                  or sorted((out_root / "asd").glob(f"*{ASD_SCORES_SUFFIX}")))
+        if not npz or not scores:
+            log.warning(
+                "lipsync: no face tracks + per-frame ASD scores in %s, so %s "
+                "will choose a face by itself — on a multi-face shot that is "
+                "whoever it finds first, not whoever is speaking. Stages 5 "
+                "and 6 must have run, and scores are only written from "
+                "2026-10-22; for an older job use "
+                "scripts/lipsync_asd_gated.py, which re-scores.",
+                out_root.name, model)
+            return None
+
+        from models.faces.base import FaceTracks
+        from .asd import load_scores_npz
+        from .lipsync_targets import build_coord_list
+
+        tracks = FaceTracks.load_npz(npz[0])
+        asd = load_scores_npz(scores[0])
+        coords, stats = build_coord_list(
+            video, tracks, asd, bbox_shift=bbox_shift, device=device or "cpu")
+        animated = stats.get("landmarked", 0) + stats.get("fallback_box", 0)
+        # "It ran" and "it animated the right face" are different claims, and
+        # only the second one matters.
+        log.info("lipsync: ASD-gated targets — %d frame(s), %d animated, "
+                 "%d passed through unchanged, tracks=%s",
+                 len(coords), animated, stats.get("placeholder", 0),
+                 ",".join(stats.get("track_ids") or []) or "-")
+        if not animated:
+            # Every frame would be written unchanged. That is the correct
+            # answer to "nobody on screen is speaking", but it is also what a
+            # broken ASD pass looks like, and the two are worth separating
+            # loudly rather than shipping a render identical to its input.
+            log.error("lipsync: no frame has a confirmed speaking face, so "
+                      "every frame would pass through unchanged. Check the "
+                      "ASD scores before blaming the lip-sync.")
+            return None
+        return coords, stats
+    except Exception as exc:                                  # noqa: BLE001
+        log.warning("lipsync: could not build ASD-gated targets (%s: %s); "
+                    "%s will choose a face by itself",
+                    type(exc).__name__, exc, model)
+        return None
+
+
 def run_post_mt_stages(
     mt_json: Optional[Path],
     *,
@@ -359,6 +438,17 @@ def run_post_mt_stages(
     duration_voice: str = "default",
     duration_safety_margin_s: float = 0.10,
     duration_cache_dir: Optional[Path] = None,
+    # 9c2. Ask an LLM to shorten lines 9c predicted will overrun their slot.
+    # Off by default: it spends a call per over-long segment and rewrites
+    # the user's translation, which is not something to do unasked.
+    condense_overlong_text: bool = False,
+    condense_model: Optional[str] = None,     # None → condense.DEFAULT_MODEL
+    # Rewrite only what the mix cannot speed up far enough to fit. 1.5 by
+    # request; deliberately NOT `--speed-cap` (1.8) — see condense.py.
+    condense_speed_cap: float = 1.5,
+    condense_tolerance: float = 0.0,          # slack above the cap
+    # Segments per 9c2 request. None → condense.DEFAULT_BATCH_SIZE (2).
+    condense_batch_size: Optional[int] = None,
     # 9d voice assignment per speaker
     voice_engine: Optional[str] = None,
     voice_catalog_json: Optional[Path] = None,
@@ -424,6 +514,12 @@ def run_post_mt_stages(
     # 9h lip sync
     lipsync_model: Optional[str] = None,
     lipsync_num_gpus: Optional[int] = None,
+    # 9i face restoration over the render. A NAMED parameter, not a lookup
+    # into a `config` dict — this function has no `config` in scope, and a
+    # `config.get(...)` here raised NameError on every run that reached it.
+    # `tests/test_ui_backend_sync.py` requires every UI kwarg to be a named
+    # pipeline parameter anyway.
+    restore_model: Optional[str] = None,
     # Explicit rather than riding the shared `batch_size` adapter kwarg:
     # stage 4 picks that one too, so a lip-sync tuning value would also be
     # handed to the diarizer. `tests/test_ui_backend_sync.py` requires every
@@ -532,6 +628,44 @@ def run_post_mt_stages(
             out.duration_estimated_violations = (
                 d.get("extra", {}).get("duration", {}).get("estimated_violations", 0)
             )
+
+            # 9c2. Shorten what will not fit. Runs here because 9c has just
+            # worked out WHICH segments overrun and by how much, and before
+            # 9e because the point is to synthesise less speech rather than
+            # to speed up speech already synthesised.
+            #
+            # It is the only lever left on this engine. Measured 2026-10-21
+            # on svwrTOm55y4: 50.9s of Hindi for 30.6s of slots, needing
+            # 1.66x against a 1.5x tempo cap -- 3 of 5 segments clamped and
+            # the dub ~8s long. Bodhan has no speed parameter (their API
+            # docs list model/input/voice/instructions and nothing else,
+            # checked 2026-10-22), so the audio cannot be made shorter after
+            # the fact. The sentence has to be.
+            #
+            # Marker on ONE line: `ui/progress.py` scrapes these and
+            # `tests/test_ui_progress.py` greps the literal, so a wrapped
+            # marker loses its closing `===` and silently stops matching.
+            if condense_overlong_text:
+                log.info("=== stage 9c2: shortening over-long lines ===")
+                try:
+                    from .condense import condense_overlong
+                    c = condense_overlong(
+                        mt_json,
+                        language=target_language,
+                        voice=duration_voice,
+                        cache_dir=duration_cache_dir,
+                        model=condense_model,
+                        speed_cap=condense_speed_cap,
+                        tolerance=condense_tolerance,
+                        batch_size=condense_batch_size,
+                    )
+                    out.extra.setdefault("condense", {}).update(c)
+                except Exception as e:                   # noqa: BLE001
+                    # A shortening pass is an optimisation. Losing it costs
+                    # the fit, not the dub.
+                    log.warning("condense stage failed (%s); keeping the "
+                                "translation as it is", e)
+                    out.extra.setdefault("condense", {})["error"] = str(e)
 
     # 9b2. Per-segment delivery style from the source speaker's emotion.
     # Runs after the text is final and before any voice decision, because it
@@ -945,6 +1079,21 @@ def run_post_mt_stages(
         else:
             log.info("=== stage 9h: lip sync (%s) ===", lipsync_model)
             try:
+                # WHICH face to animate. Without this the adapter picks one
+                # itself — the first detection — so on a two-person shot the
+                # listener's mouth moves and the speaker's does not, at exit
+                # code 0 with every artifact looking correct.
+                #
+                # INSIDE the try, so a failure here is recorded as a
+                # lip-sync error instead of spending 8-21x the clip length
+                # producing exactly the artifact this exists to prevent.
+                _targets = _asd_coord_list(
+                    out_root, video, lipsync_model,
+                    bbox_shift=int(adapter_kwargs.get("bbox_shift") or 0),
+                    device=device)
+                _coords = _targets[0] if _targets else None
+                if _targets:
+                    out.extra["lipsync_targets"] = _targets[1]
                 ls = run_lipsync(
                     lipsync_merged_json,
                     model=lipsync_model,
@@ -954,6 +1103,7 @@ def run_post_mt_stages(
                     pre_muxed_video=out.mix_mp4,
                     num_gpus=lipsync_num_gpus,
                     window=lipsync_window,
+                    coord_list=_coords,
                     lipsync_kwargs={
                         **_pick(adapter_kwargs,
                                 ("repo_path", "checkpoint", "python_bin",
@@ -984,6 +1134,35 @@ def run_post_mt_stages(
             except Exception as e:
                 log.warning("lipsync failed: %s", e)
                 out.lipsync_error = str(e)
+
+    # --- stage 9i: face restoration over the render -----------------------
+    #
+    # Off unless asked for. It is orthogonal to lip-sync -- it takes a video
+    # and returns a video and does not care which adapter drew the mouths --
+    # and it is expensive in its own right: measured 2026-10-22 at 1156 s
+    # against the MuseTalk render's 447 s, i.e. 2.6x the cost of the thing it
+    # cleans. So `--restore gfpgan`, never implied by `--lipsync`.
+    #
+    # NEVER fails the run. Stage 9h's render is on disk and is a usable dub;
+    # losing it because a post-pass failed would be the worse trade, which is
+    # the same call `wav2lip_hd`'s stage 2 made.
+    if restore_model and out.lipsync_mp4:
+        log.info("=== stage 9i: face restoration (%s) ===", restore_model)
+        try:
+            from .restore import run_restore
+            _r = run_restore(Path(out_root), model=str(restore_model),
+                             render=Path(out.lipsync_mp4),
+                             num_gpus=lipsync_num_gpus)
+            out.extra["restore"] = _r
+            if _r.get("ok") and _r.get("video"):
+                out.lipsync_mp4 = _r["video"]
+            else:
+                log.warning("restore: stage 9i did not produce a video (%s); "
+                            "keeping the plain render", _r.get("error"))
+        except Exception as e:                            # noqa: BLE001
+            log.warning("restore: stage 9i failed (%s); keeping the plain "
+                        "render", e)
+            out.extra["restore"] = {"ok": False, "error": str(e)}
 
     out.extra["speaker_voice_map"] = speaker_voice_map
     if speaker_voice_map and mt_json is not None and Path(mt_json).is_file():
@@ -1284,6 +1463,14 @@ def _run_pipeline(
     duration_adjust: bool = False,
     duration_voice: str = "default",
     duration_safety_margin_s: float = 0.10,
+    # 9c2. LLM rewrite of lines the tempo stretch cannot fit. Off by default
+    # on the CLI; the UI turns it ON (`ui/presets.py`), since a UI run has no
+    # operator watching stage 9c's overrun warnings go past.
+    condense_overlong_text: bool = False,
+    condense_model: Optional[str] = None,
+    condense_speed_cap: float = 1.5,
+    condense_tolerance: float = 0.0,
+    condense_batch_size: Optional[int] = None,
     # Voice assignment per speaker (plan §8).
     voice_engine: Optional[str] = None,           # "indic-speak" | "indicf5"
     voice_catalog_json: Optional[Path] = None,
@@ -1336,6 +1523,10 @@ def _run_pipeline(
     mux_video: bool = True,
     # Lip sync (requires mix).
     lipsync_model: Optional[str] = None,           # wav2lip | musetalk | latentsync
+    restore_model: Optional[str] = None,          # 9i: gfpgan | None. Never
+                                                  # implied by --lipsync: it
+                                                  # measured 2.6x the render
+                                                  # it cleans (1156s vs 447s)
     lipsync_num_gpus: Optional[int] = None,       # None → ONE gpu, the freest
     lipsync_batch_size: Optional[int] = None,     # None → the adapter's own default
                                                   # device; 1 → single-GPU; N>1 →
@@ -1387,6 +1578,11 @@ def _run_pipeline(
             "vc":              vc_model,
             "voice_engine":    voice_engine,
             "lipsync":         lipsync_model,
+            # 9i. Recorded because `ui/progress.plan_stages` branches on it:
+            # a switch the planner reads but the manifest does not hold means
+            # a finished job re-plans to a different shape than it ran, which
+            # is the drift `tests/test_ui_backend_sync.py` exists to catch.
+            "restore":         restore_model,
             "stem_model":      stem_model,
             "skip_stems":      skip_stems,
             "timing_producer": timing_producer,
@@ -1411,6 +1607,7 @@ def _run_pipeline(
             "tts_style":       tts_style,
             "emotion":         emotion_model,
             "duration_adjust": bool(duration_adjust),
+            "condense_overlong_text": bool(condense_overlong_text),
             "tts_force_align": bool(tts_force_align),
             "visemes":         bool(attach_visemes_stage),
             "mix":             bool(mix),
@@ -1638,6 +1835,23 @@ def _run_pipeline(
                 assignments_json.write_text(
                     json.dumps(assignments_to_jsonable(assignments), indent=2)
                 )
+                # The PER-FRAME scores, which this stage used to compute and
+                # discard. Stage 9h needs them to work out which face to
+                # animate (`backend/lipsync_targets.py`), and it runs in a
+                # different call on an edit replay — where stage 6 does not
+                # re-run — so in-memory is not enough. Re-deriving them there
+                # would mean a second TalkNet pass over the whole video.
+                try:
+                    save_scores_npz(
+                        asd_result,
+                        asd_dir / f"{video.stem}.{asd_model}{ASD_SCORES_SUFFIX}")
+                except Exception as e:                    # noqa: BLE001
+                    # Never fatal: the per-segment assignments are what the
+                    # rest of the pipeline reads, and 9h degrades to its own
+                    # face choice with a warning.
+                    log.warning("asd: could not persist per-frame scores "
+                                "(%s); stage 9h will fall back to the "
+                                "model's own face choice", e)
                 result.asd_model = asd_model
                 result.assignments_json = assignments_json
                 result.num_on_screen = sum(1 for a in assignments if a.on_screen)
@@ -1783,6 +1997,12 @@ def _run_pipeline(
                 mt_json = mt_dir / f"{video.stem}.{mt_model}.{mt_target_language}.mt.json"
                 mt_txt = mt_dir / f"{video.stem}.{mt_model}.{mt_target_language}.transcript.txt"
                 write_mt_outputs(mt_json, mt_txt, asr_result, mt_result)
+                # v000. The pristine translation, before any post-MT stage
+                # rewrites it in place. Everything after this point edits
+                # the same file, so without this snapshot the original
+                # stops existing as soon as 9b runs.
+                from .mt_versions import snapshot as _mt_snapshot
+                _mt_snapshot(mt_json, "original")
                 result.mt_model = mt_model
                 result.mt_target_language = mt_target_language
                 result.mt_target_script = mt_target_script
@@ -1852,6 +2072,7 @@ def _run_pipeline(
         me_stem=me_stem,
         reference_audio_src=dia_input,
         out_root=post_mt_out_root,
+        restore_model=restore_model,
         target_language=mt_target_language,
         target_script=mt_target_script,
         source_language=asr_language,
@@ -1864,6 +2085,11 @@ def _run_pipeline(
         duration_voice=duration_voice,
         duration_safety_margin_s=duration_safety_margin_s,
         duration_cache_dir=DURATION_MODEL_DIR,
+        condense_overlong_text=condense_overlong_text,
+        condense_model=condense_model,
+        condense_speed_cap=condense_speed_cap,
+        condense_tolerance=condense_tolerance,
+        condense_batch_size=condense_batch_size,
         voice_engine=voice_engine,
         voice_catalog_json=voice_catalog_json,
         allow_voice_reuse=allow_voice_reuse,

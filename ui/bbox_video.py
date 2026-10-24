@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sys
 import threading
 import time
 from pathlib import Path
@@ -73,88 +74,166 @@ def status(job_root: Path) -> Dict[str, Any]:
     return {**doc, "state": state, "ready": ready}
 
 
-def render(job_root: Path, *, source: Optional[Path] = None,
-           threshold: float = SPEAK_THRESHOLD,
-           labels: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
-    """Draw the boxes. Blocking; `start()` is the background wrapper."""
+def source_clip(job_root: Path, source: Optional[Path] = None) -> Optional[Path]:
+    """The clip the boxes are drawn over."""
+    src = source or next(iter(sorted(Path(job_root).glob("videos/*.mp4"))), None)
+    return Path(src) if src and Path(src).is_file() else None
+
+
+def load_overlay(job_root: Path, src: Path):
+    """`(box_at, spk_of, spans, fps)` — everything needed to mark a frame.
+
+    Extracted from `render` so the still-frame export
+    (`scripts/asd_frames.py`) marks frames EXACTLY as the review video does.
+    Two copies of this would be two definitions of "who is speaking here",
+    and the whole point of the export is to check the one the pipeline used.
+
+    Stage 6 persists PER-SEGMENT assignments, not a per-frame score array
+    (`<stem>.<model>.assignments.json`: seg_id, speaker, face_track,
+    asd_score, on_screen, start_s, end_s). An earlier version of this module
+    looked for a `scores.npz` that is never written, so every box came out
+    grey -- the render ran, looked plausible, and showed nothing.
+
+    So a track is drawn as SPEAKING over the frames of a segment that was
+    assigned to it and marked on-screen. Outside any segment nothing is
+    known about who is talking, and those frames stay grey rather than being
+    coloured by assumption.
+    """
     import cv2
     import numpy as np
 
     from models.faces import FaceTracks
 
     job_root = Path(job_root)
-    p = paths(job_root)
-    labels = labels or {}
-
     npz = next(iter(sorted(job_root.glob("faces/*.npz"))), None)
     if npz is None:
-        return _write_status(job_root, state="failed",
-                             error="no face tracks: stage 5 did not run")
-    src = source or next(iter(sorted(job_root.glob("videos/*.mp4"))), None)
-    if src is None or not Path(src).is_file():
-        return _write_status(job_root, state="failed",
-                             error="no source clip in videos/")
+        raise FileNotFoundError("no face tracks: stage 5 did not run")
 
-    tracks = FaceTracks.load_npz(npz)
-    # Stage 6 persists PER-SEGMENT assignments, not a per-frame score array
-    # (`<stem>.<model>.assignments.json`: seg_id, speaker, face_track,
-    # asd_score, on_screen, start_s, end_s). An earlier version of this
-    # module looked for a `scores.npz` that is never written, so every box
-    # came out grey -- the render ran, looked plausible, and showed nothing.
-    #
-    # So a track is drawn as SPEAKING over the frames of a segment that was
-    # assigned to it and marked on-screen. Outside any segment nothing is
-    # known about who is talking, and those frames stay grey rather than
-    # being coloured by assumption.
+    probe = cv2.VideoCapture(str(src))
+    fps = probe.get(cv2.CAP_PROP_FPS) or 25.0
+    probe.release()
+
     spk_of: Dict[str, str] = {}
-    spans: list = []                      # (f_start, f_end, track_id, score)
+    spans: list = []                      # (f_start, f_end, track_id, score, on)
     asd_json = next(iter(sorted(job_root.glob("asd/*.assignments.json"))), None)
     if asd_json is not None:
         try:
             recs = json.loads(asd_json.read_text())
         except (OSError, ValueError):
             recs = []
-        probe = cv2.VideoCapture(str(src))
-        _fps = probe.get(cv2.CAP_PROP_FPS) or 25.0
-        probe.release()
         for a in recs:
             tid = a.get("face_track")
             if not tid:
                 continue
             tid = str(tid)
             spk_of.setdefault(tid, str(a.get("speaker") or ""))
-            spans.append((int(float(a.get("start_s") or 0.0) * _fps),
-                          int(float(a.get("end_s") or 0.0) * _fps),
+            spans.append((int(float(a.get("start_s") or 0.0) * fps),
+                          int(float(a.get("end_s") or 0.0) * fps),
                           tid, float(a.get("asd_score") or 0.0),
                           bool(a.get("on_screen"))))
 
-    def _verdict(tid: str, frame_idx: int):
-        """(colour, label-suffix) for this track at this frame."""
-        for f0, f1, t, sc, on in spans:
-            if f0 <= frame_idx <= f1:
-                if t == tid:
-                    return ((0, 220, 0) if on else (60, 60, 230),
-                            f"{sc:.2f}" + ("" if on else " off"))
-                # Another track owns this moment, so this face is not the
-                # one the pipeline believes is talking.
-                return (60, 60, 230), "-"
-        return (190, 190, 190), "?"
-
+    tracks = FaceTracks.load_npz(npz)
     box_at: Dict[int, list] = {}
     for tr in tracks.tracks:
         fr = np.asarray(tr.frames).astype(int)
         bb = np.asarray(tr.bboxes)
         for i, f in enumerate(fr):
             box_at.setdefault(int(f), []).append((tr.track_id, bb[i][:4]))
+    return box_at, spk_of, spans, fps
+
+
+def verdict(spans: list, tid: str, frame_idx: int):
+    """`(colour, label-suffix)` for this track at this frame.
+
+    Green = the pipeline believes this face is the one speaking, and it is
+    on screen. Red = somebody else owns this moment (or this track is the
+    owner but off screen). Grey = no segment covers this frame, so nothing
+    is known and nothing is claimed.
+    """
+    for f0, f1, t, sc, on in spans:
+        if f0 <= frame_idx <= f1:
+            if t == tid:
+                return ((0, 220, 0) if on else (60, 60, 230),
+                        f"{sc:.2f}" + ("" if on else " off"))
+            # Another track owns this moment, so this face is not the one
+            # the pipeline believes is talking.
+            return (60, 60, 230), "-"
+    return (190, 190, 190), "?"
+
+
+def draw_frame(frame, idx: int, *, box_at, spk_of, spans,
+               labels: Optional[Dict[str, str]] = None):
+    """Mark one decoded frame in place, and return it."""
+    import cv2
+
+    labels = labels or {}
+    h, w = frame.shape[:2]
+    thick = max(2, int(round(w / 960)))
+    fs = max(0.5, w / 1920 * 0.8)
+    for tid, bb in box_at.get(idx, []):
+        x1, y1, x2, y2 = [int(v) for v in bb]
+        colour, suffix = verdict(spans, tid, idx)
+        tag = f"{tid} {suffix}"
+        spk = spk_of.get(tid)
+        if spk:
+            tag += f" {labels.get(spk, spk)}"
+        cv2.rectangle(frame, (x1, y1), (x2, y2), colour, thick)
+        (tw, th), _ = cv2.getTextSize(tag, cv2.FONT_HERSHEY_SIMPLEX, fs, thick)
+        cv2.rectangle(frame, (x1, max(0, y1 - th - 8)),
+                      (x1 + tw + 6, y1), colour, -1)
+        cv2.putText(frame, tag, (x1 + 3, max(th, y1 - 5)),
+                    cv2.FONT_HERSHEY_SIMPLEX, fs, (0, 0, 0), thick)
+    return frame
+
+
+def render(job_root: Path, *, source: Optional[Path] = None,
+           threshold: float = SPEAK_THRESHOLD,
+           max_edge: Optional[int] = None,
+           labels: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+    """Draw the boxes. Blocking; `start()` is the background wrapper.
+
+    `max_edge` downscales the OUTPUT only. The boxes are drawn at source
+    resolution first and the marked frame is shrunk after, so the labels
+    scale with the picture instead of being rendered tiny and then
+    enlarged. A 4K source writes a 4K review video otherwise, which through
+    `cv2`'s `mp4v` encoder is hundreds of MB for a minute and tells the
+    viewer nothing a 1280-wide one does not.
+    """
+    import cv2
+
+    job_root = Path(job_root)
+    p = paths(job_root)
+    labels = labels or {}
+
+    # Face tracks BEFORE the clip, deliberately. Both are missing on an empty
+    # folder, but the common real case is a job that has its video and never
+    # ran stage 5 — and "no source clip in videos/" sends whoever reads it
+    # looking for a download problem that is not there.
+    if not any(job_root.glob("faces/*.npz")):
+        return _write_status(job_root, state="failed",
+                             error="no face tracks: stage 5 did not run")
+    src = source_clip(job_root, source)
+    if src is None:
+        return _write_status(job_root, state="failed",
+                             error="no source clip in videos/")
+    try:
+        box_at, spk_of, spans, _fps = load_overlay(job_root, src)
+    except FileNotFoundError as e:
+        return _write_status(job_root, state="failed", error=str(e))
 
     cap = cv2.VideoCapture(str(src))
     fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
     w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    # Both sides even: the writer is fine with odd ones but every downstream
+    # H.264 transcode is not (4:2:0 subsamples by two), and this file exists
+    # to be watched.
+    scale = min(1.0, max_edge / float(max(w, h))) if max_edge else 1.0
+    ow, oh = (w, h) if scale >= 1.0 else (int(w * scale) & ~1, int(h * scale) & ~1)
     p["dir"].mkdir(parents=True, exist_ok=True)
     tmp = p["dir"] / "bbox.tmp.mp4"
-    vw = cv2.VideoWriter(str(tmp), cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
+    vw = cv2.VideoWriter(str(tmp), cv2.VideoWriter_fourcc(*"mp4v"), fps, (ow, oh))
     _write_status(job_root, state="running", frames_total=total, frames_done=0)
 
     idx = 0
@@ -163,22 +242,10 @@ def render(job_root: Path, *, source: Optional[Path] = None,
             ok, frame = cap.read()
             if not ok:
                 break
-            thick = max(2, int(round(w / 960)))
-            fs = max(0.5, w / 1920 * 0.8)
-            for tid, bb in box_at.get(idx, []):
-                x1, y1, x2, y2 = [int(v) for v in bb]
-                colour, suffix = _verdict(tid, idx)
-                tag = f"{tid} {suffix}"
-                spk = spk_of.get(tid)
-                if spk:
-                    tag += f" {labels.get(spk, spk)}"
-                cv2.rectangle(frame, (x1, y1), (x2, y2), colour, thick)
-                (tw, th), _ = cv2.getTextSize(tag, cv2.FONT_HERSHEY_SIMPLEX,
-                                              fs, thick)
-                cv2.rectangle(frame, (x1, max(0, y1 - th - 8)),
-                              (x1 + tw + 6, y1), colour, -1)
-                cv2.putText(frame, tag, (x1 + 3, max(th, y1 - 5)),
-                            cv2.FONT_HERSHEY_SIMPLEX, fs, (0, 0, 0), thick)
+            frame = draw_frame(frame, idx, box_at=box_at, spk_of=spk_of,
+                               spans=spans, labels=labels)
+            if (ow, oh) != (w, h):
+                frame = cv2.resize(frame, (ow, oh), interpolation=cv2.INTER_AREA)
             vw.write(frame)
             idx += 1
             if total and idx % 50 == 0:
@@ -218,3 +285,75 @@ def start(job_root: Path, **kw) -> Dict[str, Any]:
     _write_status(job_root, state="running", frames_done=0)
     threading.Thread(target=_run, daemon=True, name="bbox-review").start()
     return status(job_root)
+
+
+# ---------------------------------------------------------------------------
+# running it by hand
+# ---------------------------------------------------------------------------
+
+def main(argv=None) -> int:
+    """Render one job's ASD review video from the command line.
+
+        $PY -m ui.bbox_video --job <job_id> --max-edge 1280
+
+    The UI reaches this through `POST /api/jobs/{id}/review-video`, which
+    runs it in a thread and polls. That is the wrong shape for a terminal —
+    it returns immediately and the caller has nothing to wait on — so this
+    entry point calls `render` directly and blocks until the file is there.
+
+    Nothing is recomputed: the face tracks (`faces/*.npz`) and the ASD
+    assignments (`asd/*.assignments.json`) are read off disk exactly as the
+    run left them, so this shows what the pipeline decided rather than what
+    a fresh detection pass would decide today.
+    """
+    import argparse
+
+    ap = argparse.ArgumentParser(description="Render a job's ASD review video.")
+    ap.add_argument("--job", required=True, help="job id under <data>/jobs/")
+    ap.add_argument("--data-dir",
+                    default=str(Path(__file__).resolve().parent.parent / "data"))
+    ap.add_argument("--max-edge", type=int, default=1280,
+                    help="downscale the output's longest edge (0 = source "
+                         "size). A 4K review video is hundreds of MB and "
+                         "shows nothing extra.")
+    ap.add_argument("--source", default=None,
+                    help="override the clip (default: <job>/videos/*.mp4)")
+    args = ap.parse_args(argv)
+
+    logging.basicConfig(level=logging.INFO,
+                        format="%(asctime)s %(levelname)-7s %(message)s",
+                        datefmt="%H:%M:%S")
+    job_root = Path(args.data_dir) / "jobs" / args.job
+    if not job_root.is_dir():
+        print(f"no such job: {job_root}", file=sys.stderr)
+        return 2
+
+    try:
+        from .speakers import read_labels
+        labels = read_labels(job_root)
+    except Exception:                                   # noqa: BLE001
+        labels = {}
+
+    t0 = time.time()
+    st = render(job_root, source=Path(args.source) if args.source else None,
+                max_edge=args.max_edge or None, labels=labels)
+    if st.get("state") != "done":
+        print(f"failed: {st.get('error')}", file=sys.stderr)
+        return 1
+
+    out = paths(job_root)["video"]
+    size = out.stat().st_size if out.is_file() else 0
+    print(f"\n{out}")
+    print(f"{st.get('frames_done')} frames · {size / 1e6:.1f} MB · "
+          f"{time.time() - t0:.1f}s")
+    # mp4v, not H.264 -- `cv2.VideoWriter` has no H.264 encoder in this
+    # build. VLC and mpv play it; Chrome and Firefox will not, so say so
+    # rather than let it look like a broken render.
+    print("codec: mp4v — plays in VLC/mpv. For a browser:\n"
+          f"  ffmpeg -i {out} -c:v libx264 -pix_fmt yuv420p "
+          f"{out.with_name('bbox.h264.mp4')}")
+    return 0
+
+
+if __name__ == "__main__":                              # pragma: no cover
+    raise SystemExit(main())

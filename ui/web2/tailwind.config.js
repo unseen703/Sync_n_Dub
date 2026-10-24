@@ -55,6 +55,15 @@ export default {
           DEFAULT: ink('--c-aqua'),
           ink: ink('--c-aqua-ink'),
         },
+        /**
+         * The STAGED value — what an unapplied edit would make something
+         * read as, shown beside the struck-through value it replaces.
+         * Distinct from `brand`, which means "active/selected"; a staged
+         * change is explicitly not yet true.
+         */
+        blue: {
+          ink: ink('--c-blue-ink'),
+        },
         ok: ink('--c-ok'),
         warn: ink('--c-warn'),
         danger: {

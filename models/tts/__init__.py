@@ -15,11 +15,26 @@ languages with 45 voices and is now the only stock-voice engine.
 """
 from __future__ import annotations
 
-import importlib
-import inspect
-from typing import Optional, Type
+from typing import Optional
 
+from .._registry import make_registry
 from .base import BaseTTS, TTSRequest, TTSResult, TTSSegment
+
+#: "Read it plainly" — the one delivery value that is NOT an engine style.
+#:
+#: Bodhan has no `neutral` in `INDIC_SPEAK_STYLES`; a neutral reading is what
+#: you get by sending no style at all (`bodhan_adapter._post_one`: `if style:
+#: instructions["style"] = style`). There was no way to ASK for that, though:
+#: the new-job form's "auto" resolves to stage 9b1 classifying a register, and
+#: the per-speaker picker offered the 14 engine styles and nothing else. So a
+#: dub could be given a register and never taken off one.
+#:
+#: This is the sentinel that means it. It is carried through the pipeline and
+#: recorded in the manifest like any other style — the operator's choice is
+#: worth keeping — and resolved to None at the moment of synthesis by
+#: `resolve_style` below. Defined here, in the registry both `backend/` and
+#: `ui/` already import, so there is one spelling of it.
+NEUTRAL_STYLE = "neutral"
 
 _REGISTRY_SPEC: dict[str, tuple[str, str]] = {
     "bodhan": (".bodhan_adapter", "BodhanTTS"),
@@ -27,56 +42,46 @@ _REGISTRY_SPEC: dict[str, tuple[str, str]] = {
 }
 
 
-def _load(key: str) -> Type[BaseTTS]:
-    module_path, cls_name = _REGISTRY_SPEC[key]
-    module = importlib.import_module(module_path, package=__name__)
-    return getattr(module, cls_name)
+_registry = make_registry(
+    package=__name__,
+    spec=_REGISTRY_SPEC,
+    noun="TTS model",
+    base=BaseTTS,
+    import_noun="TTS model",
+)
+
+available_models = _registry.available
+get_tts = _registry.get
 
 
-def available_models() -> list[str]:
-    return sorted(_REGISTRY_SPEC)
+def resolve_style(segment_style: Optional[str],
+                  document_style: Optional[str]) -> Optional[str]:
+    """The style one segment is actually synthesised with.
 
+    Two rules, in this order:
 
-def _accepted_kwargs(cls: Type[BaseTTS]) -> set[str]:
-    sig = inspect.signature(cls.__init__)
-    if any(p.kind is p.VAR_KEYWORD for p in sig.parameters.values()):
-        return set()
-    return {
-        p.name for p in sig.parameters.values()
-        if p.name != "self"
-        and p.kind in (p.KEYWORD_ONLY, p.POSITIONAL_OR_KEYWORD)
-    }
+      1. A per-segment `tts_style` beats the document-level register. That is
+         long-standing behaviour — `backend/edits.py` writes the per-segment
+         key and stage 9b1 writes the document one — and is preserved exactly.
+      2. `NEUTRAL_STYLE` resolves to None, i.e. no style in the payload.
 
-
-def get_tts(name: str, *, device: Optional[str] = None, **kwargs) -> BaseTTS:
-    key = name.strip().lower()
-    if key not in _REGISTRY_SPEC:
-        raise ValueError(
-            f"Unknown TTS model {name!r}. Available: {', '.join(available_models())}"
-        )
-    try:
-        cls = _load(key)
-    except ImportError as e:
-        raise ImportError(
-            f"TTS model {key!r} is not installed. Original error: {e}"
-        ) from e
-    accepted = _accepted_kwargs(cls)
-    if accepted:
-        unknown = set(kwargs) - accepted
-        if unknown:
-            import warnings
-            warnings.warn(
-                f"{cls.__name__} does not accept kwargs {sorted(unknown)!r}; dropping."
-            )
-        kwargs = {k: v for k, v in kwargs.items() if k in accepted}
-    return cls(device=device, **kwargs)
+    Rule 2 cannot be expressed as "set it to None", because None is what a
+    segment with no override looks like, and `seg or doc` would then fall back
+    to the very register the operator just asked to be rid of.
+    """
+    style = document_style if segment_style in (None, "") else segment_style
+    if isinstance(style, str) and style.strip().lower() == NEUTRAL_STYLE:
+        return None
+    return style
 
 
 __all__ = [
     "BaseTTS",
+    "NEUTRAL_STYLE",
     "TTSRequest",
     "TTSResult",
     "TTSSegment",
     "available_models",
     "get_tts",
+    "resolve_style",
 ]

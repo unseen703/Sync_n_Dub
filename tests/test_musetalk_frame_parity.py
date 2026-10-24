@@ -26,7 +26,12 @@ from pathlib import Path
 import pytest
 
 REPO = Path(__file__).resolve().parent.parent
-INFERENCE = REPO / "third_party" / "MuseTalk" / "scripts" / "inference.py"
+# Vendor tree moved from third_party/MuseTalk to models/lipsync/vendor/musetalk
+# on 2026-10-23 (CLAUDE.md section Lipsync upstreams). Both are legal; resolve
+# by existence so the test tracks whichever is live on this checkout.
+_CAND = [REPO / "models" / "lipsync" / "vendor" / "musetalk" / "scripts" / "inference.py",
+         REPO / "third_party" / "MuseTalk" / "scripts" / "inference.py"]
+INFERENCE = next((p for p in _CAND if p.exists()), _CAND[0])
 
 
 # --- the vendored patch ---------------------------------------------------
@@ -86,12 +91,12 @@ def test_a_truncated_video_stream_is_rejected(monkeypatch, tmp_path):
     """video 10.64 s under audio 20.02 s = 9.4 s of held picture."""
     import logging
     import backend.lipsync as L
-    from conftest import write_tone
+    from conftest import write_tiny_mp4, write_tone
     from models.tts.base import TTSResult  # noqa: F401  (import parity)
 
     # Reuse the stub harness from the sibling module.
     from test_lipsync_failure_honesty import _StubAdapter
-    src = tmp_path / "src.mp4"; src.write_bytes(b"\0" * 1024)
+    src = write_tiny_mp4(tmp_path / "src.mp4")
     wav = write_tone(tmp_path / "d.wav", 1.0, sample_rate=16000)
     merged = tmp_path / "m.json"; merged.write_text('{"segments": [], "extra": {}}')
 
@@ -115,9 +120,9 @@ def test_a_truncated_video_stream_is_rejected(monkeypatch, tmp_path):
 
 def test_matching_streams_pass(monkeypatch, tmp_path):
     import backend.lipsync as L
-    from conftest import write_tone
+    from conftest import write_tiny_mp4, write_tone
     from test_lipsync_failure_honesty import _StubAdapter
-    src = tmp_path / "src.mp4"; src.write_bytes(b"\0" * 1024)
+    src = write_tiny_mp4(tmp_path / "src.mp4")
     wav = write_tone(tmp_path / "d.wav", 1.0, sample_rate=16000)
     merged = tmp_path / "m.json"; merged.write_text('{"segments": [], "extra": {}}')
     monkeypatch.setattr(L, "get_lipsync", lambda m, **k: _StubAdapter(write=True))
@@ -344,9 +349,9 @@ def test_a_long_dub_over_a_correct_render_is_not_a_failure(monkeypatch, tmp_path
     """
     import logging
     import backend.lipsync as L
-    from conftest import write_tone
+    from conftest import write_tiny_mp4, write_tone
     from test_lipsync_failure_honesty import _StubAdapter
-    src = tmp_path / "src.mp4"; src.write_bytes(b"\0" * 1024)
+    src = write_tiny_mp4(tmp_path / "src.mp4")
     wav = write_tone(tmp_path / "d.wav", 1.0, sample_rate=16000)
     merged = tmp_path / "m.json"; merged.write_text('{"segments": [], "extra": {}}')
     monkeypatch.setattr(L, "get_lipsync", lambda m, **k: _StubAdapter(write=True))
@@ -422,14 +427,24 @@ def test_hd_stage2_is_given_the_exact_rational_frame_rate():
     approximation can end up tagged differently from its sibling, and the
     concat demuxer drops a mismatched shard WITHOUT failing -- measured
     2026-10-19 as 480 + 480 frames joining to 504.
+
+    The rate's owner MOVED on 2026-10-23. It used to be
+    `wav2lip_hd_adapter`, which probed with `_frame_rate(rendered)` and
+    passed `--fps rate` down. That adapter is gone -- restoration is stage
+    9i now -- and `scripts/face_enhance.py` shards itself, so it probes the
+    rate once in the parent and hands the SAME rational to every child.
+    Same guarantee, one layer lower.
     """
-    adapter = (REPO / "models" / "lipsync" / "wav2lip_hd_adapter.py").read_text()
-    assert "_frame_rate(rendered)" in adapter, (
-        "stage 2 must probe the exact rate, not let the enhancer guess")
-    assert '"--fps", rate' in adapter, "the probed rate is not passed to stage 2"
-    enh = (REPO / "scripts" / "wav2liphd_enhance.py").read_text()
+    enh = (REPO / "scripts" / "face_enhance.py").read_text()
+    assert "def probe_rate(" in enh, (
+        "the parent must probe r_frame_rate itself, not let cv2 guess")
+    assert "r_frame_rate" in enh, "not reading ffprobe's rational"
+    assert '"--fps", fps' in enh, (
+        "the probed rational is not handed to the shard workers — a shard "
+        "tagged differently from its sibling is dropped by the concat "
+        "demuxer without an error")
     assert "a.fps or" in enh, (
-        "the enhancer must prefer the caller's exact rate over cv2's float")
+        "the worker must prefer the caller's exact rate over cv2's float")
 
 
 # ---------------------------------------------------------------------------
@@ -437,7 +452,7 @@ def test_hd_stage2_is_given_the_exact_rational_frame_rate():
 # ---------------------------------------------------------------------------
 
 def test_lipsync_segments_long_clips_by_default():
-    """A long clip is cut into <=2 min pieces, rendered one at a time.
+    """A long clip is cut into <=1 min pieces, rendered one at a time.
 
     Both vendored models hold one decoded uint8 frame per source frame for
     the whole clip -- MuseTalk's `read_imgs()`, Wav2Lip's
@@ -445,11 +460,16 @@ def test_lipsync_segments_long_clips_by_default():
     1080p, which matches a 1920x1080x3 frame (5.93 MiB) to within 3%: it IS
     the pixels. A 7-minute clip projects to ~70 GiB on a 62 GiB host, so
     peak RAM has to be a function of the SEGMENT, not of the clip.
+
+    60 since 2026-10-23, lowered from 120 by request. The number is pinned
+    here rather than left free because it is a HOST bound -- it answers
+    this machine's 62 GiB against this model's per-frame cost, so a change
+    to it should be a decision someone made, not a default that drifted.
     """
     import inspect
     import backend.lipsync as L
     sig = inspect.signature(L.run_lipsync)
-    assert sig.parameters["max_segment_s"].default == 120.0, (
+    assert sig.parameters["max_segment_s"].default == 60.0, (
         "segmenting must be the default, not opt-in")
     src = (REPO / "backend" / "lipsync.py").read_text()
     assert "def _run_lipsync_segmented" in src
@@ -472,12 +492,25 @@ def test_segments_run_one_at_a_time_not_in_parallel():
     assert "for i, (v, a) in enumerate(pairs)" in fn
 
 
-def test_a_supplied_coord_list_disables_segmenting():
-    """Target boxes are indexed against the whole video; segments renumber
-    frames from zero, so every segment after the first would animate the
-    wrong frames -- at exit code 0, like the sharding case."""
+def test_a_supplied_coord_list_is_split_across_segments():
+    """Target boxes are indexed against the whole video and segments
+    renumber frames from zero, so every segment after the first would
+    animate the wrong frames -- at exit code 0, like the sharding case.
+
+    This used to be answered by DISABLING segmenting whenever a list was
+    supplied. That traded the memory bound for the targeting: segmenting is
+    what keeps peak RSS a function of the segment rather than of the whole
+    clip (one decoded frame per source frame, ~6 MiB at 1080p and ~24 MiB
+    at 4K), so a long gated render went back on course to OOM. Since
+    2026-10-23 the list is cut the same way the video is, by counted
+    frames, and neither has to be given up.
+    """
     src = (REPO / "backend" / "lipsync.py").read_text()
-    assert "if want_segments and coord_list:" in src
+    assert "if want_segments and coord_list:" not in src, (
+        "segmenting is disabled again when targets are supplied")
+    assert "coord_list=seg_coords[i]" in src, (
+        "segments no longer receive their own slice of the target list")
+    assert "_split_coords(" in src
 
 
 def test_musetalk_caps_render_height_and_batch():
@@ -510,6 +543,72 @@ def test_downscale_happens_before_the_coord_cache_key():
     assert cap < key, "resolution is capped after the coord cache key is built"
 
 
+def test_supplied_boxes_follow_the_frame_down():
+    """A source-space coord list must be converted, not passed through.
+
+    This is the crash the cache test above only half-covered. The cache key
+    is derived after the rescale, so a CACHED list is safe -- but an ASD-gated
+    list supplied by `backend.lipsync_targets.build_coord_list` is built
+    against the SOURCE video and was written into the pickle untouched.
+
+    Measured on the IIT lecture (`svwrTOm55y4`, 3840x2160): boxes up to
+    y2=2151 reached a 1920x1080 render, `frame[y1:y2, x1:x2]` sliced past the
+    bottom edge, numpy returned a 0-row array and cv2 raised
+    `(-215:Assertion failed) !ssize.empty()` 87 s in -- after the frames were
+    extracted and the model loaded. Exit code 0, no mp4.
+    """
+    from models.lipsync.musetalk_adapter import _rescale_boxes
+
+    boxes = [(1000, 1800, 1400, 2100), (0.0, 0.0, 0.0, 0.0), (200, 100, 400, 300)]
+    out = _rescale_boxes(boxes, (0.5, 0.5))
+    assert out[0] == (500, 900, 700, 1050)
+    assert out[2] == (100, 50, 200, 150)
+    # Every real box must now fit inside the 1080p frame it will be sliced
+    # from -- which is the whole point.
+    for x1, y1, x2, y2 in (b for b in out if tuple(b) != (0.0, 0.0, 0.0, 0.0)):
+        assert 0 <= x1 < x2 <= 1920 and 0 <= y1 < y2 <= 1080
+
+
+def test_the_placeholder_survives_rescaling_bit_identical():
+    """`(0.0, 0.0, 0.0, 0.0)` is MuseTalk's `coord_placeholder`, meaning
+    "write this frame through unchanged" -- not a box at the origin.
+    `scripts/inference.py` compares against it by equality, so scaling it to
+    `(0, 0, 0, 0)` ints would stop it matching and send 783 pass-through
+    frames into the crop path instead."""
+    from models.lipsync.musetalk_adapter import _rescale_boxes
+
+    out = _rescale_boxes([(0.0, 0.0, 0.0, 0.0)], (0.5, 0.5))
+    assert out[0] == (0.0, 0.0, 0.0, 0.0)
+    assert all(isinstance(v, float) for v in out[0])
+
+
+def test_an_unscaled_render_leaves_the_boxes_alone():
+    from models.lipsync.musetalk_adapter import _rescale_boxes
+
+    boxes = [(10, 20, 30, 40), (0.0, 0.0, 0.0, 0.0)]
+    assert _rescale_boxes(boxes, (1.0, 1.0)) == boxes
+
+
+def test_cap_resolution_reports_the_factor_it_applied():
+    """The factor is the only way a caller can convert; a bare path is what
+    let the mismatch through. Every failure path must say `(1.0, 1.0)`
+    rather than omitting it."""
+    import inspect
+
+    from models.lipsync.musetalk_adapter import MuseTalkSync
+
+    src = inspect.getsource(MuseTalkSync._cap_resolution)
+    returns = [ln.strip() for ln in src.splitlines()
+               if ln.strip().startswith("return ")]
+    assert returns, "no returns found"
+    for r in returns:
+        assert r != "return video", (
+            "a path is returned with no scale factor -- the caller cannot "
+            "convert a source-space coord list")
+    # And the one that did rescale must not claim 1.0.
+    assert any("return scaled, (" in r for r in returns)
+
+
 def test_ui_preset_batch_tracks_the_adapter():
     """The UI preset and the adapter default must not drift apart."""
     from models.lipsync.musetalk_adapter import MuseTalkSync
@@ -518,3 +617,34 @@ def test_ui_preset_batch_tracks_the_adapter():
     want = inspect.signature(MuseTalkSync.__init__).parameters["batch_size"].default
     assert f'"lipsync_batch_size": {want}' in src, (
         f"ui/presets.py should ask for batch {want}, matching the adapter")
+
+
+# --- lazy decode: pin the vendor patch AND the adapter flipping it on ----
+
+def test_lazy_decode_patch_still_present_in_vendor():
+    """A vendor re-clone would silently revert the memory win.
+
+    Measured on scripts/ab_lazy_frames.py (data/gender_bench/cuts/
+    ab_lazy_frames/ab_lazy_frames.json): eager 23.88 GiB RSS vs lazy 6.84
+    GiB on a 2-min 1080p clip at identical 744.7 s wall and identical
+    output -- but ONLY on the --use_saved_coord branch.
+    """
+    src = INFERENCE.read_text()
+    assert '_LAZY_FRAMES = os.environ.get("MUSETALK_LAZY_FRAMES"' in src, \
+        "the lazy-frames gate is gone from vendor/musetalk/scripts/inference.py"
+    assert "class _LazyFrames" in src, \
+        "the _LazyFrames sequence class is gone -- a re-clone has reverted it"
+    assert "_LazyFrames(input_img_list) if _LAZY_FRAMES else read_imgs(input_img_list)" in src, \
+        "the hot --use_saved_coord branch no longer swaps in _LazyFrames"
+
+
+def test_adapter_turns_lazy_on_by_default_on_saved_coord():
+    """The win only lands if production flips the env var. An operator-set
+    value wins (set MUSETALK_LAZY_FRAMES=0 to disable for an A/B)."""
+    src = (REPO / "models" / "lipsync" / "musetalk_adapter.py").read_text()
+    assert "MUSETALK_LAZY_FRAMES" in src, (
+        "the adapter never sets MUSETALK_LAZY_FRAMES -- lazy stays off in "
+        "production and the A/B's -17 GiB win does not land")
+    assert '"--use_saved_coord" in cmd' in src, (
+        "lazy must only default-on for the branch where the A/B shows the "
+        "win -- the cold-cache branch loads every frame anyway")

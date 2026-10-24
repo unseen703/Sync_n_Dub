@@ -192,3 +192,47 @@ def probe_duration(media: Path) -> float:
             log.warning("probe_duration: ffprobe failed for %s (rc=%s), "
                         "falling back to ffmpeg", media, proc.returncode)
     return _duration_via_ffmpeg(media)
+
+
+def probe_video(path: Path) -> tuple[float, float]:
+    """Return (fps, duration_s) using ffprobe when available, else zeros.
+
+    Lived as four byte-identical private copies, one per lip-sync adapter,
+    each of which already imported `_ffprobe_bin` from this module to get the
+    binary. Consolidated 2026-10-23; the adapters import it now.
+
+    The zeros are a deliberate best-effort answer, NOT the policy
+    `probe_duration` above follows. Every caller is an adapter reporting the
+    fps and length of a render it has just finished, for the manifest — a
+    probe that fails there should not take down a render that succeeded.
+    `_needs_remux` is the one reader that acts on the number, and it treats
+    0.0 as "cannot tell" (CLAUDE.md §1).
+    """
+    ffprobe = _ffprobe_bin()
+    if not ffprobe or not Path(path).exists():
+        return (0.0, 0.0)
+    try:
+        proc = subprocess.run(
+            [ffprobe, "-v", "error",
+             "-select_streams", "v:0",
+             "-show_entries", "stream=r_frame_rate",
+             "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1",
+             str(path)],
+            capture_output=True, text=True, check=True,
+        )
+        lines = [l.strip() for l in proc.stdout.strip().splitlines() if l.strip()]
+        fps = 0.0
+        dur = 0.0
+        if lines:
+            rate = lines[0]
+            if "/" in rate:
+                n, d = rate.split("/", 1)
+                fps = float(n) / float(d) if float(d) else 0.0
+            else:
+                fps = float(rate)
+        if len(lines) > 1:
+            dur = float(lines[1])
+        return (fps, dur)
+    except Exception:
+        return (0.0, 0.0)

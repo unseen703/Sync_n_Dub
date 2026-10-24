@@ -28,7 +28,8 @@ Where the numbers come from
 ---------------------------
 `.claude/skills/clip-run`, measured on this host's 2x16 GiB Blackwell cards,
 as multiples of clip length: wav2lip 3–5x, musetalk 8–21x, latentsync ~83x,
-codeformer ~13x as a second pass on top. TTS is roughly 0.6 s per segment.
+wav2lip_hd 6–24x (Wav2Lip plus a per-frame restoration pass on top, so its
+cost tracks frame SIZE as well as length). TTS is roughly 0.6 s per segment.
 The midpoint of each range is used, and an estimate is omitted (`None`)
 rather than invented for a stage with no measured rate — a made-up number in
 a consent dialog is worse than a blank, because the user will plan around it.
@@ -37,6 +38,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
+from . import lipsync_models as _ls_models
 from .progress import STAGE_LABELS as _PROGRESS_LABELS
 
 #: `backend.edits.STAGE_ORDER` name -> the `ui.progress` marker key with the
@@ -62,15 +64,16 @@ _GPU_STAGES = frozenset({"lipsync", "vc"})
 _UPSTREAM_KEYS: Sequence[str] = ("1", "2", "3", "4", "5", "6", "7", "8", "9")
 
 #: Lip-sync wall time as a multiple of clip length, measured 2026-10-12.
-#: Midpoints of the ranges in `.claude/skills/clip-run`.
+#: Midpoints of the bands in `ui/lipsync_models.py`.
+#:
+#: Derived, not written out again. `wav2lip_hd` was missing here — the line
+#: below this table was an orphan comment with no entry after it, which is
+#: what a dropped row looks like. A restoration pass is a *second* pass over
+#: the render, not a cheaper one, and it now carries its own measured band.
 LIPSYNC_RATES: Dict[str, float] = {
-    "wav2lip":    4.0,      # 3-5x
-    "musetalk":   14.5,     # 8-21x
-    "latentsync": 83.0,
-    "lipgan":     4.0,      # in-env torch port, same order as wav2lip
+    k: (v["rate"][0] + v["rate"][1]) / 2.0
+    for k, v in _ls_models.FACTS.items() if v.get("rate")
 }
-
-#: A restoration pass is a *second* pass over the render, not a cheaper one.
 
 #: Seconds of TTS per segment, measured over the Edge and Bodhan paths.
 TTS_S_PER_SEGMENT = 0.6
@@ -92,7 +95,10 @@ def label_for(stage: str) -> str:
 
 
 def _lipsync_rate(model: Optional[str]) -> Optional[float]:
-    return LIPSYNC_RATES.get((model or "").strip().lower()) or None
+    # Through `normalise`, so a recorded variant (`musetalk-v15`,
+    # `wav2lip-hd`) resolves instead of falling through to "no measured rate".
+    key = _ls_models.normalise(model)
+    return LIPSYNC_RATES.get(key) if key else None
 
 
 def _estimate(stage: str, *, clip_s: Optional[float],

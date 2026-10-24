@@ -176,15 +176,39 @@ def recover_args(view: JobView) -> Optional[argparse.Namespace]:
     records all of them (termbase, duration-adjust, mix gains, timing
     method…). Re-parsing it is the difference between replaying the run the
     user actually launched and replaying a defaults-shaped approximation.
+
+    A UI job has no pipeline command line — `ui/runner.py` is launched with
+    the job id alone — so this returns None for one, and the caller recovers
+    the pacing from the recorded config instead (`speed_setup_from_config`).
+
+    **That case is detected, not discovered by failing.** Handing the bare
+    job id to the pipeline parser made argparse print its full 40-line usage
+    block and `server.py: error: the following arguments are required:
+    --input/-i` to stderr before raising, on EVERY staged edit. The
+    `SystemExit` was always caught and nothing was wrong, but the operator
+    saw a wall of text with the word "error" in it and reasonably read their
+    voice change as having failed. `--input` is required by the parser, so
+    its absence is the cheap, exact test for "this is not a pipeline argv".
     """
-    if not view.argv:
+    argv = list(view.argv or ())
+    if not argv:
+        return None
+    if not any(a == "--input" or a == "-i" or a.startswith("--input=")
+               for a in argv):
+        log.debug("no pipeline argv for this job (%r); the replay will take "
+                  "its pacing from the recorded config", argv[:1])
         return None
     try:
         from .cli import _parse_args
-        return _parse_args(list(view.argv))
+        # stderr is redirected because argparse writes usage there itself,
+        # before raising, and there is no parser hook to stop it.
+        import contextlib
+        import io
+        with contextlib.redirect_stderr(io.StringIO()):
+            return _parse_args(argv)
     except BaseException as e:            # SystemExit included
-        log.info("could not re-parse the run's argv (%s); using manifest "
-                 "config + defaults", e)
+        log.info("could not re-parse the run's argv (%s); the replay will "
+                 "take its pacing from the recorded config", e)
         return None
 
 
@@ -596,7 +620,7 @@ def _scope_from(text: str) -> Scope:
 _VOICE_STOPWORDS = {
     "the", "this", "that", "a", "an", "male", "female", "man", "woman",
     "hindi", "tamil", "telugu", "bengali", "marathi", "english",
-    "musetalk", "wav2lip", "latentsync", "lipgan", "bodhan", "indicf",
+    "musetalk", "wav2lip", "latentsync", "bodhan", "indicf",
     "faster", "slower", "slow", "fast", "same", "another", "other",
     "default", "neutral", "formal", "casual",
 }
@@ -614,8 +638,15 @@ def _rule_parse(nlq: str) -> List[EditOp]:
     # lip-sync window
     if re.search(r"lip[\s-]?sync|lipsync", low):
         model = None
-        for name in ("wav2lip", "musetalk", "latentsync", "lipgan"):
-            if name in low:
+        # LONGEST first, and from the registry rather than a list written
+        # here. The old loop tested `wav2lip` before `wav2lip_hd`, so
+        # "lip-sync it with wav2lip_hd" parsed to the plain model — a silent
+        # downgrade on exactly the path that runs when no OPENROUTER_API_KEY
+        # is set, i.e. when this parser is the only one.
+        from models.lipsync import available_models
+        probe = low.replace("-", "_").replace(" ", "_")
+        for name in sorted(available_models(), key=len, reverse=True):
+            if name in probe:
                 model = name
                 break
         sc = scope
@@ -856,7 +887,11 @@ def available_stages(view: JobView, res: EditResult,
         out.append("mix")
     if cfg.get("lipsync"):
         out.append("lipsync")
-    if nsget("duration_adjust"):
+    # `cfg` first: a UI job has no argv, so reading this off the namespace
+    # alone dropped stage 9c from the replayable set on every one of them.
+    # It is recorded in the manifest (`ui.presets.plan_config`), which is the
+    # durable record either way.
+    if cfg.get("duration_adjust") or nsget("duration_adjust"):
         out.append("duration")
     # Added by the edit itself.
     if res.translit_model:
@@ -893,6 +928,13 @@ def commit(plan: EditPlan) -> EditResult:
         json.dumps({"nlq": plan.nlq, "parsed_by": plan.source,
                     "ops": [o.to_dict() for o in plan.ops],
                     "result": res.to_jsonable()}, indent=2, ensure_ascii=False))
+    # The EDITED document, not just the request that produced it.
+    # `edit_NNN.json` records what was asked and what the handlers reported;
+    # it is not the transcript, so "what did the dub actually say after edit
+    # 3" could only be answered by replaying. The producer carries the same
+    # NNN as the journal entry, so the two line up by name.
+    from .mt_versions import snapshot as _mt_snapshot
+    _mt_snapshot(plan.view.merged_json, f"edit_{stamp:03d}")
     plan.result = res
     return res
 
@@ -901,8 +943,64 @@ def commit(plan: EditPlan) -> EditResult:
 # re-running
 # ---------------------------------------------------------------------------
 
+def speed_setup_from_config(cfg: Dict[str, Any]):
+    """The run's pacing, read off a recorded config when there is no argv.
+
+    Takes any dict using the pipeline's own kwarg names, which is both the
+    manifest's `config` (via `ui.presets.plan_config`) and the `pipeline`
+    block of a UI job's `request.json`. The second matters because it is
+    already on disk for every job ever submitted from the UI, so a job that
+    predates this fix still replays correctly — `ui/runner.py` passes it.
+
+    `recover_args` re-parses the command line because it carries knobs the
+    manifest never did. A UI job has no command line: `ui/runner.py` is
+    launched with the job id alone, so the pipeline parser exits on it and
+    `ns` comes back None. The replay then fell through to argparse DEFAULTS
+    — which describe a run nobody launched.
+
+    The damage was specific and silent. A UI submission runs
+    `timing_producer=naive_slot` with `use_target_duration=True`,
+    `tts_apply_stretch=False`, `mix_strategy=timing_plan`,
+    `mix_clip_source=raw` (`ui/presets.UI_TIMING_DEFAULTS`). The defaults are
+    `timing_params=None`, stretch ON, `global_tempo`, `auto`. So every edit
+    replayed on a UI job came back paced differently from the dub it was
+    editing — and `set_speed` came back at the ORIGINAL SPEED, because its
+    entire mechanism is writing `target_duration_s` and
+    `use_target_duration` defaults to False, which makes `naive_slot` ignore
+    that field and re-fit every clip to its untouched `end - start` slot.
+    `backend/timing.py` predicts exactly this in its own docstring.
+
+    Returns None when the manifest records no pacing at all — a job written
+    before 2026-10-22, or by a runner that does not use `presets.plan_config`
+    — so the caller keeps its previous behaviour rather than inventing a
+    setup from nothing.
+    """
+    from .cli import SpeedSetup
+
+    keys = ("timing_params", "tts_apply_stretch", "mix_strategy",
+            "mix_clip_source", "mix_tempo_cap")
+    if not any(cfg.get(k) is not None for k in keys):
+        log.info("edit rerun: the manifest records no pacing; the replay "
+                 "will use defaults, which may not match the original run")
+        return None
+
+    params = cfg.get("timing_params")
+    setup = SpeedSetup(
+        timing_producer=cfg.get("timing_producer"),
+        timing_params=dict(params) if isinstance(params, dict) else None,
+        tts_apply_stretch=bool(cfg.get("tts_apply_stretch")),
+        tts_force_align=bool(cfg.get("tts_force_align")),
+        mix_strategy=cfg.get("mix_strategy") or "global_tempo",
+        mix_tempo_cap=cfg.get("mix_tempo_cap") or 1.5,
+        mix_clip_source=cfg.get("mix_clip_source") or "auto",
+    )
+    log.info("edit rerun: pacing recovered from the manifest (no argv)")
+    return setup
+
+
 def rerun(plan: EditPlan, *, device: Optional[str] = None,
           num_gpus: Optional[int] = None,
+          speed_setup=None,
           data_dir: Optional[Path] = None) -> Dict[str, Any]:
     """Replay the stages the edit invalidated, and nothing else.
 
@@ -949,14 +1047,24 @@ def rerun(plan: EditPlan, *, device: Optional[str] = None,
     # segment` and `--timing-method` override both AFTER argparse, so a
     # segment-fit run re-rendered from the raw namespace would come back as a
     # global-tempo run that also stretches twice.
-    setup = None
-    if ns is not None:
+    # Three sources, most authoritative first. The caller's beats the argv
+    # because only a caller that HAS the submission can supply it —
+    # `ui/runner.py` reads `request.json`, which records the resolved kwargs
+    # verbatim — and the manifest is the fallback for everyone else.
+    setup = speed_setup
+    if setup is None and ns is not None:
         try:
             from .cli import resolve_speed_setup
             setup = resolve_speed_setup(ns)
         except BaseException as e:                 # SystemExit included
             log.info("could not replay the run's speed setup (%s); using the "
                      "manifest's producer with its defaults", e)
+    if setup is None:
+        # No argv to re-parse — which is EVERY UI job, not an edge case. The
+        # UI calls `run_pipeline()` directly and records `['<job_id>']` as
+        # argv, so `recover_args` hands the pipeline parser a bare job id, it
+        # exits, and `ns` is None. See `speed_setup_from_config`.
+        setup = speed_setup_from_config(cfg)
     if setup is not None:
         log.info("edit rerun: speed setup producer=%s strategy=%s clip=%s "
                  "tts_stretch=%s", setup.timing_producer, setup.mix_strategy,
@@ -987,7 +1095,8 @@ def rerun(plan: EditPlan, *, device: Optional[str] = None,
         # 9e
         tts_model=(cfg.get("tts") if "tts" in stages else None),
         tts_sample_rate=nsget("tts_sample_rate", 24000),
-        tts_max_stretch=nsget("tts_max_stretch", 0.10),
+        tts_max_stretch=nsget("tts_max_stretch",
+                              cfg.get("tts_max_stretch") or 0.10),
         stretch_backend=nsget("stretch_backend", "auto"),
         tts_apply_stretch=(setup.tts_apply_stretch if setup is not None
                            else not bool(nsget("no_tts_stretch"))),
@@ -1064,12 +1173,26 @@ def _rerun_lipsync_only(plan: EditPlan, *, num_gpus: Optional[int]) -> Dict[str,
         ls_kwargs["batch_size"] = cfg["lipsync_batch_size"]
     log.info("edit rerun: lip-sync kwargs from manifest: %s",
              ls_kwargs or "(none recorded; adapter defaults apply)")
+    # WHICH face to animate, same as stage 9h in the full chain.
+    #
+    # This path bypasses `run_post_mt_stages` entirely — the mix is still
+    # valid, so it drives the stage directly — which means it needs its own
+    # call here or it keeps MuseTalk's first-detection face choice. And this
+    # is the path that matters most: it is how the UI finishes a draft, so
+    # leaving it out would have fixed the pipeline while the button everyone
+    # actually presses carried on animating whoever was found first.
+    from .pipeline import _asd_coord_list
+
+    _targets = _asd_coord_list(
+        view.root, video, model,
+        bbox_shift=int(cfg.get("bbox_shift") or 0))
     out = run_lipsync(
         view.merged_json, model=model, source_video=video,
         driving_audio=wavs[-1], out_dir=view.root / "lipsync",
         pre_muxed_video=(mp4s[-1] if mp4s else None),
         num_gpus=num_gpus, window=res.lipsync_window,
         lipsync_kwargs=ls_kwargs,
+        coord_list=(_targets[0] if _targets else None),
     )
     return {"status": "ok", "stages": ["lipsync"],
             "lipsync_mp4": str(out.out_video), "lipsync_error": out.error}

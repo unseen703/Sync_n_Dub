@@ -90,14 +90,40 @@ export function thUploadPhoto(file: File): Promise<THPhoto> {
   );
 }
 
+/**
+ * One render, as both the POST and the poll return it.
+ *
+ * `ready` is computed server-side from the FILE, not from `state` — a killed
+ * render leaves a stale `running` behind forever, and a `done` that wrote no
+ * mp4 is the failure CLAUDE.md §4 records for lip-sync. So the page branches
+ * on `ready`, and `state` is only what it tells the user.
+ */
+export interface THRender {
+  render_id: string;
+  state: 'running' | 'done' | 'failed' | 'absent';
+  ready: boolean;
+  url?: string | null;
+  model?: string;
+  error?: string;
+  duration_s?: number;
+  fps?: number;
+  note?: string;
+}
+
 export function thRender(body: {
   photo_id: string;
   dialogue_id: string;
   language: string;
-}): Promise<unknown> {
+}): Promise<THRender> {
   return fetch('/api/talking-head/render', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(body),
-  }).then(json);
+  }).then(json<THRender>);
+}
+
+export function thRenderStatus(renderId: string): Promise<THRender> {
+  return fetch(
+    `/api/talking-head/render/${encodeURIComponent(renderId)}`,
+  ).then(json<THRender>);
 }

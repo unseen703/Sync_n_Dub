@@ -197,20 +197,31 @@ def check_tts(tts: Optional[str]) -> str:
 
 
 def check_style(style: Optional[str]) -> Optional[str]:
-    """One of the four the form offers, or None for the neutral read.
+    """One of the four the form offers, `neutral`, or None for "work it out".
 
     Validated against `ui.speakers.SUBMIT_STYLES` rather than waved
     through: an unknown value is a **422 at the TTS engine**, mid-run,
     after ASR and MT have been paid for.
+
+    The three non-values are not interchangeable, and this used to conflate
+    two of them. An EMPTY style is the form's "work it out from the video",
+    which leaves `presets.UI_STAGE_DEFAULTS`' `tts_style="auto"` in place and
+    runs stage 9b1. `NEUTRAL_STYLE` is the opposite — it travels through as
+    itself, 9b1 is not planned, and `models.tts.resolve_style` drops it at
+    synthesis so the engine gets no style at all.
     """
+    from models.tts import NEUTRAL_STYLE
+
     from .speakers import SUBMIT_STYLES
 
     v = (style or "").strip()
     if not v:
         return None
+    if v == NEUTRAL_STYLE:
+        return v
     if v not in SUBMIT_STYLES:
         raise _bad(f"{v!r} is not an offered delivery type. Choose one of: "
-                   f"{', '.join(SUBMIT_STYLES)}.")
+                   f"{NEUTRAL_STYLE}, {', '.join(SUBMIT_STYLES)}.")
     return v
 
 

@@ -63,6 +63,10 @@ export const uploadVideo: typeof live.uploadVideo =
 export const getAgentParams = live.getAgentParams;
 export const getAgentScript = live.getAgentScript;
 export const agentSend = live.agentSend;
+// Retraction, so it is live for the same reason `agentSend` is: a mocked
+// "removed" that left the op staged would be a false success about the one
+// thing this control exists to guarantee.
+export const dropStagedTurn = live.dropStagedTurn;
 export const cancelJob: typeof live.cancelJob = mockWrites ? mock.cancelJob : live.cancelJob;
 export const getEdits: typeof live.getEdits = mockWrites ? mock.getEdits : live.getEdits;
 export const stageEdits: typeof live.stageEdits = mockWrites ? mock.stageEdits : live.stageEdits;
@@ -86,3 +90,6 @@ export const setSpeakerLabel: typeof live.setSpeakerLabel = mockWrites
 // green button against a server that would refuse.
 export const getLipsyncReadiness = live.getLipsyncReadiness;
 export const startLipsync = live.startLipsync;
+export const getEnhanceReadiness = live.getEnhanceReadiness;
+export const getEnhanceStatus = live.getEnhanceStatus;
+export const startEnhance = live.startEnhance;

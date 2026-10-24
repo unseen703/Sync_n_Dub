@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { useStore } from '../../store/useStore';
 import { Button } from '../ui/Button';
 import { StateBadge } from '../ui/StateBadge';
-import { IconStop, IconSparkle } from '../ui/Icons';
+import { IconStop } from '../ui/Icons';
 import { fmtElapsed, jobTitle, normalizeState } from '../../lib/format';
 import { useNow } from '../../hooks/useNow';
 import { cancelJob, MOCKED } from '../../api';
@@ -59,21 +59,14 @@ export function TopBar() {
             </span>
           ) : null}
           <StateBadge state={progress.state} />
-          {/* The agent edits a FINISHED dub — it replays stages 9b..9h over
-              the run's merged ASR+MT JSON, which only exists once the run
-              has got that far. Offering it mid-run would stage edits
-              against a transcript still being written. */}
-          {!running && selected ? (
-            <a
-              href={`#/job/${encodeURIComponent(selected)}/edit`}
-              className="inline-flex items-center gap-1.5 rounded-lg border border-edge/70
-                         px-2.5 py-1.5 text-[12px] text-ink2 transition-colors
-                         hover:border-edge hover:text-ink"
-            >
-              <IconSparkle width={13} height={13} />
-              Edit via agent
-            </a>
-          ) : null}
+          {/* There is no "Edit via agent" link any more, and no page for it
+              to point at. The agent is on the job page itself, below the
+              video, next to the cast and the script it changes — reviewing
+              a dub used to mean bouncing between two screens with the video
+              on one and the controls that change it on the other. The rule
+              that gated this button (a finished dub only, because the agent
+              replays stages 9b..9h over a merged ASR+MT JSON that does not
+              exist until the run gets that far) now gates the panel. */}
           {running ? (
             <Button
               size="sm"

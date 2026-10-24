@@ -15,65 +15,30 @@ at the clone path:
 """
 from __future__ import annotations
 
-import importlib
-import inspect
-from typing import Optional, Type
-
+from .._registry import make_registry
 from .base import ASDResult, ASDScore, BaseASD
 
 _REGISTRY_SPEC: dict[str, tuple[str, str]] = {
     "talknet": (".talknet_adapter", "TalkNetASD"),
-    "ts_talknet": (".ts_talknet_adapter", "TSTalkNetASD"),
+    # `ts_talknet` (Jiang-Yidi/TS-TalkNet) REMOVED 2026-10-23. Its upstream
+    # was never cloned here -- `third_party/TS-TalkNet` does not exist and
+    # never did -- so every `get_asd("ts_talknet")` raised on load. It was a
+    # reference to a repo nobody had, and the only remaining third_party
+    # name outside langfuse once TalkNet moved. In git at 438c0c2.
 }
 
+_registry = make_registry(
+    package=__name__,
+    spec=_REGISTRY_SPEC,
+    noun="ASD model",
+    base=BaseASD,
+    import_noun="ASD model",
+    import_detail="is not installed/accessible. The upstream lives under "
+                  "models/asd/vendor/talknet (TALKNET_REPO overrides it).",
+)
 
-def _load(key: str) -> Type[BaseASD]:
-    module_path, cls_name = _REGISTRY_SPEC[key]
-    module = importlib.import_module(module_path, package=__name__)
-    return getattr(module, cls_name)
-
-
-def available_models() -> list[str]:
-    return sorted(_REGISTRY_SPEC)
-
-
-def _accepted_kwargs(cls: Type[BaseASD]) -> set[str]:
-    sig = inspect.signature(cls.__init__)
-    if any(p.kind is p.VAR_KEYWORD for p in sig.parameters.values()):
-        return set()
-    return {
-        p.name for p in sig.parameters.values()
-        if p.name != "self"
-        and p.kind in (p.KEYWORD_ONLY, p.POSITIONAL_OR_KEYWORD)
-    }
-
-
-def get_asd(name: str, *, device: Optional[str] = None, **kwargs) -> BaseASD:
-    key = name.strip().lower()
-    if key not in _REGISTRY_SPEC:
-        raise ValueError(
-            f"Unknown ASD model {name!r}. "
-            f"Available: {', '.join(available_models())}"
-        )
-    try:
-        cls = _load(key)
-    except ImportError as e:
-        raise ImportError(
-            f"ASD model {key!r} is not installed/accessible. "
-            f"Clone the upstream repo and set the matching env var "
-            f"(TALKNET_REPO or TS_TALKNET_REPO). Original error: {e}"
-        ) from e
-    accepted = _accepted_kwargs(cls)
-    if accepted:
-        unknown = set(kwargs) - accepted
-        if unknown:
-            import warnings
-            warnings.warn(
-                f"{cls.__name__} does not accept kwargs {sorted(unknown)!r}; dropping."
-            )
-        kwargs = {k: v for k, v in kwargs.items() if k in accepted}
-    return cls(device=device, **kwargs)
-
+available_models = _registry.available
+get_asd = _registry.get
 
 __all__ = [
     "ASDResult",

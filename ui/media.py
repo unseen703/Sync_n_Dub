@@ -22,7 +22,6 @@ serves with HTTP range support.
 """
 from __future__ import annotations
 
-import json
 import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -76,11 +75,9 @@ def _ref(job_root: Path, p: Optional[Path], data_dir: Path, *,
     return out
 
 
-def _read_json(p: Path) -> Dict[str, Any]:
-    try:
-        return json.loads(p.read_text())
-    except (OSError, ValueError):
-        return {}
+#: The shared helper answers None where this module's own copy answered `{}`;
+#: both call sites below add `or {}` so `.get()` on the result still works.
+from ._io import read_json as _read_json
 
 
 def _excluded(p: Path) -> bool:
@@ -213,8 +210,9 @@ def find_original_audio(job_root: Path, manifest: Dict[str, Any]
 def resolve(job_root: Path, *, data_dir: Path,
             merged_json: Optional[Path] = None) -> Dict[str, Any]:
     job_root = Path(job_root)
-    manifest = _read_json(job_root / "manifest.json")
-    merged = _read_json(merged_json) if merged_json and Path(merged_json).is_file() else {}
+    manifest = _read_json(job_root / "manifest.json") or {}
+    merged = ((_read_json(merged_json) or {})
+              if merged_json and Path(merged_json).is_file() else {})
 
     orig_v = find_original_video(job_root, manifest)
     lip_v = find_lipsync_video(job_root, manifest, merged)

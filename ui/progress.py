@@ -79,6 +79,7 @@ STAGE_LABELS: Dict[str, str] = {
     "9b1":    "Working out the tone",
     "9b2":    "Listening for emotion",
     "9c":     "Fitting the text to the timing",
+    "9c2":    "Shortening lines that run long",
     "9d":     "Casting voices",
     "9e":     "Speaking the translation",
     "9f":     "Converting the voice",
@@ -87,6 +88,7 @@ STAGE_LABELS: Dict[str, str] = {
     "9f2":    "Planning the timing",
     "9g":     "Mixing the new soundtrack",
     "9h":     "Lip-syncing",
+    "9i":     "Enhancing resolution",
     "10a":    "Checking the transcript",
     "10b":    "Checking the translation",
     "1-9a":   "Reusing the earlier run",
@@ -104,7 +106,7 @@ PHASE_GROUPS: List[tuple] = [
                                           "3", "1-9a")),
     ("speakers",   "Speaker annotation", ("4", "4b", "4c", "5", "6")),
     ("transcribe", "Transcribe",         ("7", "8")),
-    ("translate",  "Translate",          ("9", "9b", "9c")),
+    ("translate",  "Translate",          ("9", "9b", "9c", "9c2")),
     # 9b1 (content register) and 9b2 (source emotion) both decide HOW the
     # line will be delivered, so they sit with speech generation rather than
     # with translation, even though their markers are numbered next to 9b.
@@ -112,6 +114,13 @@ PHASE_GROUPS: List[tuple] = [
                                           "9f1", "9f1b", "9f2")),
     ("mix",        "Mix",                ("9g",)),
     ("lipsync",    "Lip sync",           ("9h",)),
+    # Face restoration over the finished render. Its own pill rather than a
+    # substage of Lip sync, because it is not part of lip-syncing: it runs on
+    # any render from any model, costs 2.6x the MuseTalk pass it cleans
+    # (1156 s vs 447 s, measured 2026-10-22), and is always a separate act.
+    # Folding it into Lip sync would make a lit "Lip sync" mean two different
+    # amounts of work.
+    ("enhance",    "Enhance resolution", ("9i",)),
 ]
 
 #: Stages 10a/10b score the ASR and MT against ground-truth subtitles. They
@@ -197,6 +206,10 @@ def plan_stages(config: Dict[str, Any], *, pre: Optional[List[str]] = None
         keys.append("9b2")
     if config.get("duration_adjust"):
         keys.append("9c")
+    # 9c2 only runs inside the `duration_adjust` branch -- it acts on the
+    # per-segment estimates 9c writes -- so it cannot be planned without it.
+    if config.get("duration_adjust") and config.get("condense_overlong_text"):
+        keys.append("9c2")
     if config.get("voice_engine") or config.get("tts") or config.get("vc"):
         keys.append("9d")
     if config.get("tts"):
@@ -211,10 +224,51 @@ def plan_stages(config: Dict[str, Any], *, pre: Optional[List[str]] = None
         keys.append("9f2")
     if config.get("mix") or config.get("lipsync"):
         keys.append("9g")
+    # 9h is planned even when this run will not reach it, which is the one
+    # place this function deliberately does not mirror `_run_pipeline`.
+    #
+    # A `draft` submission sets `lipsync: None` and the dub stops at the mix;
+    # lip-sync is then a separate, explicit act (`POST .../lipsync`). Keying
+    # the node off the config meant such a job drew a SIX-node bar reading
+    # "Finished · all 6 stages" — a dub that is waiting for its most expensive
+    # stage, rendered identically to one that will never have it. The node is
+    # drawn and left pending instead, so the bar says what is still to come.
+    #
+    # **Only when the run actually produces something to lip-sync TO.** A
+    # config with no TTS and no mix is not a dub awaiting its last stage; it
+    # is a run that was never going anywhere near 9h, and showing the node as
+    # "still to come" there would promise a step nobody is waiting for. That
+    # case keeps the old behaviour — no node, and `_group_phases` reads the
+    # group as `skipped`.
+    #
+    # `deferred` is what carries the first case through `finish()` and
+    # `_from_manifest`, both of which otherwise resolve a leftover `pending`
+    # to `skipped` on a successful run. Skipped is a decision; deferred is a
+    # stage that has not had its turn, and the ribbon counts the two
+    # differently.
+    deferred: set = set()
     if config.get("lipsync"):
         keys.append("9h")
+    elif config.get("mix") or config.get("tts"):
+        keys.append("9h")
+        deferred = {"9h"}
+    # 9i is 9h's case one step further out. Enhancement is NEVER part of a
+    # submission -- there is nothing to restore until a render exists, so it
+    # is always a separate act on a finished job (`POST .../enhance`), the
+    # same shape as `POST .../lipsync` on a draft. It is therefore planned
+    # whenever there is a 9h node to enhance, and deferred unless this run
+    # was explicitly configured to do it.
+    #
+    # Deferred and not `skipped`: `StageRibbon.isDone` counts skipped AS
+    # DONE, so marking it skipped would light the bar over a render nobody
+    # has enhanced — exactly the bug `deferred` was added to 9h to fix.
+    if "9h" in keys:
+        keys.append("9i")
+        if not config.get("restore"):
+            deferred = deferred | {"9i"}
     return [{"key": k, "title": None, "label": label_for(k),
-             "state": "pending", "started_at": None, "wall_s": None}
+             "state": "pending", "started_at": None, "wall_s": None,
+             **({"deferred": True} if k in deferred else {})}
             for k in keys]
 
 
@@ -272,12 +326,18 @@ class ProgressWriter(logging.Handler):
         finished job reads "14 of 18" forever. On failure they stay pending,
         because they genuinely never got their turn and saying "skipped"
         would imply a decision nobody made.
+
+        A `deferred` stage is the second case even on success: `plan_stages`
+        marks 9h deferred on a draft run, where lip-sync is a separate act the
+        operator has not performed yet. Calling that "skipped" would read as
+        "this dub will never be lip-synced" — and `StageRibbon` counts skipped
+        as done, so the bar would claim the whole pipeline had finished.
         """
         with self._lock:
             self._close_current("done" if state == "done" else state)
             if state == "done":
                 for st in self._doc["stages"]:
-                    if st["state"] == "pending":
+                    if st["state"] == "pending" and not st.get("deferred"):
                         st["state"] = "skipped"
             self._doc["state"] = state
             self._doc["error"] = error
@@ -521,7 +581,11 @@ def _from_manifest(job_root: Path) -> Optional[Dict[str, Any]]:
     stages = plan_stages(cfg)
     if state == "done":
         for s in stages:
-            s["state"] = "done"
+            # `deferred` stays pending — see `ProgressWriter.finish`. The
+            # manifest says the RUN finished, which on a draft job is true
+            # and says nothing about lip-sync having happened.
+            if not s.get("deferred"):
+                s["state"] = "done"
     out = _blank(job_root)
     out.update({
         "source": "manifest.json",
@@ -614,20 +678,46 @@ def _pct(doc: Dict[str, Any]) -> int:
     return max(0, min(99, int(round(100 * (doc.get("n_done") or 0) / total))))
 
 
+#: The last pill, and the only synthetic one. It is NOT in `PHASE_GROUPS`
+#: because that table maps real `=== stage N ===` markers and
+#: `tests/test_ui_progress.py` greps `pipeline.py` for every key in it; a
+#: group with no marker would fail that grep for doing its job.
+FINISHED_ID = "finished"
+FINISHED_LABEL = "Finished"
+
+
 def _group_phases(stages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Fold the stage list into the ribbon's coarse pills."""
+    """Fold the stage list into the ribbon's pills.
+
+    **Always the same pills, in the same order, on every run** — the seven
+    groups plus `Finished`. Changed 2026-10-22 by request.
+
+    It used to `continue` past a group with no planned substages, and
+    `plan_stages` is config-driven, so a run that enabled few optional
+    stages rendered a bar with one or two pills on it. The operator could
+    not tell "this pipeline has no transcribe step" from "the bar is
+    broken", and the bar's length changed between two runs of the same
+    video — which made it useless as a thing to glance at.
+
+    A group with nothing planned is now `skipped` rather than absent: the
+    pipeline HAS that step, this run is not doing it, and those are
+    different claims from "it does not exist".
+    """
     by_group: Dict[str, List[Dict[str, Any]]] = {}
     for s in stages:
         if s["key"] in HIDDEN_KEYS:
             continue
         by_group.setdefault(_GROUP_OF.get(s["key"], "other"), []).append(s)
+
     out = []
     for gid, label, _keys in PHASE_GROUPS:
         subs = by_group.pop(gid, [])
-        if not subs:
-            continue
         out.append({"id": gid, "label": label,
-                    "state": _rollup([s["state"] for s in subs]),
+                    # No substages means this run never configured the step.
+                    # `skipped`, not `pending`: pending reads as "still to
+                    # come" and would leave a finished run looking unfinished.
+                    "state": _rollup([s["state"] for s in subs]) if subs
+                             else "skipped",
                     "wall_s": _sum_opt(s.get("wall_s") for s in subs),
                     "substages": subs})
     for gid, subs in by_group.items():            # unknown keys, kept visible
@@ -635,7 +725,36 @@ def _group_phases(stages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                     "state": _rollup([s["state"] for s in subs]),
                     "wall_s": _sum_opt(s.get("wall_s") for s in subs),
                     "substages": subs})
+
+    out.append(_finished_phase(out))
     return out
+
+
+def _finished_phase(phases: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """The `Finished` pill: done only when every other pill is.
+
+    `skipped` counts as complete — a step this run was never going to take
+    is not work outstanding. A `deferred` substage does NOT, and that is the
+    load-bearing case: a draft run leaves 9h pending-and-deferred because
+    lip-sync is a separate, expensive, explicit act. Treating it as complete
+    would light `Finished` over a dub nobody has lip-synced, which is the
+    screen asserting something false.
+    """
+    states = [p["state"] for p in phases]
+    if "failed" in states:
+        return {"id": FINISHED_ID, "label": FINISHED_LABEL,
+                "state": "failed", "wall_s": None, "substages": []}
+    deferred = any(s.get("deferred") and s.get("state") == "pending"
+                   for p in phases for s in p["substages"])
+    complete = all(s in ("done", "skipped") for s in states) and not deferred
+    return {"id": FINISHED_ID, "label": FINISHED_LABEL,
+            "state": "done" if complete else "pending",
+            # None, NOT the sum of the others. The ribbon adds `wall_s`
+            # across phases to show elapsed time, so a total here would be
+            # counted twice and report double the real runtime. This pill
+            # marks a moment, not work.
+            "wall_s": None,
+            "substages": []}
 
 
 def _rollup(states: List[str]) -> str:

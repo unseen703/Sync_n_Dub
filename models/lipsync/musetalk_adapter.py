@@ -11,7 +11,8 @@ fly, shells out to the script, and copies the result to the requested
 output path.
 
 Env:
-  MUSETALK_REPO       (default: third_party/MuseTalk)
+  MUSETALK_REPO       (default: models/lipsync/vendor/musetalk,
+                       falling back to third_party/MuseTalk)
   MUSETALK_CHECKPOINT (default: third_party/MuseTalk/models — the repo's
                         pretrained-weights folder; adapter also accepts
                         a path to a specific unet.pth)
@@ -28,10 +29,11 @@ import sys
 import pickle
 import tempfile
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 
+from backend.media_io import probe_video as _probe_video
 from . import coords
-from .base import BaseLipSync, LipSyncRequest, LipSyncResult, resolve_env_python
+from .base import BaseLipSync, LipSyncRequest, LipSyncResult, resolve_env_python, resolve_vendor_repo
 
 log = logging.getLogger(__name__)
 
@@ -62,6 +64,42 @@ DEFAULT_REPO = "third_party/MuseTalk"
 #: The output is then 1080p where the source was larger, which is a real
 #: change and is logged rather than left to be discovered.
 MAX_RENDER_HEIGHT = 1080
+
+
+def _rescale_boxes(boxes, scale):
+    """Move a supplied `coord_list` into the RENDERED frame's coordinates.
+
+    `backend.lipsync_targets.build_coord_list` reads the SOURCE video, so its
+    boxes are clamped to the source frame -- 3840x2160 on the IIT lecture.
+    `_cap_resolution` then hands MuseTalk a 1920x1080 re-encode, and
+    `scripts/inference.py` slices `frame[y1:y2, x1:x2]` with whatever it was
+    given. A 4K box on a 1080p frame slices past the bottom edge, numpy
+    returns a 0-row array, and `cv2.resize` raises
+    `(-215:Assertion failed) !ssize.empty()` -- *after* the model has loaded
+    and the frames have been extracted. Measured: 87 s to fail.
+
+    So the adapter owns this conversion, because the adapter is the layer
+    that changed the frame size. The alternative -- having the caller build
+    the list against the downscaled file -- would mean every caller
+    re-deriving a cap that lives here.
+
+    `PLACEHOLDER` is matched BEFORE scaling and passed through untouched:
+    it is MuseTalk's `coord_placeholder` sentinel meaning "write this frame
+    unchanged", not a box at the origin, and it has to stay bit-identical to
+    be recognised.
+    """
+    sx, sy = scale
+    if (sx, sy) == (1.0, 1.0):
+        return list(boxes)
+    out = []
+    for b in boxes:
+        t = tuple(b)
+        if t == (0.0, 0.0, 0.0, 0.0):
+            out.append(t)
+            continue
+        x1, y1, x2, y2 = t
+        out.append((int(x1 * sx), int(y1 * sy), int(x2 * sx), int(y2 * sy)))
+    return out
 
 
 class MuseTalkSync(BaseLipSync):
@@ -115,7 +153,8 @@ class MuseTalkSync(BaseLipSync):
         cuda_device: Optional[int] = None,
     ):
         super().__init__(device=device, cuda_device=cuda_device)
-        self.repo_path = Path(repo_path or os.getenv("MUSETALK_REPO") or DEFAULT_REPO)
+        self.repo_path = resolve_vendor_repo(
+            "musetalk", "MUSETALK_REPO", repo_path, legacy=DEFAULT_REPO)
         self.checkpoint = checkpoint or os.getenv("MUSETALK_CHECKPOINT")
         self.python_bin = resolve_env_python("musetalk", "musetalk", python_bin)
         self.version = (version or os.getenv("MUSETALK_VERSION") or "v15").lower()
@@ -154,8 +193,15 @@ class MuseTalkSync(BaseLipSync):
             raise RuntimeError(f"MuseTalk scripts/inference.py missing at {inference}")
         self._loaded = True
 
-    def _cap_resolution(self, video: Path, work: Path) -> Path:
-        """Downscale to `self.max_height` if taller. Returns what to render.
+    def _cap_resolution(self, video: Path, work: Path
+                        ) -> Tuple[Path, Tuple[float, float]]:
+        """Downscale to `self.max_height` if taller.
+
+        Returns `(what to render, (sx, sy))`, where the factors map SOURCE
+        pixel coordinates onto the rendered frame. They are `(1.0, 1.0)`
+        whenever nothing was rescaled, which includes every failure path.
+        Callers that hold coordinates in source space -- the supplied
+        `coord_list` -- must apply them; see `_rescale_boxes`.
 
         Returns the ORIGINAL path on any failure. A render at the source
         resolution is the old behaviour and still works for anything that
@@ -166,12 +212,13 @@ class MuseTalkSync(BaseLipSync):
         dimension, and 2160 -> 1080 on a 1920-wide source is fine but an
         unusual aspect ratio lands on an odd width and ffmpeg refuses.
         """
+        unscaled = (1.0, 1.0)
         if self.max_height <= 0:
-            return video
+            return video, unscaled
         from backend.media_io import _ffmpeg_bin, _ffprobe_bin
         ffprobe, ffmpeg = _ffprobe_bin(), _ffmpeg_bin()
         if not ffprobe or not ffmpeg:
-            return video
+            return video, unscaled
         try:
             r = subprocess.run(
                 [ffprobe, "-v", "error", "-select_streams", "v:0",
@@ -181,9 +228,9 @@ class MuseTalkSync(BaseLipSync):
         except Exception as e:                           # noqa: BLE001
             log.warning("musetalk: could not probe %s (%s); rendering at "
                         "source resolution", video.name, e)
-            return video
+            return video, unscaled
         if h <= self.max_height:
-            return video
+            return video, unscaled
 
         scaled = work / f"{video.stem}.{self.max_height}p.mp4"
         log.info("musetalk: downscaling %dx%d -> %dp before render "
@@ -203,12 +250,30 @@ class MuseTalkSync(BaseLipSync):
                 log.warning("musetalk: downscale failed (%s); rendering at "
                             "source resolution",
                             (p.stderr or "").strip()[-200:])
-                return video
+                return video, unscaled
         except Exception as e:                           # noqa: BLE001
             log.warning("musetalk: downscale failed (%s); rendering at "
                         "source resolution", e)
-            return video
-        return scaled
+            return video, unscaled
+
+        # The factors are measured off the ENCODED file rather than computed
+        # from `max_height`, because `-2` rounds the width to an even number:
+        # a 1998-wide source lands on 998, not 999, and a factor that assumed
+        # otherwise would drift the boxes sideways.
+        try:
+            r = subprocess.run(
+                [ffprobe, "-v", "error", "-select_streams", "v:0",
+                 "-show_entries", "stream=width,height", "-of", "csv=p=0",
+                 str(scaled)], capture_output=True, text=True, timeout=60)
+            nw, nh = (int(x) for x in r.stdout.strip().splitlines()[0].split(",")[:2])
+        except Exception as e:                           # noqa: BLE001
+            # The file rendered, so keep it -- but a supplied coord list
+            # cannot be converted without the factor, and guessing it is how
+            # the 4K-boxes-on-a-1080p-frame crash happened. Refuse instead.
+            raise RuntimeError(
+                f"musetalk: downscaled {video.name} but could not probe the "
+                f"result to convert target boxes ({e})") from e
+        return scaled, (nw / w, nh / h)
 
     def sync(self, request: LipSyncRequest) -> LipSyncResult:
         self._ensure_loaded()
@@ -223,7 +288,7 @@ class MuseTalkSync(BaseLipSync):
             # BEFORE the yaml is written and before any coord-cache key is
             # derived: a cache entry keyed on the 4K file would carry boxes
             # in 4K coordinates into a 1080p render.
-            video_abs = self._cap_resolution(video_abs, tdp)
+            video_abs, frame_scale = self._cap_resolution(video_abs, tdp)
             yaml_path = tdp / "task.yaml"
             # MuseTalk's inference.py expects {task_name: {video_path, audio_path, bbox_shift}}
             task_name = Path(request.out_path).stem
@@ -266,13 +331,18 @@ class MuseTalkSync(BaseLipSync):
             # ever stored, and a staged hit was never read.
             staged = tdp / (video_abs.name.split(".")[0] + ".pkl")
             if targets:
+                # Source-space boxes onto the frame actually being rendered.
+                targets = _rescale_boxes(targets, frame_scale)
                 staged.write_bytes(pickle.dumps(list(targets)))
                 cmd.append("--use_saved_coord")
                 # Keep it, or inference.py deletes the file we just wrote.
                 cmd.append("--saved_coord")
                 log.info("musetalk: using %d supplied target boxes "
-                         "(%d frames left untouched)", len(targets),
-                         sum(1 for b in targets if tuple(b) == (0.0, 0.0, 0.0, 0.0)))
+                         "(%d frames left untouched%s)", len(targets),
+                         sum(1 for b in targets if tuple(b) == (0.0, 0.0, 0.0, 0.0)),
+                         "" if frame_scale == (1.0, 1.0) else
+                         f", rescaled x{frame_scale[0]:.4f}/{frame_scale[1]:.4f} "
+                         f"for the downscaled frame")
             elif self.use_coord_cache:
                 cached = coords.load(video_abs, "musetalk", coord_params,
                                      expect_frames=_nb_frames(video_abs))
@@ -283,8 +353,18 @@ class MuseTalkSync(BaseLipSync):
                 # without it inference.py deletes it on the way out.
                 cmd.append("--saved_coord")
             log.info("musetalk[gpu=%s]: %s", self.cuda_device, " ".join(cmd))
+            env = dict(self._subprocess_env())
+            # Lazy decode saves ~17 GiB RSS on a 2-min 1080p clip at identical
+            # wall time with bit-identical output -- but ONLY on the
+            # --use_saved_coord branch (vendor/musetalk/scripts/inference.py:286).
+            # The cold-cache branch calls get_landmark_and_bbox, which loads
+            # every frame anyway, so lazy there adds a decode for no win. An
+            # operator-set value wins, so A/Bs stay possible; see
+            # scripts/ab_lazy_frames.py.
+            if "--use_saved_coord" in cmd and "MUSETALK_LAZY_FRAMES" not in env:
+                env["MUSETALK_LAZY_FRAMES"] = "1"
             proc = subprocess.run(cmd, cwd=str(self.repo_path),
-                                  env=self._subprocess_env(),
+                                  env=env,
                                   capture_output=True, text=True)
             if proc.returncode != 0:
                 return LipSyncResult(
@@ -371,34 +451,3 @@ def _nb_frames(path: Path) -> Optional[int]:
     except Exception:                                    # noqa: BLE001
         return None
 
-
-def _probe_video(path: Path) -> tuple[float, float]:
-    # media_io._ffprobe_bin() rather than shutil.which: there is no
-    # ffprobe on this host's PATH, and which() returning None here
-    # silently degrades to "unknown" instead of failing (CLAUDE.md §1).
-    from backend.media_io import _ffprobe_bin
-    ffprobe = _ffprobe_bin()
-    if not ffprobe or not Path(path).exists():
-        return (0.0, 0.0)
-    try:
-        proc = subprocess.run(
-            [ffprobe, "-v", "error", "-select_streams", "v:0",
-             "-show_entries", "stream=r_frame_rate",
-             "-show_entries", "format=duration",
-             "-of", "default=noprint_wrappers=1:nokey=1", str(path)],
-            capture_output=True, text=True, check=True,
-        )
-        lines = [l.strip() for l in proc.stdout.strip().splitlines() if l.strip()]
-        fps = 0.0; dur = 0.0
-        if lines:
-            rate = lines[0]
-            if "/" in rate:
-                n, d = rate.split("/", 1)
-                fps = float(n) / float(d) if float(d) else 0.0
-            else:
-                fps = float(rate)
-        if len(lines) > 1:
-            dur = float(lines[1])
-        return (fps, dur)
-    except Exception:
-        return (0.0, 0.0)

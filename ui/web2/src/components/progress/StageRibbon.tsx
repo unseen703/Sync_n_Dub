@@ -87,8 +87,26 @@ export function StageRibbon() {
   const doneCount = phases.filter(isDone).length;
   const runningIdx = phases.findIndex((p) => p.state === 'running');
   const failedIdx = phases.findIndex((p) => p.state === 'failed');
-  const allDone = progress.state === 'done' || doneCount === n;
+  // The PHASES decide this, not `progress.state`.
+  //
+  // A draft submission dubs the audio and stops, leaving stage 9h planned
+  // and pending (`ui/progress.py::plan_stages`). The run genuinely finished,
+  // so `state === 'done'` — but the pipeline did not, and reading "Finished"
+  // over a bar with an unlit Lip sync node is the screen contradicting
+  // itself. Counting the nodes is the one answer that cannot do that.
+  const allDone = n > 0 && doneCount === n;
   const current = failedIdx >= 0 ? phases[failedIdx] : (phases[runningIdx] ?? null);
+  // Nothing running, nothing failed, not all done: the run is over and a
+  // stage is still owed. Name it rather than leaving the heading on
+  // "Starting", which is what the fallback below would otherwise say about a
+  // dub that is complete apart from lip-sync.
+  // The trailing `Finished` pill is excluded: it is pending BY DEFINITION
+  // whenever the run is not complete, so without this the heading reads
+  // "Finished not started", which is both absurd and the opposite of what
+  // the operator needs — the name of the step actually still owed.
+  const pending = !current && !allDone
+    ? phases.find((p) => p.state === 'pending' && p.id !== 'finished') ?? null
+    : null;
   const elapsed = phases.reduce((a, p) => a + (p.wall_s ?? 0), 0);
 
   return (
@@ -104,7 +122,9 @@ export function StageRibbon() {
             ? `Failed · ${current?.label}`
             : allDone
               ? 'Finished'
-              : (current?.label ?? 'Starting')}
+              : pending
+                ? `${pending.label} not started`
+                : (current?.label ?? 'Starting')}
         </span>
         {failedIdx < 0 ? (
           <span className="text-[12px] text-ink3">

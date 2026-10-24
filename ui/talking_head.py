@@ -30,6 +30,8 @@ from __future__ import annotations
 
 import json
 import logging
+import re
+import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -37,6 +39,17 @@ log = logging.getLogger(__name__)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CATALOGUE = REPO_ROOT / "data" / "talking_head" / "dialogues.json"
+
+#: Named in the "wrong interpreter" message below. Derived the way
+#: `models/lipsync/base.py::resolve_env_python` derives a sibling env — from
+#: the conda prefix two levels above whichever python is running — so it stays
+#: right if the install moves, and falls back to the documented path.
+_DUBBING_PY = str(
+    (Path(sys.executable).resolve().parent.parent.parent / "dubbing" / "bin"
+     / "python")
+    if (Path(sys.executable).resolve().parent.parent.parent / "dubbing"
+        / "bin" / "python").exists()
+    else "/data1/dipak_data/miniconda3/envs/dubbing/bin/python")
 
 #: Longest edge we hand to the renderer. Above this MuseTalk's S3FD finds no
 #: face at all and the run dies on a divide-by-zero; 1280 is the width that
@@ -130,7 +143,23 @@ def _detector(device: str = "cpu"):
     # stderr. Verified on this host: `import torch` first and the import
     # succeeds with no preload at all.
     import torch  # noqa: F401
-    from insightface.app import FaceAnalysis
+    try:
+        from insightface.app import FaceAnalysis
+    except ImportError as e:
+        # NOT the same failure as a detector that loads and then misbehaves,
+        # and the two need different things from whoever reads it. This one is
+        # "the server is running in the wrong interpreter", and the only fact
+        # that identifies which is `sys.executable` — so say it.
+        #
+        # Seen on this host 2026-10-21: `python -m ui.server` was started from
+        # `.venv-diarization` (a uv venv with torch and cv2 but no
+        # insightface) rather than from `envs/dubbing`, and every photo upload
+        # answered "ModuleNotFoundError" with nothing pointing at the cause.
+        raise ImportError(
+            f"insightface is not installed in the interpreter running this "
+            f"server ({sys.executable}). Start ui.server from the dubbing "
+            f"env: {_DUBBING_PY} -m ui.server"
+        ) from e
     app = FaceAnalysis(name="buffalo_l", allowed_modules=("detection",))
     app.prepare(ctx_id=-1 if device == "cpu" else 0, det_size=(640, 640))
     _APP = app
@@ -155,6 +184,15 @@ def probe_image(path: Path, *, device: str = "cpu") -> Dict[str, Any]:
     h, w = img.shape[:2]
     try:
         faces = _detector(device).get(img)
+    except ImportError as e:
+        # The wrong-interpreter case, kept separate because it is the only
+        # one the reader can act on and `type(e).__name__` is useless for it:
+        # "ModuleNotFoundError" names the exception class, not the mistake.
+        # `_detector` has already built the sentence, naming the python that
+        # is running and the one that should be, so pass it through verbatim.
+        log.error("talking head: %s", e)
+        return {"ok": False, "reason": "detector_not_installed", "width": w,
+                "height": h, "message": str(e)}
     except Exception as e:                              # noqa: BLE001
         # A detector that cannot load is an environment fault, not a bad
         # photo, and the two need different things from whoever reads it.
@@ -238,3 +276,190 @@ def prepare_image(src: Path, dst: Path, *, max_edge: int = MAX_EDGE) -> Path:
     dst.parent.mkdir(parents=True, exist_ok=True)
     cv2.imwrite(str(dst), img)
     return dst
+
+
+# ---------------------------------------------------------------------------
+# the render
+# ---------------------------------------------------------------------------
+#
+# Shaped after `ui/bbox_video.py`, which is already this repo's answer to "a
+# GPU job a web request cannot wait for": a daemon thread, a status json
+# beside the output, and a GET the page polls. A render here is 8-21x the
+# clip length, so doing it inline dies to a browser timeout while the work
+# carries on -- the worst of both.
+#
+# MuseTalk is the model, and not a choice: it is the one that takes a single
+# image natively (`get_file_type` accepts .jpg/.png and the frame cycle
+# reuses the one frame for every audio chunk), verified on this host at
+# 1280x720 + 7 s of audio -> 7.0 s at 25 fps. Wav2Lip's vendored S3FD refuses
+# a large frame outright and LatentSync wants 512x512 it has no VRAM for.
+
+RENDER_MODEL = "musetalk"
+RENDERS_SUBDIR = "renders"
+RENDER_STATUS_NAME = "render.status.json"
+RENDER_VIDEO_NAME = "out.mp4"
+RENDER_FRAME_NAME = "source.png"
+
+#: Where photos, clips and renders live. A module constant so a test can
+#: point it somewhere disposable; `ui/routes_talkinghead.py` reads this one
+#: rather than keeping a second copy.
+DATA_DIR = REPO_ROOT / "data"
+
+_RENDER_LOCKS: Dict[str, Any] = {}
+
+
+#: A render id is a folder name, and it arrives from the client on the poll.
+#: Built here from a uuid prefix and a catalogue id, both of which match
+#: this — but `GET /api/talking-head/render/{id}` takes whatever is sent, and
+#: `Path / ".."` is not a string operation. Rejecting beats sanitising: a
+#: cleaned-up id would read a DIFFERENT render's status and report it as this
+#: one's.
+_RENDER_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
+
+
+def render_paths(render_id: str) -> Dict[str, Path]:
+    if not _RENDER_ID_RE.match(render_id or ""):
+        raise ValueError(f"not a render id: {render_id!r}")
+    d = DATA_DIR / "talking_head" / RENDERS_SUBDIR / render_id
+    return {"dir": d, "video": d / RENDER_VIDEO_NAME,
+            "frame": d / RENDER_FRAME_NAME,
+            "status": d / RENDER_STATUS_NAME}
+
+
+def _write_render_status(render_id: str, **kw) -> Dict[str, Any]:
+    import os
+    import time
+
+    p = render_paths(render_id)
+    p["dir"].mkdir(parents=True, exist_ok=True)
+    doc = {"render_id": render_id, "updated_at": time.time(), **kw}
+    tmp = p["status"].with_suffix(".tmp")
+    tmp.write_text(json.dumps(doc, indent=2))
+    os.replace(tmp, p["status"])
+    return doc
+
+
+def render_status(render_id: str) -> Dict[str, Any]:
+    """State of one render, with the FILE as the arbiter.
+
+    Not the status field. A killed process leaves a stale `running` behind
+    forever, and a `done` with no mp4 is the exact failure CLAUDE.md §4
+    records for lip-sync: `run_lipsync` used to log "done -> <path>" and
+    record the path it had ASKED for, so a 40 s run exited 0 and left a
+    manifest naming a file that was never created.
+    """
+    try:
+        p = render_paths(render_id)
+    except ValueError:
+        return {"render_id": render_id, "state": "absent", "ready": False,
+                "error": "not a render id"}
+    try:
+        doc = json.loads(p["status"].read_text())
+    except (OSError, ValueError):
+        doc = {}
+    ready = p["video"].is_file() and p["video"].stat().st_size > 0
+    state = doc.get("state") or ("done" if ready else "absent")
+    if state == "done" and not ready:
+        state = "failed"
+        doc.setdefault("error", "the renderer reported success but wrote no "
+                                "video")
+    out = {**doc, "render_id": render_id, "state": state, "ready": ready}
+    if ready:
+        out["url"] = _files_url(p["video"])
+    return out
+
+
+def _files_url(p: Path) -> Optional[str]:
+    try:
+        return "/files/" + p.resolve().relative_to(
+            DATA_DIR.resolve()).as_posix()
+    except ValueError:                                  # pragma: no cover
+        return None
+
+
+def render(render_id: str, *, photo: Path, audio: Path,
+           model: str = RENDER_MODEL) -> Dict[str, Any]:
+    """Animate `photo` against `audio`. Blocking; `start_render` wraps it."""
+    from models.lipsync import LipSyncRequest, get_lipsync
+
+    p = render_paths(render_id)
+    p["dir"].mkdir(parents=True, exist_ok=True)
+
+    audio = Path(audio)
+    if not audio.is_file():
+        raise FileNotFoundError(f"no audio clip at {audio}")
+
+    # Downscale and even up the sides BEFORE the model loads. Both failures
+    # this guards are post-load: a 4K still makes S3FD return `[None]` and
+    # MuseTalk then divides by zero in a print statement, and an odd
+    # dimension makes x264 refuse to open the encoder. Either one costs the
+    # whole GPU job to discover.
+    frame = prepare_image(photo, p["frame"])
+    _write_render_status(render_id, state="running", model=model,
+                         frame=str(frame), audio=str(audio))
+
+    ls = get_lipsync(model)
+    res = ls.sync(LipSyncRequest(video=frame, audio=audio,
+                                 out_path=p["video"]))
+
+    # The file is the arbiter, again and for the same reason. `rc=0` with no
+    # output is the Wav2Lip shape -- `inference.py` muxes with
+    # `subprocess.call` and discards the return code -- so an adapter can
+    # finish cleanly and have produced nothing.
+    produced = p["video"].is_file() and p["video"].stat().st_size > 0
+    if res.error or not produced:
+        err = res.error or ("the renderer exited cleanly but wrote no video "
+                            f"to {p['video'].name}")
+        log.error("talking head: render %s failed: %s", render_id, err)
+        return _write_render_status(render_id, state="failed", model=model,
+                                    error=err)
+
+    log.info("talking head: render %s -> %s (%.2fs @ %.1f fps)",
+             render_id, p["video"], res.duration_s, res.fps)
+    return _write_render_status(render_id, state="done", model=model,
+                                duration_s=res.duration_s, fps=res.fps,
+                                note=ANIMATION_NOTE)
+
+
+def start_render(render_id: str, *, photo: Path, audio: Path,
+                 model: str = RENDER_MODEL) -> Dict[str, Any]:
+    """Kick a render off in a thread, unless one is already going for this id."""
+    import threading
+
+    lock = _RENDER_LOCKS.setdefault(render_id, threading.Lock())
+    if not lock.acquire(blocking=False):
+        return render_status(render_id)
+
+    def _run():
+        try:
+            render(render_id, photo=photo, audio=audio, model=model)
+        except Exception as e:                          # noqa: BLE001
+            log.exception("talking head: render %s failed", render_id)
+            _write_render_status(render_id, state="failed", model=model,
+                                 error=f"{type(e).__name__}: {e}")
+        finally:
+            lock.release()
+
+    _write_render_status(render_id, state="running", model=model)
+    threading.Thread(target=_run, daemon=True,
+                     name=f"talking-head-{render_id[:8]}").start()
+    return render_status(render_id)
+
+
+def audio_path_for(audio_url: str) -> Optional[Path]:
+    """`/files/talking_head/audio/x.wav` -> the file on disk.
+
+    The catalogue stores a URL because the page plays it directly. The
+    renderer needs a path, and resolving it has to stay inside `DATA_DIR`:
+    these rows are data, and a `../` in one must not read an arbitrary file.
+    """
+    url = (audio_url or "").strip()
+    if not url.startswith("/files/"):
+        return None
+    candidate = (DATA_DIR / url[len("/files/"):]).resolve()
+    try:
+        candidate.relative_to(DATA_DIR.resolve())
+    except ValueError:
+        log.warning("talking head: audio_url escapes the data dir: %r", url)
+        return None
+    return candidate if candidate.is_file() else None

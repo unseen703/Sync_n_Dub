@@ -128,6 +128,66 @@ def test_a_per_segment_tone_edit_outranks_the_register(tmp_path, monkeypatch):
                          ("SEG_0002", "educational lecture")]
 
 
+# --- the one style that is the absence of a style -------------------------
+
+def test_neutral_takes_a_segment_off_the_register(tmp_path, monkeypatch):
+    """`neutral` must reach the engine as NO style, not as the word.
+
+    It cannot be expressed by clearing `tts_style`: None is exactly what an
+    unedited segment looks like, and the `segment or document` precedence
+    would then fall straight back to the register the operator just asked to
+    be rid of. So the sentinel travels as itself and
+    `models.tts.resolve_style` drops it here, at the last hop before the
+    payload. `"neutral"` reaching the API would be a 422 on every segment.
+    """
+    from models.tts import NEUTRAL_STYLE
+
+    vmap = {"SPK_00": {"engine": "indic-speak", "voice": "Amit",
+                       "style": "educational lecture"},
+            "SPK_01": {"engine": "indic-speak", "voice": "Kavya",
+                       "style": "educational lecture"}}
+    segs = [dict(SEGS[0], tts_style=NEUTRAL_STYLE), dict(SEGS[1])]
+    stub = _run(tmp_path, monkeypatch, vmap, segs)
+    assert stub.seen == [("SEG_0001", None),
+                         ("SEG_0002", "educational lecture")]
+
+
+def test_a_neutral_document_register_reaches_no_segment(tmp_path, monkeypatch):
+    """The whole-dub form offers it too, so it arrives on the speaker map."""
+    from models.tts import NEUTRAL_STYLE
+
+    vmap = {"SPK_00": {"engine": "indic-speak", "voice": "Amit",
+                       "style": NEUTRAL_STYLE},
+            "SPK_01": {"engine": "indic-speak", "voice": "Kavya",
+                       "style": NEUTRAL_STYLE}}
+    stub = _run(tmp_path, monkeypatch, vmap, SEGS)
+    assert stub.seen == [("SEG_0001", None), ("SEG_0002", None)]
+
+
+def test_neutral_is_not_an_engine_style():
+    """If upstream ever adds one, the sentinel stops being unambiguous.
+
+    `resolve_style` maps the literal to None, so a real Bodhan style of the
+    same name could never be requested — it would silently become "no style"
+    on every segment.
+    """
+    from models.tts import NEUTRAL_STYLE
+    from models.tts.bodhan_adapter import INDIC_SPEAK_STYLES
+
+    assert NEUTRAL_STYLE not in INDIC_SPEAK_STYLES
+    assert not any(s.lower() == NEUTRAL_STYLE for s in INDIC_SPEAK_STYLES)
+
+
+def test_resolve_style_keeps_the_existing_precedence():
+    """Everything that is not the sentinel behaves exactly as `seg or doc`."""
+    from models.tts import resolve_style
+
+    assert resolve_style("news", "educational lecture") == "news"
+    assert resolve_style(None, "educational lecture") == "educational lecture"
+    assert resolve_style("", "educational lecture") == "educational lecture"
+    assert resolve_style(None, None) is None
+
+
 # --- hop 5: TTSRequest -> HTTP payload ------------------------------------
 
 def _payload(style):

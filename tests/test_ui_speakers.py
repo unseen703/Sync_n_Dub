@@ -286,18 +286,49 @@ def test_tone_values_are_the_adapter_s_verbatim():
     are significant, and an unknown value is a **422, not a silent
     fallback**. So an invented vocabulary does not degrade — every tone
     change fails at the API with nothing in the UI to explain it.
+
+    `NEUTRAL_STYLE` leads the list and is the ONE exception, added
+    2026-10-21. It is not an invented engine style: it never reaches the
+    engine at all, because `models.tts.resolve_style` maps it to None and a
+    None style is simply omitted from the payload. It is how a speaker is
+    taken OFF a register, which the dropdown previously could not express —
+    every option in it was another register.
     """
+    from models.tts import NEUTRAL_STYLE
     from models.tts.bodhan_adapter import INDIC_SPEAK_STYLES
     values = [t["value"] for t in S.tone_vocabulary()]
-    assert values == list(INDIC_SPEAK_STYLES)
+    assert values == [NEUTRAL_STYLE] + list(INDIC_SPEAK_STYLES)
 
 
 def test_tone_labels_never_replace_the_wire_value():
     """The dropdown may prettify "AIR style news"; the POST may not."""
+    from models.tts import NEUTRAL_STYLE
     from models.tts.bodhan_adapter import INDIC_SPEAK_STYLES
     for t in S.tone_vocabulary():
-        assert t["value"] in INDIC_SPEAK_STYLES
+        assert t["value"] in INDIC_SPEAK_STYLES or t["value"] == NEUTRAL_STYLE
         assert t["label"]
+
+
+def test_neutral_is_offered_on_both_dropdowns():
+    """The per-speaker Delivery picker AND the new-job Type dropdown.
+
+    Neither could ask for a plain reading before. The form's other
+    non-engine value, "auto", means *classify a register from the video's
+    metadata* — the opposite of asking for none — so a dub could be given a
+    register by three different routes and taken off one by none.
+    """
+    from models.tts import NEUTRAL_STYLE
+    assert S.tone_vocabulary()[0]["value"] == NEUTRAL_STYLE
+    assert S.submit_style_options()[0]["value"] == NEUTRAL_STYLE
+
+
+def test_the_submit_form_still_offers_the_four_real_formats():
+    """Neutral is an addition, not a replacement."""
+    from models.tts.bodhan_adapter import INDIC_SPEAK_STYLES
+    values = [o["value"] for o in S.submit_style_options()]
+    for style in S.SUBMIT_STYLES:
+        assert style in values
+        assert style in INDIC_SPEAK_STYLES
 
 
 def test_emotions_are_grouped_apart_from_delivery_styles():

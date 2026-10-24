@@ -36,6 +36,13 @@
   --c-aqua: 34 211 238; /* #22D3EE */
   --c-aqua-ink: 103 232 249; /* #67E8F9 — 13.4:1 */
 
+  /* The STAGED value — what a change will make this read as, beside the
+     struck-through value it replaces. Its own token rather than `brand-ink`:
+     brand already means "this control is active/selected" all over the app,
+     and a staged edit is a different claim — not yet true. Reusing it would
+     have made a pending change look like a current state. 7.8:1. */
+  --c-blue-ink: 96 165 250; /* #60A5FA */
+
   --c-ok: 110 231 183; /* #6EE7B7 — 12.8:1 */
   --c-warn: 251 191 36; /* #FBBF24 — 11.7:1 */
   --c-danger: 252 165 165; /* #FCA5A5 — 10.3:1 */
@@ -65,7 +72,7 @@
 
   Every ink token below was measured against every surface token:
     ink 17.4  ink-2 9.6  ink-3 6.5  ink-4 5.0   (AA floor is 4.5)
-    brand-ink 7.4  aqua-ink 5.0  ok 5.1  warn 6.6  danger 5.8
+    brand-ink 7.4  aqua-ink 5.0  blue-ink 6.1  ok 5.1  warn 6.6  danger 5.8
     edge 3.3  (3:1 is the floor for a control boundary)
 */
 :root[data-theme='light'] {
@@ -89,6 +96,7 @@
 
   --c-aqua: 14 116 144; /* #0E7490 */
   --c-aqua-ink: 14 116 144; /* 5.0:1 */
+  --c-blue-ink: 29 78 216; /* #1D4ED8 — 6.1:1 */
   --c-ok: 4 120 87; /* #047857 — 5.1:1 */
   --c-warn: 146 64 14; /* #92400E — 6.6:1 */
   --c-danger: 190 18 60; /* #BE123C — 5.8:1 */

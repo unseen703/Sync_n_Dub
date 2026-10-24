@@ -44,12 +44,12 @@ import time
 from pathlib import Path
 from typing import List, Optional
 
+from .._bodhan import BodhanClientMixin
 from .base import BaseTTS, TTSRequest, TTSResult, TTSSegment
 
 log = logging.getLogger(__name__)
 
 
-DEFAULT_URL = "https://api.bodhan.ai/v1"
 
 #: The 14 delivery styles indic-speak accepts, verbatim from the hosted API
 #: docs (console.bodhan.ai/api-docs). Case and spacing are significant and
@@ -92,7 +92,7 @@ def _rate_range() -> tuple:
     return lo, hi
 
 
-class BodhanTTS(BaseTTS):
+class BodhanTTS(BodhanClientMixin, BaseTTS):
     name = "bodhan"
     #: The engine takes a speaking rate, so `speed_control` is real here --
     #: it re-synthesises at the new pace instead of resampling a finished
@@ -114,34 +114,23 @@ class BodhanTTS(BaseTTS):
         max_backoff_s: float = 60.0,
     ):
         super().__init__(device=device)
-        self.base_url = (base_url or os.getenv("BODHAN_TTS_URL") or DEFAULT_URL).rstrip("/")
-        self.api_key = api_key or os.getenv("BODHAN_TTS_KEY")
-        self.model = model or os.getenv("BODHAN_TTS_MODEL") or DEFAULT_MODEL
-        self.timeout_s = timeout_s
-        self.max_retries = int(os.getenv("BODHAN_MAX_RETRIES", max_retries))
-        self.min_interval_s = float(os.getenv("BODHAN_MIN_INTERVAL_S", min_interval_s))
-        self.max_backoff_s = float(os.getenv("BODHAN_MAX_BACKOFF_S", max_backoff_s))
-        self._session = None
-        self._last_post_ts = 0.0
+        self._init_bodhan(
+            env_prefix="TTS", default_model=DEFAULT_MODEL,
+            base_url=base_url, api_key=api_key, model=model,
+            timeout_s=timeout_s, max_retries=max_retries,
+            min_interval_s=min_interval_s, max_backoff_s=max_backoff_s,
+        )
 
     def _ensure_loaded(self) -> None:
-        if self._loaded:
-            return
-        if not self.api_key:
-            raise RuntimeError(
+        # `Accept: audio/wav` — this is the one Bodhan service that answers
+        # with bytes rather than JSON.
+        if not self._ensure_bodhan_session(
+            missing_key_message=(
                 "BODHAN_TTS_KEY is not set. Add it to .env or pass api_key=…"
-            )
-        try:
-            import requests
-        except ImportError as e:
-            raise RuntimeError("`pip install requests` for the Bodhan adapter.") from e
-        self._session = requests.Session()
-        self._session.headers.update({
-            "Authorization": f"Bearer {self.api_key}",
-            "Accept": "audio/wav",
-            "Content-Type": "application/json",
-        })
-        self._loaded = True
+            ),
+            accept="audio/wav",
+        ):
+            return
         log.info("bodhan tts: base_url=%s model=%s", self.base_url, self.model)
 
     # ------------------------------------------------------------------
@@ -285,24 +274,7 @@ class BodhanTTS(BaseTTS):
         )
 
     def _log_ratelimit_headers(self, resp) -> None:
-        pairs = [(k, v) for k, v in resp.headers.items()
-                 if k.lower().startswith("x-ratelimit")]
-        if pairs:
-            log.info("bodhan tts rate-limit headers: %s",
-                     ", ".join(f"{k}={v}" for k, v in pairs))
-
-    def _pace(self) -> None:
-        gap = time.monotonic() - self._last_post_ts
-        if gap < self.min_interval_s:
-            time.sleep(self.min_interval_s - gap)
-
-    def _backoff(self, attempt: int, retry_after: Optional[str]) -> float:
-        if retry_after:
-            try:
-                return max(float(retry_after), 1.0)
-            except ValueError:
-                pass
-        return min(2 ** attempt, self.max_backoff_s)
+        super()._log_ratelimit_headers(resp, stage="tts")
 
 
 def _wav_duration(path: Path) -> tuple[float, int]:

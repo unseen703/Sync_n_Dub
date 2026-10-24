@@ -124,11 +124,7 @@ router = APIRouter()
 # job plumbing
 # ---------------------------------------------------------------------------
 
-def _read_json(p: Path) -> Any:
-    try:
-        return json.loads(p.read_text())
-    except (OSError, ValueError):
-        return None
+from ._io import read_json as _read_json
 
 
 def _open(job_id: str) -> A.JobView:
@@ -526,12 +522,21 @@ def agent_params(job_id: str) -> Dict[str, Any]:
     staged_voice: Dict[str, Any] = dict(
         pending.get("speaker_voice_overrides") or {})
     staged_tone: Dict[str, Any] = {}
+    staged_gender: Dict[str, Any] = {}
     staged_window = None
     staged_lipsync = None
     for o in ops:
         spk = o.scope.speaker
         if o.op == "set_tone" and spk:
             staged_tone[spk] = o.params.get("tone")
+        elif o.op == "set_gender" and spk:
+            # Read off the op, like the tone above, rather than resolved.
+            # `_h_set_gender` also picks a VOICE for the new gender, and that
+            # half already arrives through `speaker_voice_overrides` — so the
+            # cast row can show both halves of "make SPEAKER_00 female"
+            # (gender AND the voice it implies) without this endpoint, which
+            # the panel polls, loading a catalog or a model.
+            staged_gender[spk] = o.params.get("gender")
         elif o.op == "lipsync_window":
             staged_window = {"start_s": o.scope.start_s, "end_s": o.scope.end_s}
             staged_lipsync = o.params.get("model") or staged_lipsync
@@ -539,10 +544,16 @@ def agent_params(job_id: str) -> Dict[str, Any]:
     from .speakers import build_table, tone_vocabulary
     table = build_table(view.root, cfg, data_dir=DATA_DIR,
                         merged_json=view.merged_json)
+    # Gender is `{current, staged}` like the other two, not the bare string it
+    # used to be. The cast table reads this endpoint now, and a gender edit
+    # typed into the chat box was the one staged change with nowhere on screen
+    # to appear: "make SPEAKER_00 female" looked like it had done nothing
+    # until it was applied and the dub came back in a different voice.
     speakers = [{
         "id": r["id"],
         "label": r.get("label"),
-        "gender": r.get("gender"),
+        "gender": {"current": r.get("gender"),
+                   "staged": staged_gender.get(r["id"])},
         "speech_s": r.get("speech_s"),
         "voice": {"current": r.get("voice"),
                   "staged": (staged_voice.get(r["id"]) or {}).get("voice")},
@@ -596,6 +607,40 @@ def agent_script(job_id: str, limit: int = 2000) -> Dict[str, Any]:
     merged = _read_json(view.merged_json) or {}
     pending = _read_json(_pending_path(view.root))
     touched = set((pending or {}).get("segments") or [])
+
+    # The staged WORDING, for cues whose pending change is a plain
+    # `set_text`. The panel used to show only a "staged" badge beside the
+    # ORIGINAL line, on the reasoning that resolving a staged change needs
+    # the LLM — true for `retranslate` or `set_tone`, and not true for text
+    # the user typed themselves. The effect was that editing a line, then
+    # editing it again, looked like it did nothing: the row redrew with the
+    # original text and the same badge both times.
+    #
+    # Last op wins, matching how they apply.
+    staged_text: Dict[str, str] = {}
+    # The staged SPEED, resolved the same way and for the same reason. A
+    # `set_speed` op names its segments outright, so the factor is knowable
+    # here without running anything.
+    staged_speed: Dict[str, float] = {}
+    for raw in ((pending or {}).get("ops") or []):
+        if not isinstance(raw, dict):
+            continue
+        scope = raw.get("scope") or {}
+        params = raw.get("params") or {}
+        if raw.get("op") == "set_text":
+            segs = scope.get("segments") or []
+            text = params.get("text")
+            if len(segs) == 1 and isinstance(text, str):
+                staged_text[str(segs[0])] = text
+        elif raw.get("op") == "set_speed":
+            try:
+                factor = float(params.get("factor") or params.get("speed") or 0)
+            except (TypeError, ValueError):
+                continue
+            if factor > 0:
+                for s in (scope.get("segments") or []):
+                    staged_speed[str(s)] = factor
+
     rows = []
     for seg in (merged.get("segments") or [])[:max(1, min(limit, 5000))]:
         sid = str(seg.get("id") or "")
@@ -608,13 +653,47 @@ def agent_script(job_id: str, limit: int = 2000) -> Dict[str, Any]:
             "text": seg.get("final_text") or seg.get("mt_text") or "",
             "tts_voice": seg.get("tts_voice"),
             "tts_style": seg.get("tts_style"),
-            # Whether the pending set would rewrite this cue. The panel
-            # marks these; it does not show the new text, because resolving
-            # it needs the LLM and this endpoint is polled.
+            # Whether the pending set would rewrite this cue.
             "staged": sid in touched,
+            # The staged wording when it is known without running anything
+            # — a `set_text` the user typed. None for a change whose result
+            # only exists after the LLM runs (`retranslate`, `set_tone`), so
+            # the panel can tell "this will change, text unknown" from
+            # "this will read exactly thus".
+            "staged_text": staged_text.get(sid),
+            # How fast this cue is spoken, as a factor of its own slot.
+            #
+            # Derived, not stored: `set_speed` SHORTENS `target_duration_s`
+            # and the timing plan then fits the clip into the smaller slot,
+            # so the factor is `slot / target`. Reading `tts_rate_override`
+            # instead would show only the speed the ENGINE was asked for,
+            # which on a UI run is nothing at all — `supports_rate` gates it
+            # and the default `--tts-speed-control off` never sends it. The
+            # ratio is what the listener actually hears either way.
+            "speed": _cue_speed(seg),
+            "staged_speed": staged_speed.get(sid),
         })
     return {"job_id": view.job_id, "segments": rows,
             "total": len(merged.get("segments") or [])}
+
+
+def _cue_speed(seg: Dict[str, Any]) -> float:
+    """`slot / target_duration_s`, or 1.0 when the cue is untouched.
+
+    1.0 for an ordinary cue: stage 9c writes `target_duration_s` equal to the
+    slot, so the ratio is already 1 and only an edit moves it.
+    """
+    try:
+        slot = float(seg.get("end") or 0.0) - float(seg.get("start") or 0.0)
+        target = seg.get("target_duration_s")
+        if target is None or slot <= 0:
+            return 1.0
+        target = float(target)
+        if target <= 0:
+            return 1.0
+        return round(slot / target, 3)
+    except (TypeError, ValueError):
+        return 1.0
 
 
 @router.post("/api/jobs/{job_id}/agent", dependencies=[Depends(basic_auth)])
@@ -927,10 +1006,12 @@ def lipsync_readiness(job_id: str) -> Dict[str, Any]:
     already = bool(list((view.root / "lipsync").glob("*.mp4")))
 
     # One estimate PER MODEL, because the operator is now the one choosing
-    # and the models differ by roughly 7x on this host (wav2lip 3-5x clip
-    # length, musetalk 8-21x, latentsync ~83x). A model list without the
-    # hours next to it moves the decision without informing it.
+    # and the models differ by roughly 20x on this host (wav2lip 3-5x clip
+    # length, wav2lip_hd 6-24x, musetalk 8-21x, latentsync ~83x). A model
+    # list without the hours next to it moves the decision without informing
+    # it.
     from .routes_create import max_lipsync_s
+    from . import lipsync_models as ls_models
     clip_s = _clip_seconds(_read_json(view.merged_json) or {})
     estimates = {}
     if clip_s:
@@ -950,12 +1031,84 @@ def lipsync_readiness(job_id: str) -> Dict[str, Any]:
         # No default and no pre-selection: the operator chooses, and
         # `POST .../lipsync` 422s without one.
         "model_required": True,
+        # `models` stays a list of ids — it is what the POST takes, and an
+        # older bundle still reads it. `model_rows` carries the same ids with
+        # the label, the speed band and the caveat that belongs in front of
+        # the click: that wav2lip_hd is a second per-frame pass, and that
+        # LatentSync's default 512 UNet does not fit these cards. The panel
+        # used to render the raw registry slug with nothing beside it.
         "models": list(available_models()),
+        "model_rows": ls_models.options(),
         "clip_s": clip_s,
         "max_lipsync_s": max_lipsync_s(),
         "estimates": estimates,
         "face": _asd_face_size(view),
     }
+
+
+@router.delete("/api/jobs/{job_id}/agent/turns/{index}",
+               dependencies=[Depends(basic_auth)])
+def drop_staged_turn(job_id: str, index: int) -> Dict[str, Any]:
+    """Remove ONE staged change, keeping the rest.
+
+    Before this the only retraction was `DELETE .../edits`, which throws the
+    whole set away — so one misparsed sentence among five cost the other
+    four, and the natural move was to apply the bad one and fix it after.
+
+    No LLM runs. Every turn carries the ops it produced, so the remaining
+    set is rebuilt from what is already on disk: the voice/tone `edits`
+    (deterministic, rebuilt through `_build_ops`) plus the ops of the turns
+    that survive. The plan is then re-previewed, because dropping an op
+    changes which stages replay and what the render costs — returning the
+    old cost next to the new set is how a UI comes to quote a price for work
+    it is not going to do.
+    """
+    view = _open(job_id)
+    pending = _read_json(_pending_path(view.root))
+    turns = [t for t in ((pending or {}).get("turns") or []) if isinstance(t, dict)]
+    if not turns:
+        raise HTTPException(409, "Nothing staged for this job")
+    if not 0 <= index < len(turns):
+        raise HTTPException(
+            422, f"No staged change at position {index}; there "
+                 f"{'is' if len(turns) == 1 else 'are'} {len(turns)}.")
+
+    kept = turns[:index] + turns[index + 1:]
+    raw_edits = [e for e in ((pending or {}).get("edits") or [])
+                 if isinstance(e, dict)]
+
+    # Nothing left at all: clear the file rather than leave an empty set
+    # behind, so `can_start` on the lip-sync step stops reporting a blocker.
+    if not kept and not raw_edits:
+        _pending_path(view.root).unlink(missing_ok=True)
+        return {"job_id": view.job_id, "removed": index, "turns": [],
+                "ops": [], "dirty_stages": [], "edits": [], "cleared": True}
+
+    ops: List[E.EditOp] = []
+    if raw_edits:
+        ops.extend(_build_ops(raw_edits, config=_config(view)))
+    for t in kept:
+        for o in (t.get("ops") or []):
+            try:
+                ops.append(E.EditOp.from_dict(o))
+            except E.EditError:
+                continue            # a stale op is dropped, not fatal
+
+    if not ops:
+        _pending_path(view.root).unlink(missing_ok=True)
+        return {"job_id": view.job_id, "removed": index, "turns": [],
+                "ops": [], "dirty_stages": [], "edits": [], "cleared": True}
+
+    try:
+        prev = _agent_preview(view, ops, rewriter=_rewriter())
+    except HTTPException:
+        raise
+    payload = _payload(view.job_id, raw_edits, ops, prev)
+    payload["turns"] = kept
+    _write_atomic(_pending_path(view.root), payload)
+    log.info("agent: dropped staged change %d for %s; %d left",
+             index, view.job_id, len(kept))
+    return payload
 
 
 @router.post("/api/jobs/{job_id}/lipsync", dependencies=[Depends(basic_auth)])
@@ -1222,8 +1375,66 @@ def stage_script(job_id: str, body: Dict[str, Any] = Body(...)) -> Dict[str, Any
         raise HTTPException(
             422, "no changes — every line matches what is already there")
 
-    prev = _preview(view, ops)
-    payload = _payload(view.job_id, cleaned, ops, prev)
+    # MERGE with what is already staged, and record this as a turn.
+    #
+    # This used to build `ops` from the script edits alone and overwrite
+    # `pending.json` outright, which did two wrong things at once: it
+    # DESTROYED every op the agent had staged, and it wrote no turn — so the
+    # edit the user had just typed did not appear in the staged list either.
+    # From the screen it read as "typing a correction deletes my staged
+    # changes and does nothing".
+    #
+    # Same shape as `agent_message`: prior turns and prior ops are carried,
+    # and the new work is appended as one more turn.
+    prior = _read_json(_pending_path(view.root))
+    turns: List[Dict[str, Any]] = []
+    prior_ops: List[E.EditOp] = []
+    prior_edits: List[Dict[str, Any]] = []
+    if isinstance(prior, dict):
+        turns = [t for t in (prior.get("turns") or []) if isinstance(t, dict)]
+        prior_edits = [e for e in (prior.get("edits") or []) if isinstance(e, dict)]
+        try:
+            prior_ops = [E.EditOp.from_dict(o) for o in (prior.get("ops") or [])]
+        except E.EditError:
+            prior_ops = []          # a stale set is dropped, not fatal
+
+    # A second edit of the same cue REPLACES the first rather than stacking
+    # another `set_text` on it. Two ops on one segment are not wrong — the
+    # later wins when applied — but they make the op count, the cost line
+    # and the staged list all describe work that will not happen, and they
+    # grow without bound as someone tunes a line.
+    rewritten = {c["segment_id"] for c in cleaned}
+
+    def _superseded(raw: Any) -> bool:
+        """A plain `set_text` on a cue this request rewrites."""
+        if not isinstance(raw, dict) or raw.get("op") != "set_text":
+            return False
+        segs = ((raw.get("scope") or {}).get("segments") or [])
+        return len(segs) == 1 and str(segs[0]) in rewritten
+
+    all_ops = [o for o in prior_ops if not _superseded(o.to_dict())] + ops
+
+    # Keep the turns consistent with the ops. A turn keeps only its ops that
+    # survived, and a turn left with none is dropped — otherwise the staged
+    # list advertises an edit whose op is no longer in the plan, which is
+    # the same "says one thing, does another" this whole screen is for.
+    pruned: List[Dict[str, Any]] = []
+    for t in turns:
+        kept_ops = [o for o in (t.get("ops") or []) if not _superseded(o)]
+        if kept_ops:
+            pruned.append({**t, "ops": kept_ops})
+    turns = pruned
+
+    prev = _preview(view, all_ops)
+    payload = _payload(view.job_id, prior_edits, all_ops, prev)
+    n = len(ops)
+    payload["turns"] = turns + [{
+        "at": _now(),
+        "message": (f"Rewrote {n} line{'' if n == 1 else 's'}: "
+                    + ", ".join(c["segment_id"] for c in cleaned)),
+        "source": "script",
+        "ops": [o.to_dict() for o in ops],
+    }]
     _write_atomic(_pending_path(view.root), payload)
     _tracing.flush()
     log.info("script: staged %d line edit(s) for %s -> %s",

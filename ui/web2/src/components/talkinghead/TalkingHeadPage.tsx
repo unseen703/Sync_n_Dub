@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Button } from '../ui/Button';
 import { IconAlert, IconSparkle } from '../ui/Icons';
+import { IconSpinner } from '../ui/Icons';
 import {
-  thDialogues, thOptions, thUploadPhoto,
+  thDialogues, thOptions, thRender, thRenderStatus, thUploadPhoto,
   type THCategory, type THDialogue, type THOptions, type THPhoto,
+  type THRender,
 } from '../../api/talkingHead';
 
 /**
@@ -22,9 +24,15 @@ import {
  * read a correct render as a broken one, so the note from the server is
  * shown up front, not buried.
  *
- * Every catalogue line currently has `audio_url: null`. They are listed and
- * marked rather than hidden: an empty page would suggest the feature is
- * missing, when the only missing piece is the clip.
+ * A line with no `audio_url` is listed and MARKED rather than hidden: an
+ * empty page would suggest the feature is missing, when the only missing
+ * piece is the clip. (Every line shipped that way until the 50 clips were
+ * supplied; the rule stays, for lines added later.)
+ *
+ * The render is a background job, so this page POSTs once and then polls.
+ * It is 8-21x the clip length on this host — minutes — which is long enough
+ * that a synchronous request would die to a browser timeout while the GPU
+ * work carried on.
  */
 export function TalkingHeadPage() {
   const [opts, setOpts] = useState<THOptions | null>(null);
@@ -36,6 +44,8 @@ export function TalkingHeadPage() {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [picked, setPicked] = useState<string | null>(null);
+  const [render, setRender] = useState<THRender | null>(null);
+  const [rendering, setRendering] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -71,9 +81,65 @@ export function TalkingHeadPage() {
     }
   }, []);
 
+  /**
+   * Poll one render until it stops being `running`.
+   *
+   * Driven off `render.state` rather than a boolean of our own, because the
+   * server recomputes that state from the file on every call — a render
+   * whose process was killed reports `failed`, not `running`, so this stops
+   * instead of polling until the tab closes.
+   */
+  useEffect(() => {
+    if (!render || render.state !== 'running') return;
+    let live = true;
+    const t = setInterval(() => {
+      thRenderStatus(render.render_id)
+        .then((r) => {
+          if (!live) return;
+          setRender(r);
+          if (r.state !== 'running') setRendering(false);
+        })
+        .catch(() => {
+          /* a dropped poll is not a failed render; the next tick retries */
+        });
+    }, 3000);
+    return () => {
+      live = false;
+      clearInterval(t);
+    };
+  }, [render]);
+
+  const startRender = useCallback(async () => {
+    if (!photo?.photo_id || !picked) return;
+    setRendering(true);
+    setErr(null);
+    setRender(null);
+    try {
+      setRender(await thRender({
+        photo_id: photo.photo_id, dialogue_id: picked, language: lang,
+      }));
+    } catch (e) {
+      // The server's refusals are the useful ones and they are specific:
+      // the clip is missing from disk, the photo is no longer staged, no
+      // GPU is free. Show the sentence rather than "render failed".
+      setErr(String((e as Error).message ?? e));
+      setRendering(false);
+    }
+  }, [photo?.photo_id, picked, lang]);
+
   const cats: THCategory[] = opts?.categories ?? [];
   const shown = cat === 'all' ? lines : lines.filter((l) => l.category === cat);
   const faceOk = photo?.ok === true;
+  const pickedLine = lines.find((l) => l.id === picked) ?? null;
+  // Every gate, in the order the page presents them, so the button can say
+  // which one is not met instead of being inertly grey.
+  const blocker = !faceOk
+    ? 'Upload a portrait with a clear face first.'
+    : !picked
+      ? 'Choose a line for it to say.'
+      : !pickedLine?.playable
+        ? 'That line has no audio clip yet, so there is nothing to animate to.'
+        : null;
 
   return (
     <div className="mx-auto w-full max-w-3xl px-1 py-6">
@@ -219,22 +285,77 @@ export function TalkingHeadPage() {
       </section>
 
       <section className="mt-7 border-t border-line pt-4">
-        <Button
-          disabled
-          title="Every line's audio_url is still null, so there is nothing to animate to."
-        >
-          <IconSparkle className="mr-1.5 h-4 w-4" />
-          Generate talking head
-        </Button>
-        <p className="mt-2 max-w-prose text-[12px] text-ink4">
-          Generation is switched off until the clips are supplied. MuseTalk
-          drives the mouth from a waveform, so without one the render would be
-          the photo, unchanged. Add links in{' '}
-          <code className="font-mono text-[11.5px]">
-            data/talking_head/dialogues.json
-          </code>{' '}
-          and this turns on — no code change.
-        </p>
+        <div className="flex flex-wrap items-center gap-3">
+          <Button
+            variant="primary"
+            onClick={() => void startRender()}
+            disabled={Boolean(blocker) || rendering}
+            title={blocker ?? 'Animate the photo against the chosen line'}
+          >
+            {rendering ? (
+              <IconSpinner className="mr-1.5 h-4 w-4" />
+            ) : (
+              <IconSparkle className="mr-1.5 h-4 w-4" />
+            )}
+            {rendering ? 'Generating…' : 'Generate talking head'}
+          </Button>
+          {/* The unmet gate, in words. A greyed-out button with no reason
+              beside it is the shape this page shipped with, and it read as
+              "broken" rather than "not yet". */}
+          {blocker ? (
+            <span className="text-[12px] text-ink4">{blocker}</span>
+          ) : rendering ? (
+            <span className="text-[12px] text-ink4">
+              This runs on the GPU and takes a few minutes. You can leave the
+              page — the render carries on.
+            </span>
+          ) : null}
+        </div>
+
+        {render?.state === 'failed' ? (
+          <p
+            role="alert"
+            className="mt-3 flex items-start gap-1.5 text-[12.5px] text-warn"
+          >
+            <IconAlert width={13} height={13} className="mt-0.5 flex-none" />
+            <span>{render.error ?? 'The render did not produce a video.'}</span>
+          </p>
+        ) : null}
+
+        {render?.ready && render.url ? (
+          <div className="mt-4 space-y-2">
+            <div className="eyebrow">Result</div>
+            <video
+              key={render.url}
+              src={render.url}
+              controls
+              autoPlay
+              className="w-full max-w-xl rounded-xl bg-black"
+            />
+            <div className="flex flex-wrap items-center gap-3 text-[12px] text-ink4">
+              <a
+                href={render.url}
+                download
+                className="text-ink2 underline underline-offset-2 hover:text-ink"
+              >
+                Download
+              </a>
+              {render.duration_s ? (
+                <span>
+                  {render.duration_s.toFixed(1)}s
+                  {render.fps ? ` · ${render.fps.toFixed(0)} fps` : ''}
+                </span>
+              ) : null}
+              {render.model ? <span>{render.model}</span> : null}
+            </div>
+            {/* Repeated HERE, next to the result, and not only at the top of
+                the page. Mouth-only is measured behaviour (0.87% of the
+                frame changes between output frames), and the moment someone
+                is most likely to read a correct render as a broken one is
+                the moment they first watch it. */}
+            <p className="max-w-prose text-[11.5px] text-ink4">{opts?.note}</p>
+          </div>
+        ) : null}
       </section>
     </div>
   );

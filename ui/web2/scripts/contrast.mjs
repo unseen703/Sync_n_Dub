@@ -56,7 +56,8 @@ const BACKGROUNDS = {
 
 const INK = [
   '--c-ink', '--c-ink-2', '--c-ink-3', '--c-ink-4',
-  '--c-brand-ink', '--c-aqua-ink', '--c-ok', '--c-warn', '--c-danger',
+  '--c-brand-ink', '--c-aqua-ink', '--c-blue-ink',
+  '--c-ok', '--c-warn', '--c-danger',
 ];
 
 const AA = 4.5;

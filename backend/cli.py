@@ -21,6 +21,8 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from backend import speed as _speed
+
 from models.align import available_models as _align_models
 from models.asd import available_models as _asd_models
 from models.asr import available_models as _asr_models
@@ -75,18 +77,24 @@ def _default_impl(stage: str) -> str:
 
 
 def _tts_styles():
-    """Styles the Bodhan TTS engine accepts, plus `auto`.
+    """Styles the Bodhan TTS engine accepts, plus `auto` and `neutral`.
 
-    `auto` is not a Bodhan value — it asks `backend.classify` to pick the
-    register from the video's own metadata (and, failing that, an LLM read
-    of the transcript). It is resolved to a real style, or to None, before
-    anything is synthesized.
+    Neither of the two extras is a Bodhan value:
+
+      * `auto` asks `backend.classify` to pick the register from the video's
+        own metadata (and, failing that, an LLM read of the transcript). It is
+        resolved to a real style, or to None, before anything is synthesized.
+      * `neutral` is the explicit opposite — send no style at all, which is
+        the voice's plain reading. `models.tts.resolve_style` maps it to None
+        at synthesis. It is listed here so the CLI offers exactly what the UI
+        dropdowns do.
     """
+    from models.tts import NEUTRAL_STYLE
     try:
         from models.tts.bodhan_adapter import INDIC_SPEAK_STYLES
-        return ("auto",) + tuple(INDIC_SPEAK_STYLES)
+        return ("auto", NEUTRAL_STYLE) + tuple(INDIC_SPEAK_STYLES)
     except ImportError:
-        return ("auto",)
+        return ("auto", NEUTRAL_STYLE)
 from models.mt import available_models as _mt_models
 from models.translit import available_models as _translit_models
 from models.tts import available_models as _tts_models
@@ -341,6 +349,43 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                     help="Which TTS voice the fitted duration model is for.")
     ap.add_argument("--duration-safety-margin", type=float, default=0.10,
                     help="Seconds trimmed from each turn's budget.")
+    ap.add_argument("--condense-overlong", action="store_true",
+                    help="Stage 9c2. Ask an LLM to shorten lines that "
+                         "--duration-adjust predicts will overrun their "
+                         "slot, BEFORE they are spoken. The only lever "
+                         "left when the tempo cap is already maxed: Bodhan "
+                         "has no speed parameter, so audio cannot be "
+                         "shortened after the fact. Requires "
+                         "--duration-adjust (it reads 9c's estimates) and "
+                         "OPENROUTER_API_KEY. A rewrite that does not "
+                         "measure shorter is discarded, and any failure "
+                         "keeps the original wording.")
+    ap.add_argument("--condense-model", default=None,
+                    help="Model for 9c2 (default: $CONDENSE_MODEL, else "
+                         "backend.condense.DEFAULT_MODEL). A small fast "
+                         "model suits the task -- it is 'say this shorter', "
+                         "not reasoning.")
+    ap.add_argument("--condense-speed-cap", type=float, default=1.5,
+                    help="Rewrite a line only once it needs MORE speed-up "
+                         "than this to fit (default 1.5). Below it the mix "
+                         "can still stretch the clip, and rewriting text "
+                         "that already renders correctly is a translation "
+                         "risk for nothing. Deliberately separate from "
+                         "--speed-cap (1.8): that is how hard the mixer may "
+                         "push, this is when to re-word instead.")
+    ap.add_argument("--condense-tolerance", type=float, default=0.0,
+                    help="Extra slack above --condense-speed-cap before a "
+                         "rewrite is worth a call (default 0.0, i.e. the "
+                         "cap is the cap).")
+    ap.add_argument("--condense-batch-size", type=int, default=None,
+                    help="Segments per 9c2 request (default 2, or "
+                         "$CONDENSE_BATCH_SIZE). The ~2.9k-token system "
+                         "prompt is sent once per request, not once per "
+                         "segment. Kept small on purpose: a model holding "
+                         "several lines at once can blend one into "
+                         "another, which is short, fluent and wrong, and "
+                         "the duration check cannot see it. 1 sends each "
+                         "segment alone.")
 
     # Voice assignment per speaker --------------------------------------
     ap.add_argument("--voice-engine", default=None,
@@ -420,32 +465,57 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                     help="Voice-conversion model. Requires --tts.")
 
     # Timing method — top 3 from the eight-method sweep -------------------
-    ap.add_argument("--speed-mode", default="global",
+    # DEFAULT None, not "segment", and the difference is load-bearing:
+    # `resolve_speed_setup` refuses --speed-mode segment together with
+    # --timing-method, so a literal default would make every research-arm
+    # invocation die at startup. None lets the resolver tell "the operator
+    # asked for segment" apart from "nobody said", and only the first
+    # collides.
+    ap.add_argument("--speed-mode", default=None,
                     choices=("global", "segment"),
                     help="How the dub is re-paced to fit the source timeline. "
-                         "`global` (DEFAULT, unchanged behaviour): every clip "
-                         "plays at its natural pace, placed shift-forward, "
-                         "then ONE atempo over the whole file so the dub "
-                         "lands on the source duration. `segment`: each clip "
+                         "`segment` (DEFAULT since 2026-10-22): each clip "
                          "is fitted to its own slot -- compressed when the "
                          "dub line is longer, STRETCHED OUT when it is "
                          "shorter, so a short line does not leave a pause in "
                          "the middle of its slot. Bounded by --speed-cap; "
                          "whatever the bound could not absorb is reported as "
-                         "unfilled_slot_s in the timing plan.")
-    ap.add_argument("--speed-cap", type=float, default=1.5,
-                    help="With --speed-mode segment: the symmetric pace "
-                         "bound, applied as max_tempo=cap and "
-                         "min_tempo=1/cap. Default 1.5 -- the widest cap "
-                         "measured (the m2 arm), and the only one wide "
-                         "enough to matter, since Hindi TTS runs 1.21-1.65x "
-                         "longer than the English it covers.")
+                         "unfilled_slot_s in the timing plan. `global` (the "
+                         "previous default): every clip plays at its natural "
+                         "pace, placed shift-forward, then ONE atempo over "
+                         "the whole file so the dub lands on the source "
+                         "duration. Passing --timing-method implies `global`, "
+                         "since the arm sets these knobs itself.")
+    ap.add_argument("--speed-cap", type=float, default=1.8,
+                    help="With --speed-mode segment: the SPEED-UP bound, "
+                         "applied as max_tempo=cap. Default 1.8 since "
+                         "2026-10-22 (was 1.5). Hindi TTS runs 1.21-1.65x "
+                         "longer than the English it covers, so 1.5 left no "
+                         "headroom above the top of that range -- measured "
+                         "on job 20261021-114009, 4 of 5 segments overran "
+                         "their slot. The slowdown floor is NOT 1/cap; see "
+                         "--speed-floor.")
+    ap.add_argument("--speed-floor", type=float, default=0.75,
+                    help="With --speed-mode segment: the SLOW-DOWN bound, "
+                         "applied as min_tempo. Default 0.75. Deliberately "
+                         "not 1/--speed-cap: a symmetric 1.8 would stretch a "
+                         "short line to 0.56x -- nearly double length -- to "
+                         "fill its slot, which is audible as drawl. Whatever "
+                         "this floor cannot absorb stays a real pause and is "
+                         "reported as unfilled_slot_s rather than hidden.")
     ap.add_argument("--speed-slot-margin", type=float, default=0.0,
                     help="With --speed-mode segment: seconds of slot left "
                          "deliberately empty at the end of each segment. "
                          "Default 0.0 -- any margin IS a pause, which is the "
                          "thing this mode exists to remove. Raise it if "
                          "clips are running into each other.")
+    ap.add_argument("--speed-gap-barrier", type=float, default=1.0,
+                    help="With --speed-mode segment: a source gap at least "
+                         "this long after a cue is treated as a WALL, so an "
+                         "overrunning line is sped up to end at its slot "
+                         "rather than running on over whatever fills the gap "
+                         "— usually music. Default 1.0 s; 0 disables it and "
+                         "restores the plain shift-forward cascade.")
 
     ap.add_argument("--timing-method", default=None,
                     choices=("m2", "m4", "m7"),
@@ -500,6 +570,17 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap.add_argument("--lipsync", default=None, choices=_lipsync_models(),
                     help="Lip-sync model (lipgan | wav2lip | musetalk | latentsync). "
                          "Requires --mix.")
+    ap.add_argument("--restore", default=None, choices=("gfpgan",),
+                    help="Stage 9i: face restoration over the finished "
+                         "render. Orthogonal to --lipsync -- it takes a "
+                         "video and returns a video and does not care which "
+                         "adapter drew the mouths, so any model can be "
+                         "paired with it. NEVER implied: measured on this "
+                         "host it costs 1156 s against the MuseTalk render's "
+                         "447 s, i.e. 2.6x the thing it cleans. Restores "
+                         "only the frames lip-sync changed (found by "
+                         "diffing) and never fails the run -- a post-pass "
+                         "that falls over leaves stage 9h's usable dub.")
     ap.add_argument("--lipsync-batch-size", type=int, default=None,
                     help="MuseTalk / Wav2Lip / LipGAN batch size.")
     ap.add_argument("--lipsync-inference-steps", type=int, default=None,
@@ -576,33 +657,34 @@ def resolve_speed_setup(args) -> "SpeedSetup":
     # research arms use: `segment` IS naive_slot rendered through the timing
     # plan, with a zero margin and a symmetric cap. `global` leaves every
     # default exactly where it was.
-    if args.speed_mode == "segment":
+    # `segment` became the default on 2026-10-22. `--speed-mode` now parses
+    # to None when nobody passed it, so the two cases are distinguishable:
+    # an EXPLICIT `segment` beside `--timing-method` is a contradiction and
+    # is refused, while the default quietly yields to the arm, which sets
+    # mix_strategy / tts_apply_stretch / mix_clip_source itself.
+    speed_mode = args.speed_mode or ("global" if args.timing_method else "segment")
+
+    if speed_mode == "segment":
         if args.timing_method:
             raise SystemExit(
                 "--speed-mode segment and --timing-method set the same "
                 "knobs. Use one: --speed-mode for the two-option choice, "
                 "--timing-method for the measured research arms (m2 is the "
                 "same producer with a 0.10 s slot margin).")
-        if args.speed_cap <= 1.0:
-            raise SystemExit(
-                f"--speed-cap must be > 1.0 (got {args.speed_cap}); it is a "
-                f"symmetric bound, applied as max {args.speed_cap}x and min "
-                f"1/{args.speed_cap}x.")
-        timing_producer = "naive_slot"
-        timing_params = {
-            "max_tempo": args.speed_cap,
-            "min_tempo": 1.0 / args.speed_cap,
-            "safety_margin_s": args.speed_slot_margin,
-            # Honour a per-segment target written by stage 9c or by
-            # `backend.edits.set_speed`; without this they are silently
-            # ignored in this mode.
-            "use_target_duration": True,
-        }
-        # The TTS stage must NOT stretch as well, or every clip is re-timed
-        # twice -- once into its slot here, once into the same slot there.
-        tts_apply_stretch = False
-        mix_strategy = "timing_plan"
-        mix_clip_source = "raw"
+        _speed.validate_segment_bounds(args.speed_cap, args.speed_floor)
+        # The values themselves live in `backend/speed.py`, which `ui/presets`
+        # also calls — they used to be a hand-kept copy on each side.
+        _seg = _speed.segment_timing_kwargs(
+            speed_cap=args.speed_cap,
+            speed_floor=args.speed_floor,
+            slot_margin=args.speed_slot_margin,
+            gap_barrier=args.speed_gap_barrier,
+        )
+        timing_producer = _seg["timing_producer"]
+        timing_params = _seg["timing_params"]
+        tts_apply_stretch = _seg["tts_apply_stretch"]
+        mix_strategy = _seg["mix_strategy"]
+        mix_clip_source = _seg["mix_clip_source"]
 
     tm = args.timing_method
     if tm == "m2":
@@ -674,6 +756,11 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("--translit requires --mt (nothing to re-script).")
     if args.duration_adjust and not args.mt:
         raise SystemExit("--duration-adjust requires --mt.")
+    if args.condense_overlong and not args.duration_adjust:
+        raise SystemExit(
+            "--condense-overlong requires --duration-adjust: it shortens "
+            "the lines stage 9c predicts will overrun, so without 9c there "
+            "are no estimates to act on.")
     if args.tts and not args.mt:
         raise SystemExit("--tts requires --mt.")
     if args.vc and not args.tts:
@@ -739,6 +826,11 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("--timing-method requires --tts.")
     if args.timing_method and not args.mix:
         raise SystemExit("--timing-method requires --mix.")
+    # Both keyed on the EXPLICIT flag (`args.speed_mode`, not the resolved
+    # mode), and deliberately so now that `segment` is the default: refusing
+    # a transcribe-only run because of a default nobody typed would be a
+    # regression. These stay what they always were -- guards against an
+    # operator asking for something that cannot happen.
     if args.speed_mode == "segment" and not (args.tts and args.mix):
         raise SystemExit("--speed-mode segment requires --tts and --mix "
                          "(there is nothing to re-pace otherwise).")
@@ -785,6 +877,11 @@ def main(argv: list[str] | None = None) -> int:
         duration_adjust=args.duration_adjust,
         duration_voice=args.duration_voice,
         duration_safety_margin_s=args.duration_safety_margin,
+        condense_overlong_text=args.condense_overlong,
+        condense_model=args.condense_model,
+        condense_speed_cap=args.condense_speed_cap,
+        condense_tolerance=args.condense_tolerance,
+        condense_batch_size=args.condense_batch_size,
         voice_engine=args.voice_engine,
         voice_catalog_json=args.voice_catalog,
         allow_voice_reuse=args.allow_voice_reuse,
@@ -814,6 +911,7 @@ def main(argv: list[str] | None = None) -> int:
         timing_params=timing_params or None,
         mux_video=mux_video,
         lipsync_model=args.lipsync,
+        restore_model=args.restore,
         lipsync_num_gpus=args.lipsync_num_gpus,
         subtitle_langs=subtitle_langs,
         **adapter_kwargs,

@@ -202,12 +202,102 @@ def test_render_refuses_a_line_whose_audio_is_missing(client, monkeypatch):
 
 
 def test_a_rendered_line_gets_past_the_audio_gate(client):
-    """The catalogue is rendered, so a real id must now reach the render
-    path (501, unimplemented) instead of being turned back at the gate."""
+    """The catalogue is rendered, so a real id must reach the render path.
+
+    It then stops on the PHOTO, which is the next gate and the right one:
+    `abc` was never uploaded. Before 2026-10-21 this asserted 501 — the
+    render path did not exist — and the whole point of the change is that it
+    does now, so the assertion moves to the next refusal rather than away.
+    """
     r = client.post("/api/talking-head/render",
                     json={"photo_id": "abc", "dialogue_id": "hi-famous-1",
                           "language": "hi"})
-    assert r.status_code == 501
+    assert r.status_code == 404
+    assert "no longer staged" in r.json()["detail"]
+
+
+def test_render_refuses_a_link_whose_clip_is_not_on_disk(client, monkeypatch):
+    """`playable` only means the URL is non-null.
+
+    A catalogue entry pointing at a clip nobody copied across looks exactly
+    like a working one, right up to the moment the GPU job fails. Checking
+    the disk is the only way to tell them apart, and it costs a `stat`.
+    """
+    from ui import routes_talkinghead as R
+    monkeypatch.setattr(R.TH, "dialogues_for", lambda lang: [
+        {"id": "ghost", "category": "famous", "text": "x",
+         "audio_url": "/files/talking_head/audio/not-there.wav",
+         "playable": True}])
+    r = client.post("/api/talking-head/render",
+                    json={"photo_id": "abc", "dialogue_id": "ghost",
+                          "language": "hi"})
+    assert r.status_code == 409
+    assert "not a file under data/" in r.json()["detail"]
+
+
+@pytest.mark.parametrize("bad", [
+    "../../etc", "a/b", "", ".", "..", "/abs", "x" * 200,
+])
+def test_a_render_id_cannot_escape_the_renders_directory(bad):
+    """`render_id` arrives from the client on the poll, and `Path / ".."` is
+    not a string operation.
+
+    Rejected rather than sanitised: a cleaned-up id would read a DIFFERENT
+    render's status and report it as this one's, which is worse than an
+    error — the page would show someone else's video as the answer.
+    """
+    with pytest.raises(ValueError):
+        TH.render_paths(bad)
+
+
+def test_a_bad_render_id_polls_as_absent_rather_than_raising(client):
+    """The route must answer, not 500: the page polls this on a timer."""
+    r = client.get("/api/talking-head/render/..%2F..%2Fetc")
+    assert r.status_code in (200, 404)
+    if r.status_code == 200:
+        assert r.json()["ready"] is False
+
+
+def test_an_audio_url_cannot_escape_the_data_directory():
+    """Catalogue rows are DATA. A `../` in one must not read an arbitrary
+    file off this host just because the file happens to exist."""
+    assert TH.audio_path_for("/files/../../etc/passwd") is None
+    assert TH.audio_path_for("/etc/passwd") is None
+    assert TH.audio_path_for("") is None
+
+
+def test_a_real_catalogue_clip_resolves_to_a_file():
+    """The converse — the 50 supplied clips must actually resolve, or every
+    render would refuse at the gate above."""
+    rows = [r for r in TH.dialogues_for("hi") if r["playable"]]
+    if not rows:
+        pytest.skip("no playable Hindi lines in the catalogue")
+    p = TH.audio_path_for(rows[0]["audio_url"])
+    assert p is not None and p.is_file()
+
+
+def test_a_render_that_wrote_no_video_is_not_reported_done(tmp_path, monkeypatch):
+    """The FILE is the arbiter, not the status field.
+
+    CLAUDE.md §4 records what trusting the field costs: `run_lipsync` logged
+    "done -> <path>" and recorded the path it had ASKED for, so a 40 s run
+    exited 0 and left a manifest naming an mp4 that was never created.
+    """
+    monkeypatch.setattr(TH, "DATA_DIR", tmp_path)
+    TH._write_render_status("r1", state="done", model="musetalk")
+    st = TH.render_status("r1")
+    assert st["state"] == "failed"
+    assert st["ready"] is False
+    assert "wrote no video" in st["error"]
+
+
+def test_a_render_with_a_real_file_is_ready_and_has_a_url(tmp_path, monkeypatch):
+    monkeypatch.setattr(TH, "DATA_DIR", tmp_path)
+    TH._write_render_status("r2", state="done", model="musetalk")
+    TH.render_paths("r2")["video"].write_bytes(b"not really an mp4")
+    st = TH.render_status("r2")
+    assert st["state"] == "done" and st["ready"] is True
+    assert st["url"].startswith("/files/talking_head/renders/r2/")
 
 
 def test_render_404s_on_a_line_that_does_not_exist(client):
@@ -270,11 +360,58 @@ def test_a_dead_detector_is_reported_not_a_500(tmp_path, monkeypatch):
     whoever reads the message; a 500 put the reason in the server's stderr
     where the person uploading never sees it."""
     monkeypatch.setattr(TH, "_detector",
-                        lambda device="cpu": (_ for _ in ()).throw(ImportError("boom")))
+                        lambda device="cpu": (_ for _ in ()).throw(RuntimeError("boom")))
     out = TH.probe_image(_img(tmp_path, 640, 480))
     assert out["ok"] is False
     assert out["reason"] == "detector_unavailable"
     assert "not the problem" in out["message"]
+
+
+def test_a_missing_insightface_names_the_interpreter(tmp_path, monkeypatch):
+    """"insightface not found" is not a detector fault, it is a WRONG ENV.
+
+    Seen live on 2026-10-21: `python -m ui.server` had been started from
+    `.venv-diarization` (a uv venv carrying torch and cv2 but not
+    insightface) instead of from `envs/dubbing`, and every photo upload came
+    back saying the detector could not start. The message named the exception
+    class, which is the one fact that does not help — `ModuleNotFoundError`
+    is true of a typo, a broken install and a wrong interpreter alike.
+
+    So this case is separated out and the message carries `sys.executable`:
+    the only thing that identifies which python is actually running.
+    """
+    import sys
+
+    monkeypatch.setattr(
+        TH, "_detector",
+        lambda device="cpu": (_ for _ in ()).throw(
+            ImportError(f"insightface is not installed in the interpreter "
+                        f"running this server ({sys.executable}).")))
+    out = TH.probe_image(_img(tmp_path, 640, 480))
+    assert out["ok"] is False
+    assert out["reason"] == "detector_not_installed"
+    assert sys.executable in out["message"]
+
+
+def test_the_real_import_error_says_which_python_and_which_to_use(monkeypatch):
+    """The sentence `_detector` builds, not the one the test above supplies."""
+    import builtins
+    import sys
+
+    real = builtins.__import__
+
+    def _no_insightface(name, *a, **k):
+        if name.startswith("insightface"):
+            raise ImportError("No module named 'insightface'")
+        return real(name, *a, **k)
+
+    monkeypatch.setattr(TH, "_APP", None)
+    monkeypatch.setattr(builtins, "__import__", _no_insightface)
+    with pytest.raises(ImportError) as e:
+        TH._detector()
+    msg = str(e.value)
+    assert sys.executable in msg, "does not say which python is running"
+    assert "dubbing" in msg, "does not say which python to use instead"
 
 
 def test_english_is_offered_even_though_no_voice_is_recorded_in_it(client):

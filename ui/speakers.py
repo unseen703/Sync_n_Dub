@@ -86,11 +86,7 @@ def supports_tone(config: Dict[str, Any]) -> bool:
 # sources
 # ---------------------------------------------------------------------------
 
-def _read_json(p: Path) -> Any:
-    try:
-        return json.loads(p.read_text())
-    except (OSError, ValueError):
-        return None
+from ._io import read_json as _read_json
 
 
 def _from_voices_json(job_root: Path) -> Dict[str, dict]:
@@ -367,14 +363,24 @@ def tone_vocabulary() -> List[Dict[str, str]]:
 
     Returned as {value, label} so the wire value stays verbatim while the
     dropdown can show "AIR style news" as "AIR-style news".
+
+    `NEUTRAL_STYLE` leads the list and is the one entry that is NOT an engine
+    value. The engine has no "neutral": a plain reading is what you get by
+    sending no style, and until this was added there was no way to ask for it
+    — a speaker given a register could never be taken off one, because every
+    option in the dropdown was another register.
+    `models.tts.resolve_style` is what turns it back into "no style".
     """
+    from models.tts import NEUTRAL_STYLE
     try:
         from models.tts.bodhan_adapter import INDIC_SPEAK_STYLES
     except Exception as e:                               # pragma: no cover
         log.warning("bodhan style list unavailable: %s", e)
         return []
-    return [{"value": v, "label": _tone_label(v),
-             "group": _tone_group(v)} for v in INDIC_SPEAK_STYLES]
+    return ([{"value": NEUTRAL_STYLE, "label": "Neutral — no style",
+              "group": "Delivery"}]
+            + [{"value": v, "label": _tone_label(v),
+                "group": _tone_group(v)} for v in INDIC_SPEAK_STYLES])
 
 
 #: The six Ekman emotions in the list come from AI4Bharat's Rasa corpus; the
@@ -404,14 +410,22 @@ def submit_style_options() -> List[Dict[str, str]]:
     that stops existing upstream disappears here instead of 422-ing at
     synthesis. `tests/test_ui_create.py` asserts the four are still real
     members of `INDIC_SPEAK_STYLES`.
+
+    `NEUTRAL_STYLE` leads, and is not one of them. The form's other
+    non-engine value, "auto", means *classify a register from the video's
+    metadata* — so before this the form could ask for a register to be
+    chosen, or name one, but never ask for none. A local file with no
+    metadata already dubs neutral by accident; this makes it a choice.
     """
+    from models.tts import NEUTRAL_STYLE
     try:
         from models.tts.bodhan_adapter import INDIC_SPEAK_STYLES
     except Exception as e:                               # pragma: no cover
         log.warning("bodhan style list unavailable: %s", e)
         return []
-    return [{"value": v, "label": _tone_label(v)}
-            for v in SUBMIT_STYLES if v in INDIC_SPEAK_STYLES]
+    return ([{"value": NEUTRAL_STYLE, "label": "Neutral — no style"}]
+            + [{"value": v, "label": _tone_label(v)}
+               for v in SUBMIT_STYLES if v in INDIC_SPEAK_STYLES])
 
 
 def _tone_group(style: str) -> str:

@@ -3,10 +3,11 @@ import { fmtClock, fmtRationale, genderWord } from '../../lib/format';
 import { IconPause, IconPlay, IconRevert } from '../ui/Icons';
 import { Tooltip } from '../ui/Tooltip';
 import { Select } from '../ui/Select';
+import { StagedValue } from '../ui/StagedValue';
 import { VoicePicker } from './VoicePicker';
 import { SpeakerNameField } from './SpeakerNameField';
 import { togglePreview, useAudioPreview } from '../../hooks/useAudioPreview';
-import type { Speaker, SpeakerTable, VoiceOption } from '../../api/types';
+import type { AgentSpeaker, Speaker, SpeakerTable, VoiceOption } from '../../api/types';
 import type { StagedChange } from '../../store/useStore';
 
 /**
@@ -16,10 +17,13 @@ import type { StagedChange } from '../../store/useStore';
  *
  *   name     EDITABLE, display only. Renaming dirties no stage — see
  *            `SpeakerNameField`.
- *   gender   READ-ONLY. It is not a setting, it is the *reason* a
- *            particular voice was suggested, and showing it next to the
- *            picker is what makes the suggestion legible instead of
- *            arbitrary. It is also a prediction, and is labelled as one.
+ *   gender   READ-ONLY here — there is no picker for it. It is not a
+ *            setting, it is the *reason* a particular voice was suggested,
+ *            and showing it next to the picker is what makes the suggestion
+ *            legible instead of arbitrary. It is also a prediction, and is
+ *            labelled as one. It CAN be changed, but only by asking the
+ *            agent ("make SPEAKER_00 female"), and a change asked for that
+ *            way shows up here.
  *   voice    STAGED. Applied by an explicit button that prices it first.
  *   tone     STAGED, and ABSENT — not disabled — when the engine would
  *            ignore it. `ui/speakers.py::supports_tone` uses the exact
@@ -27,11 +31,19 @@ import type { StagedChange } from '../../store/useStore';
  *            control disappears precisely when the value would be dropped,
  *            and the spec panel states the absence in words so a missing
  *            feature does not read as a bug.
+ *
+ * Two staging paths reach this row and both have to show. The pickers write
+ * `staged` (local, in the browser, not yet posted); the chat box writes the
+ * job's `pending.json`, which arrives as `fromAgent`. Gender only ever comes
+ * from the second. A row that rendered only the first showed nothing at all
+ * for a gender edit until it had been applied and the dub came back in a
+ * different voice.
  */
 export function SpeakerRow({
   speaker,
   table,
   staged,
+  fromAgent,
   onVoice,
   onTone,
   onRevert,
@@ -40,6 +52,7 @@ export function SpeakerRow({
   speaker: Speaker;
   table: SpeakerTable;
   staged?: StagedChange;
+  fromAgent?: AgentSpeaker | null;
   onVoice: (voice: string) => void;
   onTone: (tone: string) => void;
   onRevert: () => void;
@@ -48,16 +61,43 @@ export function SpeakerRow({
   const playing = useAudioPreview();
   const isPlaying = Boolean(speaker.reference_url && playing === speaker.reference_url);
   const dirty = Boolean(staged);
+
+  // The picker's own value is what the CONTROL shows, so it keeps following
+  // the local store. The before/after beneath is the separate question of
+  // what this row will BECOME, and a server-staged change counts there too.
   const voice = staged?.voice !== undefined ? staged.voice : speaker.voice;
   const tone = staged?.tone !== undefined ? staged.tone : speaker.tone;
-  const gender = genderWord(speaker.gender);
 
-  const wasVoice =
-    staged?.voice !== undefined && staged.fromVoice !== staged.voice ? staged.fromVoice : null;
-  const wasVoiceLabel = wasVoice
-    ? (table.voice_options.find((o: VoiceOption) => o.voice === wasVoice)?.display
-      ?? wasVoice.split('-').pop())
-    : null;
+  const voiceLabel = (v: string | null | undefined) =>
+    (v
+      ? (table.voice_options.find((o: VoiceOption) => o.voice === v)?.display
+        ?? v.split('-').pop() ?? v)
+      : null);
+  const toneLabel = (t: string | null | undefined) =>
+    (t ? table.tone_options.find((o) => o.value === t)?.label ?? t : null);
+
+  // `staged` holds `fromVoice`/`fromTone` — what the row read as when the
+  // picker was first touched — so a second change still compares against the
+  // dub rather than against the first change.
+  const stagedVoice = staged?.voice !== undefined && staged.voice !== staged.fromVoice
+    ? voiceLabel(staged.voice)
+    : voiceLabel(fromAgent?.voice.staged);
+  const stagedTone = staged?.tone !== undefined && staged.tone !== staged.fromTone
+    ? toneLabel(staged.tone)
+    : toneLabel(fromAgent?.tone.staged);
+  const currentVoice = voiceLabel(
+    staged?.fromVoice !== undefined ? staged.fromVoice : speaker.voice);
+  const currentTone = toneLabel(
+    staged?.fromTone !== undefined ? staged.fromTone : speaker.tone);
+
+  const gender = genderWord(speaker.gender);
+  const stagedGender = genderWord(fromAgent?.gender.staged ?? null);
+  // Any of the three about to change, from either path.
+  const willChange = Boolean(
+    (stagedVoice && stagedVoice !== currentVoice)
+    || (stagedTone && stagedTone !== currentTone)
+    || (stagedGender && stagedGender !== gender),
+  );
 
   const rationale = fmtRationale(speaker.voice_rationale);
 
@@ -182,10 +222,55 @@ export function SpeakerRow({
         </button>
       </div>
 
-      {wasVoiceLabel ? (
-        <div className="col-span-full -mt-1 pl-[3.5rem] text-[11.5px] text-warn sm:pl-0 sm:text-right">
-          was {wasVoiceLabel}
-        </div>
+      {/* What this speaker WILL read as, beneath the controls that set it:
+          the old value struck through, the new one in blue. One row per
+          field that is actually changing, so a voice swap does not print a
+          gender line that says the same thing twice.
+
+          This replaces a lone `was <voice>` note. Gender and tone had no
+          equivalent at all, which mattered most for gender — it has no
+          picker on this row, so the agent is the only way to change it and
+          this is the only place the change can appear. */}
+      {willChange ? (
+        <dl className="col-span-full -mt-0.5 flex flex-wrap items-baseline gap-x-4 gap-y-1
+                       pl-[3.5rem] text-[11.5px] sm:pl-0 sm:justify-end">
+          {stagedGender && stagedGender !== gender ? (
+            <div className="flex items-baseline gap-1.5">
+              <dt className="text-ink4">gender</dt>
+              <dd>
+                <StagedValue
+                  current={gender}
+                  staged={stagedGender}
+                  label={`Gender for ${speaker.label ?? speaker.id}`}
+                />
+              </dd>
+            </div>
+          ) : null}
+          {stagedVoice && stagedVoice !== currentVoice ? (
+            <div className="flex items-baseline gap-1.5">
+              <dt className="text-ink4">voice</dt>
+              <dd>
+                <StagedValue
+                  current={currentVoice}
+                  staged={stagedVoice}
+                  label={`Voice for ${speaker.label ?? speaker.id}`}
+                />
+              </dd>
+            </div>
+          ) : null}
+          {stagedTone && stagedTone !== currentTone ? (
+            <div className="flex items-baseline gap-1.5">
+              <dt className="text-ink4">tone</dt>
+              <dd>
+                <StagedValue
+                  current={currentTone}
+                  staged={stagedTone}
+                  label={`Delivery for ${speaker.label ?? speaker.id}`}
+                />
+              </dd>
+            </div>
+          ) : null}
+        </dl>
       ) : null}
     </div>
   );

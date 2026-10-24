@@ -14,6 +14,7 @@
 import { create } from 'zustand';
 import * as api from '../api';
 import type {
+  AgentParams,
   EditPlan,
   JobRow,
   Media,
@@ -75,9 +76,19 @@ interface State {
    * track. Null is what distinguishes "not chosen yet" from "chose the
    * original".
    */
-  /** True on `#/job/<id>/edit` — the plain-language agent page. */
-  editing: boolean;
-  setEditing: (v: boolean) => void;
+  /**
+   * What the edit agent can change, and what is staged over it.
+   *
+   * Lives in the store rather than inside the agent panel because the CAST
+   * TABLE needs it too: a gender/voice/tone change can arrive from the
+   * picker on a row (local, `staged` below) or from a sentence in the chat
+   * box (server-side, `pending.json`), and a row that reads only the first
+   * shows nothing at all for the second. One snapshot, one place, so the
+   * two renderings of a staged edit cannot disagree by a poll — which is
+   * the reason `/agent/params` is a single endpoint in the first place.
+   */
+  agentParams: AgentParams | null;
+  refreshAgentParams: () => Promise<AgentParams | null>;
   /** `#/talking-head` — the still-portrait page. */
   talkingHead: boolean;
   setTalkingHead: (v: boolean) => void;
@@ -232,7 +243,7 @@ export const useStore = create<State>()((set, get) => ({
   railOpen: true,
   theme: readTheme(),
   shortcutsOpen: false,
-  editing: false,
+  agentParams: null,
   talkingHead: false,
   videoTrack: null,
   toasts: [],
@@ -273,18 +284,7 @@ export const useStore = create<State>()((set, get) => ({
     if (get().selected === id) return;
     set({
       selected: id,
-      // Selecting a job means LOOKING at it, never editing it. This has to
-      // be set here and not left to `useHashRoute`, because the line below
-      // moves the hash with `history.replaceState`, which does NOT fire
-      // `hashchange` — so the route handler never runs and `editing` stayed
-      // true from whatever page you were on.
-      //
-      // The visible symptom was "Back to the dub does nothing": picking
-      // another job from the rail while on the agent page left `editing`
-      // true with the hash already at `#/job/<newId>`, so the Back link
-      // pointed at the hash it was already on, no event fired, and the
-      // click was a no-op.
-      editing: false,
+      agentParams: null,
       progress: null,
       media: null,
       speakers: null,
@@ -392,6 +392,29 @@ export const useStore = create<State>()((set, get) => ({
     }
   },
 
+  /**
+   * Reload the agent's view of the job.
+   *
+   * Swallows its error on purpose. `/agent/params` 409s on a run that never
+   * reached MT — there is no merged transcript, so there is nothing to edit
+   * — and that is a normal state for a job still in its first stages, not a
+   * failure worth a banner. The panel that needs the data shows its own
+   * message; the cast table simply falls back to local staging.
+   */
+  async refreshAgentParams() {
+    const id = get().selected;
+    if (!id) return null;
+    try {
+      const p = await api.getAgentParams(id);
+      if (get().selected !== id) return null;
+      set({ agentParams: p });
+      return p;
+    } catch {
+      if (get().selected === id) set({ agentParams: null });
+      return null;
+    }
+  },
+
   setSearch: (s) => set({ search: s }),
 
   toggleSpec() {
@@ -426,7 +449,6 @@ export const useStore = create<State>()((set, get) => ({
     }, 60);
   },
   setShortcutsOpen: (v) => set({ shortcutsOpen: v }),
-  setEditing: (v) => set({ editing: v }),
   setTalkingHead: (v) => set({ talkingHead: v }),
   setVideoTrack: (t) => set({ videoTrack: t }),
 

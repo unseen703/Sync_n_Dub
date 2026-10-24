@@ -19,7 +19,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
-from models.tts import TTSRequest, available_models, get_tts
+from models.tts import TTSRequest, available_models, get_tts, resolve_style
 
 from .duration import wsola_stretch_cap
 from .sanitize import sanitize_for_tts
@@ -122,7 +122,11 @@ def synthesize_segments(
             reference_audio=(Path(ref) if ref else None),
             reference_text=info.get("reference_text"),
             speaker=spk,
-            style=seg.get("tts_style") or info.get("style"),
+            # Same precedence as ever (segment beats document), plus the one
+            # new case: `NEUTRAL_STYLE` resolves to None, so "read it plainly"
+            # reaches the engine as no style rather than falling back to the
+            # register it was asked to drop.
+            style=resolve_style(seg.get("tts_style"), info.get("style")),
         ))
 
     # Resolve up front so the manifest records the backend even if no segment
@@ -299,6 +303,8 @@ def synthesize_segments(
     dest = Path(out_json) if out_json else merged_json
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_text(json.dumps(data, indent=2, ensure_ascii=False))
+    from .mt_versions import snapshot as _mt_snapshot
+    _mt_snapshot(dest, "tts", data=data)
     log.info("tts: wrote %s (errors=%d, cap_violations=%d)",
              dest, errors, violations)
     return data

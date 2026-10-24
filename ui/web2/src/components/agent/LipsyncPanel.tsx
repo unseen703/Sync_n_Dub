@@ -4,7 +4,7 @@ import { Eyebrow } from '../ui/Card';
 import { IconAlert, IconSpinner } from '../ui/Icons';
 import { useStore } from '../../store/useStore';
 import * as api from '../../api';
-import type { LipsyncReadiness } from '../../api/types';
+import type { LipsyncModelOption, LipsyncReadiness } from '../../api/types';
 
 /**
  * The second half of a dub: choose a lip-sync model and spend the GPU.
@@ -41,6 +41,9 @@ export function LipsyncPanel({ jobId, onStarted }: {
   const [model, setModel] = useState<string>('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Two-step on the destructive path: discarding staged edits throws away
+  // work that cannot be recovered from this screen.
+  const [confirmDiscard, setConfirmDiscard] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -68,6 +71,34 @@ export function LipsyncPanel({ jobId, onStarted }: {
         body: `Replays ${res.dirty_stages.join(' → ')}.`,
       });
       onStarted?.();
+      // No navigation any more: this panel is ON the job page, under the
+      // player and the progress bar it used to send the operator back to.
+      // It used to live on a separate review page, where staying put left
+      // them watching a panel for a job that had moved on. Refresh instead,
+      // so the ribbon picks the render up on its next tick.
+      void useStore.getState().refreshProgress();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /**
+   * Drop the staged edits and carry on to lip-sync.
+   *
+   * The blocker is correct — rendering around a pending edit would use the
+   * audio from before it — but "apply or discard" offered no way to do the
+   * second without leaving the page. Discarding is destructive, so it asks
+   * first, in the panel rather than in a browser dialog.
+   */
+  const discardAndContinue = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await api.discardEdits(jobId);
+      setConfirmDiscard(false);
+      onStarted?.();        // the page reloads its own staged state
       await load();
     } catch (e) {
       setError((e as Error).message);
@@ -87,6 +118,12 @@ export function LipsyncPanel({ jobId, onStarted }: {
 
   const face = ready?.face;
   const blocked = ready ? !ready.can_start : true;
+
+  // `model_rows` is the labelled list; `models` is the bare registry ids and
+  // is still served, so a page open against an older server keeps working
+  // rather than rendering an empty picker.
+  const rows: LipsyncModelOption[] =
+    ready?.model_rows ?? (ready?.models ?? []).map((id) => ({ id, label: id }));
 
   return (
     <section className="card p-4">
@@ -131,33 +168,47 @@ export function LipsyncPanel({ jobId, onStarted }: {
 
       {/* ---- the choice ---- */}
       <div className="space-y-1.5">
-        {(ready?.models ?? []).map((m) => (
+        {rows.map((row) => (
           <label
-            key={m}
-            className={`flex cursor-pointer items-baseline gap-2 rounded-lg border px-3 py-2
+            key={row.id}
+            className={`flex cursor-pointer flex-col gap-1 rounded-lg border px-3 py-2
                         text-[12.5px] ${
-                          model === m
+                          model === row.id
                             ? 'border-brand/50 bg-brand/10'
                             : 'border-line bg-surface/40'
                         }`}
           >
-            <input
-              type="radio"
-              name={`lipsync-model-${jobId}`}
-              value={m}
-              checked={model === m}
-              onChange={() => setModel(m)}
-              className="mt-0.5"
-            />
-            <span className="font-medium text-ink">{m}</span>
-            {face?.available && face.suggests === m ? (
-              <span className="rounded bg-brand/15 px-1.5 text-[10.5px] text-brand-ink">
-                suits this face size
+            <span className="flex items-baseline gap-2">
+              <input
+                type="radio"
+                name={`lipsync-model-${jobId}`}
+                value={row.id}
+                checked={model === row.id}
+                onChange={() => setModel(row.id)}
+                className="mt-0.5"
+              />
+              <span className="font-medium text-ink">{row.label}</span>
+              {row.speed ? (
+                <span className="text-[11px] text-ink4">{row.speed}</span>
+              ) : null}
+              {face?.available && face.suggests === row.id ? (
+                <span className="rounded bg-brand/15 px-1.5 text-[10.5px] text-brand-ink">
+                  suits this face size
+                </span>
+              ) : null}
+              <span className="ml-auto text-[11.5px] text-ink4">
+                {ready?.estimates?.[row.id] ?? ''}
+              </span>
+            </span>
+            {/* The caveat belongs in front of the click, not in a log after
+                it: wav2lip_hd is a second per-frame pass, and LatentSync's
+                default 512 UNet is measured above these cards' 16 GiB — an
+                OOM there surfaces only as "produced no mp4". */}
+            {row.note ? (
+              <span className="pl-6 text-[11px] leading-snug text-ink3">
+                {row.note}
               </span>
             ) : null}
-            <span className="ml-auto text-[11.5px] text-ink4">
-              {ready?.estimates?.[m] ?? ''}
-            </span>
           </label>
         ))}
       </div>
@@ -170,6 +221,38 @@ export function LipsyncPanel({ jobId, onStarted }: {
               <span>{b}</span>
             </p>
           ))}
+          {/* The way out of the staged-edits blocker without leaving the
+              page. Only offered for THAT blocker: "no dubbed audio yet" is
+              not something discarding can fix, and a button that cannot
+              help is worse than none. */}
+          {(ready.pending_edits ?? 0) > 0 ? (
+            <div className="flex flex-wrap items-center gap-2 pt-1">
+              <button
+                type="button"
+                onClick={() => {
+                  if (confirmDiscard) void discardAndContinue();
+                  else setConfirmDiscard(true);
+                }}
+                onBlur={() => setConfirmDiscard(false)}
+                disabled={busy}
+                className={`rounded-lg px-2.5 py-1.5 text-[12px] font-medium
+                            text-white transition-colors disabled:opacity-50 ${
+                              confirmDiscard
+                                ? 'bg-danger-fill ring-1 ring-danger'
+                                : 'bg-danger-fill/85 hover:bg-danger-fill'
+                            }`}
+              >
+                {confirmDiscard
+                  ? `Discard ${ready.pending_edits} edit(s)?`
+                  : 'Continue without them'}
+              </button>
+              <span className="text-[11.5px] text-ink4">
+                {confirmDiscard
+                  ? 'This cannot be undone from here.'
+                  : 'Drops the staged edits so lip-sync can start.'}
+              </span>
+            </div>
+          ) : null}
         </div>
       ) : null}
 

@@ -305,6 +305,34 @@ def _run_rerun(job_id: str, job_root: Path, jobs_dir: Path) -> int:
                for s in res.dirty_stages]
     log.info("re-render replays: %s", ", ".join(res.dirty_stages) or "(nothing)")
 
+    # HOW the original submission was paced, straight from the request that
+    # launched it.
+    #
+    # `edit_agent.rerun` normally recovers this by re-parsing the run's argv,
+    # and a UI job has none: `ui.runner` is launched with the job id alone,
+    # so the pipeline parser exits on it, `ns` is None, and the replay fell
+    # through to argparse DEFAULTS. Those describe a run nobody launched —
+    # `timing_params=None`, `mix_strategy=global_tempo`, stretch ON — where
+    # this submission ran `naive_slot` with `use_target_duration=True`,
+    # `timing_plan` and stretch OFF.
+    #
+    # The visible cost was a speed edit that did nothing: `set_speed` works
+    # entirely by writing `target_duration_s`, and `use_target_duration`
+    # defaults to False, so the replay re-fitted every clip to its untouched
+    # `end - start` slot and the dub came back at the original speed. Job
+    # 20261022-044302 has both plans on disk, one per pacing, as evidence.
+    #
+    # Read from `request.json` rather than the manifest because it is already
+    # there for every job ever submitted from this UI — including the ones
+    # that predate the manifest recording any of this.
+    setup = None
+    try:
+        pipeline_kwargs = (read_request(job_root) or {}).get("pipeline") or {}
+        setup = edit_agent.speed_setup_from_config(pipeline_kwargs)
+    except Exception as e:                           # noqa: BLE001
+        log.warning("could not read this job's pacing from request.json "
+                    "(%s); the replay will fall back to the manifest", e)
+
     writer = ProgressWriter(job_root, job_id=job_id, planned=planned,
                             kind="rerun")
     _attach(writer)
@@ -314,6 +342,7 @@ def _run_rerun(job_id: str, job_root: Path, jobs_dir: Path) -> int:
         edit_agent.rerun(
             edit_agent.EditPlan(view=view, nlq="(ui)", ops=ops, source="ui",
                                 result=res, ctx=ctx, ns=ns),
+            speed_setup=setup,
             data_dir=DATA_DIR,
         )
     except Cancelled as e:

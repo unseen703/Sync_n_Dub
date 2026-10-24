@@ -17,6 +17,7 @@ import logging
 import os
 import shutil
 import subprocess
+import time
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -169,13 +170,200 @@ def _own_pids() -> set:
     return mine
 
 
+#: Opt out of the one-tenant rule. Off by default, and deliberately NOT a
+#: free-memory threshold -- `gpu_busy_pids` records that a VRAM floor was
+#: tried and removed, because our own process holds a 1.9-4.7 GiB CUDA
+#: context from face detection and a threshold reads that as a stranger.
+#:
+#: This keeps the pid logic and makes it advisory, for the case the strict
+#: rule cannot see: a neighbour that is RESIDENT BUT IDLE. Measured here
+#: 2026-10-22 — gpu0 held 1117 MiB of 16311 at 0% utilisation, and the run
+#: was refused for a process that was doing nothing.
+#:
+#: The risk is real and is the operator's to take: the neighbour may grow,
+#: and then one of the two jobs dies. Lip-sync is the likelier victim,
+#: because MuseTalk answers an OOM by exiting 0 having written nothing.
+GPU_ALLOW_SHARED_ENV = "DUBBING_GPU_ALLOW_SHARED"
+
+
+def _allow_shared() -> bool:
+    return (os.getenv(GPU_ALLOW_SHARED_ENV, "") or "").strip().lower() in (
+        "1", "true", "yes", "on")
+
+
+#: A card counts as free when BOTH numbers sit under these, rather than when
+#: it is empty. Changed 2026-10-22 by request, replacing the one-tenant rule.
+#:
+#: 10% of a 16311 MiB card is ~1631 MiB, so the resident-but-idle CUDA
+#: context measured on 2026-10-22 (1117 MiB at 0% utilisation) passes, while
+#: a card that is actually working does not.
+#:
+#: **The memory figure is FOREIGN memory, not `memory.used`.** That
+#: distinction is the whole reason the earlier VRAM floor was removed: this
+#: process holds 1.9-4.7 GiB of its own CUDA context from face detection and
+#: ASD, and `scripts/lipsync_asd_gated.py` scores TalkNet on the GPU in the
+#: same process before it ever asks whether a card is free. A threshold over
+#: `memory.used` reads our own context as a stranger and refuses every run
+#: that did any GPU work first.
+GPU_BUSY_UTIL_PCT = 10.0        # override: DUBBING_GPU_BUSY_UTIL_PCT
+GPU_BUSY_MEM_PCT = 10.0         # override: DUBBING_GPU_BUSY_MEM_PCT
+
+#: `utilization.gpu` is an INSTANTANEOUS sample over the driver's last
+#: sampling window, so a job between batches reads 0% and one read would
+#: call a busy card free. Sampled `GPU_UTIL_SAMPLES` times and the MAX is
+#: taken: a card reading 0/0/90 is busy, and averaging would hide it.
+GPU_UTIL_SAMPLES = 3
+GPU_UTIL_SAMPLE_GAP_S = 0.2
+
+
+def _pct_env(name: str, fallback: float) -> float:
+    try:
+        v = (os.getenv(name, "") or "").strip()
+        return float(v) if v else fallback
+    except ValueError:
+        log.warning("gpu: %s is not a number; using %.1f", name, fallback)
+        return fallback
+
+
+def _remap_to_visible(physical: dict) -> dict:
+    """Physical nvidia-smi ids -> the ids this process sees.
+
+    With `CUDA_VISIBLE_DEVICES=2,5` the process sees those as 0 and 1, so
+    position i must be looked up under the physical id at position i. Getting
+    this wrong attaches each card's figures to the other one, and the gate
+    then passes the busy card. Same rule as `gpu_free_memory`.
+    """
+    cvd = os.getenv("CUDA_VISIBLE_DEVICES", "").strip()
+    if cvd and not os.getenv("DUBBING_GPUS", "").strip():
+        ids = [int(x) for x in cvd.split(",") if x.strip().isdigit()]
+        return {pos: physical[ph] for pos, ph in enumerate(ids)
+                if ph in physical}
+    return physical
+
+
+def gpu_load() -> dict:
+    """{visible device id -> (util_pct, foreign_mib, total_mib)}.
+
+    A device missing from the result is UNKNOWN, and callers must treat
+    unknown as busy: if nvidia-smi cannot be read, failing open would put an
+    unpinned worker on whichever card the driver picks, which is the exact
+    collision this module exists to prevent.
+    """
+    try:
+        util_max: dict = {}
+        total: dict = {}
+        for i in range(max(1, GPU_UTIL_SAMPLES)):
+            if i:
+                time.sleep(GPU_UTIL_SAMPLE_GAP_S)
+            proc = subprocess.run(
+                ["nvidia-smi",
+                 "--query-gpu=index,utilization.gpu,memory.total",
+                 "--format=csv,noheader,nounits"],
+                capture_output=True, text=True, timeout=20)
+            if proc.returncode != 0:
+                return {}
+            for line in (proc.stdout or "").strip().splitlines():
+                idx, util, tot = [x.strip() for x in line.split(",")[:3]]
+                g = int(idx)
+                util_max[g] = max(util_max.get(g, 0.0), float(util))
+                total[g] = int(tot)
+        if not total:
+            return {}
+
+        # Foreign memory only -- see GPU_BUSY_MEM_PCT. Per-process rows are
+        # keyed by uuid, so the same uuid->index map `gpu_busy_pids` builds
+        # is needed to attribute them.
+        uuid_rows = subprocess.run(
+            ["nvidia-smi", "--query-gpu=index,uuid", "--format=csv,noheader"],
+            capture_output=True, text=True, timeout=20)
+        phys = {}
+        for line in (uuid_rows.stdout or "").strip().splitlines():
+            idx, uu = [x.strip() for x in line.split(",", 1)]
+            phys[uu] = int(idx)
+        apps = subprocess.run(
+            ["nvidia-smi", "--query-compute-apps=gpu_uuid,pid,used_memory",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=20)
+        ours = _own_pids()
+        foreign: dict = {g: 0 for g in total}
+        for line in (apps.stdout or "").strip().splitlines():
+            parts = [x.strip() for x in line.split(",")]
+            if len(parts) < 3 or not parts[1].isdigit():
+                continue
+            if int(parts[1]) in ours:
+                continue
+            g = phys.get(parts[0])
+            if g is not None:
+                try:
+                    foreign[g] = foreign.get(g, 0) + int(parts[2])
+                except ValueError:
+                    continue
+    except Exception:                                    # noqa: BLE001
+        return {}
+
+    return _remap_to_visible(
+        {g: (util_max.get(g, 0.0), foreign.get(g, 0), total[g])
+         for g in total})
+
+
 def free_devices() -> list:
-    """Visible GPUs with no foreign compute process, in index order."""
+    """Visible GPUs that look idle, in index order.
+
+    Changed 2026-10-22: the rule was "no foreign compute process at all",
+    which refused a card holding a resident-but-idle 1117 MiB context. It is
+    now a LOAD test -- utilisation under `GPU_BUSY_UTIL_PCT` and foreign
+    memory under `GPU_BUSY_MEM_PCT` of the card.
+
+    That is a deliberate loosening and the risk is the operator's: a
+    neighbour that grows takes one of the two jobs with it, and lip-sync is
+    the likelier victim because MuseTalk answers an OOM by exiting 0 having
+    written nothing.
+
+    With `DUBBING_GPU_ALLOW_SHARED=1` every visible GPU counts as free and
+    the foreign tenants are named in the log instead — so a shared run is
+    still recorded as one, rather than looking like an empty card.
+    """
     gpus = visible_cuda_devices()
     if not gpus:
         return []
     busy = gpu_busy_pids()
-    return [g for g in gpus if not busy.get(g)]
+    if _allow_shared():
+        shared = {g: busy[g] for g in gpus if busy.get(g)}
+        if shared:
+            log.warning(
+                "gpu: %s set — using %s alongside %s. If that process grows, "
+                "one of the two jobs dies, and MuseTalk answers an OOM by "
+                "exiting 0 with no output.",
+                GPU_ALLOW_SHARED_ENV,
+                ", ".join(f"gpu{g}" for g in gpus),
+                "; ".join(f"gpu{g}: pid {', '.join(map(str, p))}"
+                          for g, p in shared.items()))
+        return list(gpus)
+
+    util_cap = _pct_env("DUBBING_GPU_BUSY_UTIL_PCT", GPU_BUSY_UTIL_PCT)
+    mem_cap = _pct_env("DUBBING_GPU_BUSY_MEM_PCT", GPU_BUSY_MEM_PCT)
+    load = gpu_load()
+    free = []
+    for g in gpus:
+        if g not in load:
+            # Unknown is busy, never free. See `gpu_load`.
+            log.warning("gpu: gpu%d load unreadable; treating it as busy", g)
+            continue
+        util, foreign_mib, total_mib = load[g]
+        mem_pct = (100.0 * foreign_mib / total_mib) if total_mib else 100.0
+        if util < util_cap and mem_pct < mem_cap:
+            if foreign_mib:
+                log.info(
+                    "gpu: gpu%d idle enough to use — %.0f%% util, %d MiB "
+                    "(%.1f%%) held by %s",
+                    g, util, foreign_mib, mem_pct,
+                    ", ".join(f"pid {p}" for p in busy.get(g, [])) or "no pid")
+            free.append(g)
+        else:
+            log.info("gpu: gpu%d busy — %.0f%% util (cap %.0f%%), %d MiB "
+                     "foreign (%.1f%%, cap %.0f%%)",
+                     g, util, util_cap, foreign_mib, mem_pct, mem_cap)
+    return free
 
 
 def gpu_free_memory() -> dict:
@@ -237,23 +425,27 @@ def pick_devices(n: Optional[int] = None) -> List[int]:
     return free[:min(want, len(free))]
 
 
-def probe_duration(media: Path) -> float:
-    """Duration in seconds via ffprobe, 0.0 if unavailable."""
-    # media_io._ffprobe_bin() rather than shutil.which: there is no
-    # ffprobe on this host's PATH, and which() returning None here
-    # silently degrades to "unknown" instead of failing (CLAUDE.md §1).
-    from .media_io import _ffprobe_bin
-    ffprobe = _ffprobe_bin()
-    if not ffprobe:
-        return 0.0
+def _duration_or_zero(media: Path) -> float:
+    """`media_io.probe_duration`, with a failure reported as 0.0.
+
+    This module used to carry its OWN `probe_duration` — same name as
+    `media_io`'s, same job, strictly worse: it gave up when ffprobe was
+    absent, where `media_io`'s falls back to reading ffmpeg's banner. Two
+    functions with one name is how a caller ends up importing the one it did
+    not mean.
+
+    The 0.0 stays, and only here. `split_video_audio` documents "or ffprobe
+    cannot read the duration" as a reason to fall back to a single chunk, and
+    a raise there would turn an unreadable probe into a dead shard run. So
+    the better probe is used and its exceptions are mapped back onto the
+    contract this one caller already has.
+    """
+    from .media_io import probe_duration
     try:
-        proc = subprocess.run(
-            [ffprobe, "-v", "error", "-show_entries", "format=duration",
-             "-of", "default=noprint_wrappers=1:nokey=1", str(media)],
-            capture_output=True, text=True, check=True,
-        )
-        return float(proc.stdout.strip() or 0.0)
-    except Exception:
+        return float(probe_duration(media))
+    except Exception:                               # noqa: BLE001
+        log.warning("gpu: could not read the duration of %s; "
+                    "treating it as unsplittable", media)
         return 0.0
 
 
@@ -276,7 +468,7 @@ def split_video_audio(
     than `n * min_chunk_s`, or ffprobe cannot read the duration.
     """
     out_dir = Path(out_dir); out_dir.mkdir(parents=True, exist_ok=True)
-    dur = probe_duration(video)
+    dur = _duration_or_zero(video)
     if n <= 1 or dur <= 0.0 or dur < n * min_chunk_s:
         return [(Path(video), Path(audio))]
 

@@ -30,6 +30,13 @@ export function SpeakerTable() {
   const revertSpeaker = useStore((s) => s.revertSpeaker);
   const diarized = useStore((s) => Boolean(s.progress?.milestones?.diarization_done));
   const state = useStore((s) => s.progress?.state);
+  // What the AGENT has staged, which is a different path to the same rows.
+  // A voice or tone changed with the picker lives in `staged` above and
+  // never left the browser; one asked for in the chat box is already in the
+  // job's `pending.json`, and gender can ONLY arrive that way — there is no
+  // picker for it. A row reading only the local store showed nothing at all
+  // for "make SPEAKER_00 female" until it had been applied.
+  const agent = useStore((s) => s.agentParams);
 
   if (!diarized) return null;
 
@@ -84,6 +91,7 @@ export function SpeakerTable() {
               speaker={sp}
               table={table}
               staged={staged[sp.id]}
+              fromAgent={agent?.speakers.find((a) => a.id === sp.id) ?? null}
               editable={editable}
               onVoice={(v) => stageVoice(sp.id, v)}
               onTone={(t) => stageTone(sp.id, t)}

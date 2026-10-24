@@ -11,14 +11,24 @@ import { useStore } from '../store/useStore';
 export function useHashRoute(): void {
   useEffect(() => {
     const onHash = () => {
-      // `#/job/<id>/edit` is the agent page for that job. Matched BEFORE
-      // the plain job route, because `(.+)` would otherwise swallow the
-      // `/edit` suffix into the id — the same greedy-match mistake the
-      // server made with its `{job_id:path}` converter.
       // `#/new` is kept as an ALIAS for home: the new-dub form moved onto
       // the landing page, and the old link should not 'do nothing'.
       if (location.hash === '#/new') {
         location.replace('#/');
+        return;
+      }
+      // `#/job/<id>/edit` was the agent's own page until 2026-10-21. The
+      // agent now lives on the job page itself, below the video, so this
+      // REDIRECTS rather than 404s — an old bookmark or a link in a chat
+      // still lands somewhere, and lands on the thing it was pointing at.
+      //
+      // Matched BEFORE the plain job route, because `(.+)` would otherwise
+      // swallow the `/edit` suffix into the id — the same greedy-match
+      // mistake the server made with its `{job_id:path}` converter, which
+      // is how a job called `<id>/edit` would be looked up and not found.
+      const legacyEdit = location.hash.match(/^#\/job\/(.+)\/edit$/);
+      if (legacyEdit) {
+        location.replace(`#/job/${legacyEdit[1]}`);
         return;
       }
       // `#/talking-head` is a standalone page with no job behind it, so it
@@ -26,15 +36,12 @@ export function useHashRoute(): void {
       // auto-selected job would keep rendering underneath it.
       if (location.hash === '#/talking-head') {
         useStore.getState().setTalkingHead(true);
-        useStore.getState().setEditing(false);
         if (useStore.getState().selected) useStore.getState().selectJob(null);
         return;
       }
       useStore.getState().setTalkingHead(false);
-      const edit = location.hash.match(/^#\/job\/(.+)\/edit$/);
-      const m = edit ?? location.hash.match(/^#\/job\/(.+)$/);
+      const m = location.hash.match(/^#\/job\/(.+)$/);
       const id = m ? decodeURIComponent(m[1]) : null;
-      useStore.getState().setEditing(Boolean(edit));
       if (id) {
         if (id !== useStore.getState().selected) useStore.getState().selectJob(id);
       } else if (useStore.getState().selected) {

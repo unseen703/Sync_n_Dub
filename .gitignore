@@ -88,11 +88,31 @@ data/talking_head/*
 third_party/
 !patches/
 
+# The lip-sync adapters' vendored upstreams, moved out of third_party/ on
+# 2026-10-23 so the adapters stop reaching outside models/. Same deal: the
+# CODE is upstream's and the WEIGHTS are tens of GB, so neither is tracked.
+# ~21 GB lives here (LatentSync 12G, MuseTalk 8.7G, Wav2Lip 517M).
+models/lipsync/vendor/
+# TalkNet followed on the same day, for the same reason.
+models/asd/vendor/
+
 # Run logs, build output, model weights
 logs/
 ui/web-dist/
 *.pth
+# `*.pt` matters more than it looks. LatentSync's UNet is a 4.7 GB `.pt`,
+# and it escaped git only because `third_party/` was ignored wholesale.
+# Moving it under models/ made it trackable for the first time -- a single
+# `git add -A` away from a 4.7 GB blob in the history, which is not
+# removable without rewriting it.
+*.pt
 *.onnx
 *.ckpt
 *.safetensors
 # <<< dubbing media
+
+# scratch dirs from A/B refactor scripts
+.ab_tmp/
+
+# session-generated conversation summaries (not source)
+changes.md

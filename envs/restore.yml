@@ -1,0 +1,34 @@
+# Face-restoration env (`--restore gfpgan`, the UI's "Enhance" panel). On
+# disk as `wav2liphd` -- a full `conda create --clone dubbing` plus the four
+# packages in restore.pip.txt (verified: that is the ENTIRE diff against
+# `dubbing`, confirmed by diffing both envs' pip freezes directly).
+#
+# There is no separate conda-level spec for this one: it IS `dubbing`, so
+# `envs/dubbing.yml` + `envs/dubbing.pip.txt` apply, plus this file's four
+# packages.
+#
+# Recreate (literal clone, matching what's on disk today):
+#   conda create -n restore --clone dubbing
+#   <conda prefix>/envs/restore/bin/python -m pip install -r envs/restore.pip.txt
+#   $PY scripts/setup_face_restore.py   # shims basicsr, places facexlib weights
+#
+# `RESTORE_PYTHON` in .env then points at this env's python (blank is safe —
+# resolve_env_python()'s sibling lookup finds `envs/restore/bin/python`
+# automatically; see .env.example).
+#
+# WORTH RECONSIDERING, not applied here: a `conda create --clone` doubles
+# dubbing's full disk footprint (~13 GB) for four packages that, per a direct
+# check on this host, import clean under `dubbing`'s own torch/torchvision
+# (2.8.0+cu128 / 0.23.0+cu128 in both envs already) with NO remaining
+# `torchvision.transforms.functional_tensor` reference anywhere in basicsr's
+# installed files -- i.e. the one historical incompatibility this env's own
+# docstring describes is already resolved by a source patch, not by env
+# isolation. Installing these four packages straight into `dubbing` and
+# running `scripts/setup_face_restore.py` against it directly would plausibly
+# work and remove a whole env, but this has not been tried on a live
+# install -- flagging it rather than acting on it.
+#
+# scripts/setup_face_restore.py currently hardcodes this env's path
+# (`ENV = Path("/data1/dipak_data/miniconda3/envs/wav2liphd")`) rather than
+# resolving it the way `models/lipsync/base.py::resolve_env_python` does;
+# fixing that is tracked separately, not done as part of writing this spec.

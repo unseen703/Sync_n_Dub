@@ -50,10 +50,11 @@ if str(REPO_ROOT) not in sys.path:
 from ui import facepick, presets                             # noqa: E402
 from ui.clip import adopt_whole, cut_window                  # noqa: E402
 from ui.progress import ProgressWriter, plan_stages          # noqa: E402
+from ui._io import data_dir as _data_dir                     # noqa: E402
 
 log = logging.getLogger("ui.runner")
 
-DATA_DIR = Path(os.environ.get("DUBBING_UI_DATA_DIR") or (REPO_ROOT / "data"))
+DATA_DIR = _data_dir()
 JOBS_DIR = DATA_DIR / "jobs"
 
 REQUEST_FILE = "request.json"

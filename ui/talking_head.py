@@ -30,26 +30,33 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+from ._io import data_dir as _data_dir
 
 log = logging.getLogger(__name__)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CATALOGUE = REPO_ROOT / "data" / "talking_head" / "dialogues.json"
 
-#: Named in the "wrong interpreter" message below. Derived the way
-#: `models/lipsync/base.py::resolve_env_python` derives a sibling env — from
-#: the conda prefix two levels above whichever python is running — so it stays
-#: right if the install moves, and falls back to the documented path.
-_DUBBING_PY = str(
-    (Path(sys.executable).resolve().parent.parent.parent / "dubbing" / "bin"
-     / "python")
-    if (Path(sys.executable).resolve().parent.parent.parent / "dubbing"
-        / "bin" / "python").exists()
-    else "/data1/dipak_data/miniconda3/envs/dubbing/bin/python")
+#: Named in the "wrong interpreter" message below. `DUBBING_PY`, when set
+#: (`ui.server.main()` defaults it to its own `sys.executable`), is trusted
+#: first; otherwise derived the way `models/lipsync/base.py::resolve_env_python`
+#: derives a sibling env — from the conda prefix two levels above whichever
+#: python is running — so it stays right if the install moves. None rather
+#: than a literal `/data1/...` fallback: on any install where the sibling
+#: derivation fails too, that path does not exist on the operator's machine
+#: either, and a message pointing at it is worse than one admitting it does
+#: not know.
+_sibling_dubbing_py = (Path(sys.executable).resolve().parent.parent.parent
+                        / "dubbing" / "bin" / "python")
+_DUBBING_PY = (
+    os.environ.get("DUBBING_PY")
+    or (str(_sibling_dubbing_py) if _sibling_dubbing_py.exists() else None))
 
 #: Longest edge we hand to the renderer. Above this MuseTalk's S3FD finds no
 #: face at all and the run dies on a divide-by-zero; 1280 is the width that
@@ -155,10 +162,13 @@ def _detector(device: str = "cpu"):
         # `.venv-diarization` (a uv venv with torch and cv2 but no
         # insightface) rather than from `envs/dubbing`, and every photo upload
         # answered "ModuleNotFoundError" with nothing pointing at the cause.
+        hint = (f"{_DUBBING_PY} -m ui.server" if _DUBBING_PY
+                else "the dubbing env's python -m ui.server "
+                     "(set DUBBING_PY in .env if it cannot be found)")
         raise ImportError(
             f"insightface is not installed in the interpreter running this "
             f"server ({sys.executable}). Start ui.server from the dubbing "
-            f"env: {_DUBBING_PY} -m ui.server"
+            f"env: {hint}"
         ) from e
     app = FaceAnalysis(name="buffalo_l", allowed_modules=("detection",))
     app.prepare(ctx_id=-1 if device == "cpu" else 0, det_size=(640, 640))
@@ -302,8 +312,11 @@ RENDER_FRAME_NAME = "source.png"
 
 #: Where photos, clips and renders live. A module constant so a test can
 #: point it somewhere disposable; `ui/routes_talkinghead.py` reads this one
-#: rather than keeping a second copy.
-DATA_DIR = REPO_ROOT / "data"
+#: rather than keeping a second copy. Goes through the shared `_io.data_dir()`
+#: so a relocated `DUBBING_UI_DATA_DIR` moves this page's files along with
+#: everything else — this used to be a hardcoded `REPO_ROOT / "data"` that
+#: ignored the setting entirely.
+DATA_DIR = _data_dir()
 
 _RENDER_LOCKS: Dict[str, Any] = {}
 

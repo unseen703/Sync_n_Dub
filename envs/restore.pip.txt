@@ -1,0 +1,23 @@
+# The restore env (`wav2liphd` on disk) is `conda create --clone dubbing`
+# plus these four packages -- not a separate pip freeze. Diffed directly
+# against envs/dubbing.pip.txt on the live envs; this is the complete delta
+# (confirmed empty elsewhere — no version drift beyond these four lines,
+# googleapis-common-protos aside, which differs by a patch version with no
+# behavioural relevance here).
+#
+# Install into a clone of `dubbing` with:
+#   <conda prefix>/envs/restore/bin/python -m pip install -r envs/restore.pip.txt
+# No --extra-index-url needed -- the clone already has torch/torchvision at
+# the versions these four were verified against (torch 2.8.0+cu128,
+# torchvision 0.23.0+cu128).
+#
+# basicsr 1.4.2 imports `torchvision.transforms.functional_tensor`, removed
+# in torchvision>=0.17. Verified on the live env: that import no longer
+# appears ANYWHERE in basicsr's installed files, meaning the fix already
+# applied there is a source patch, not a separate shim module --
+# scripts/setup_face_restore.py::shim_imports() is what applies it (rewrites
+# the dead import path in place). Run that script after this install.
+basicsr==1.4.2
+facexlib==0.3.0
+gfpgan==1.3.8
+realesrgan==0.3.0

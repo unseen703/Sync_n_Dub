@@ -25,9 +25,41 @@
 
 set -u
 
-REPO=/data1/dipak_data/dubbingstudio
-PY=/data1/dipak_data/miniconda3/envs/dubbing/bin/python
-ENV_LIB=/data1/dipak_data/miniconda3/envs/dubbing/lib
+# REPO is this script's own location, not a literal, so the same file works
+# from any checkout. PY mirrors models/lipsync/base.py::resolve_env_python's
+# order: an explicit DUBBING_PY wins -- `ui.server.main()` sets it to its own
+# `sys.executable` before spawning a job (CLAUDE.md), so a detached run
+# normally gets the exact interpreter already proven to work -- then the
+# sibling `dubbing` conda env next to whatever interpreter this shell can
+# find, then refuse rather than guess. A silently wrong interpreter here is
+# the cv2/insightface import-order trap in CLAUDE.md section 1, and it would
+# otherwise only surface after ASR/MT/TTS/mix have already run.
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+resolve_py() {
+  if [ -n "${DUBBING_PY:-}" ] && [ -x "${DUBBING_PY}" ]; then
+    printf '%s\n' "$DUBBING_PY"
+    return 0
+  fi
+  local base=""
+  if [ -n "${CONDA_PREFIX:-}" ]; then
+    base="${CONDA_PREFIX%/envs/*}"
+  elif command -v conda >/dev/null 2>&1; then
+    base="$(conda info --base 2>/dev/null)"
+  fi
+  if [ -n "$base" ] && [ -x "$base/envs/dubbing/bin/python" ]; then
+    printf '%s\n' "$base/envs/dubbing/bin/python"
+    return 0
+  fi
+  return 1
+}
+
+if ! PY="$(resolve_py)"; then
+  echo "no usable python interpreter found: set DUBBING_PY to the dubbing" \
+       "env's python (e.g. <conda prefix>/envs/dubbing/bin/python)" >&2
+  exit 1
+fi
+ENV_LIB="$(dirname "$PY")/../lib"
 
 if [ $# -lt 1 ]; then
   echo "usage: $0 <job_id> [--rerun]" >&2
@@ -36,7 +68,7 @@ fi
 JOB_ID=$1
 shift
 
-JOB_DIR="${DUBBING_UI_DATA_DIR:-$REPO/data}/jobs/$JOB_ID"
+JOB_DIR="${DUBBING_UI_DATA_DIR:-${DUBBING_DATA_DIR:-$REPO/data}}/jobs/$JOB_ID"
 if [ ! -d "$JOB_DIR" ]; then
   echo "no such job folder: $JOB_DIR" >&2
   exit 2
@@ -45,14 +77,21 @@ fi
 mkdir -p "$JOB_DIR"
 exec >> "$JOB_DIR/run.log" 2>&1
 
-export LD_PRELOAD="$ENV_LIB/libstdc++.so.6"
+# LD_PRELOAD only if the conda libstdc++ is actually there -- a venv install
+# has none at this derived path, and exporting a path to nothing makes the
+# loader print "object ... cannot be preloaded" on every exec instead of
+# silently doing without it.
+LIBSTDCXX="$ENV_LIB/libstdc++.so.6"
+if [ -f "$LIBSTDCXX" ]; then
+  export LD_PRELOAD="$LIBSTDCXX"
+fi
 export PYTHONUNBUFFERED=1
 
 echo "=================================================================="
 echo " ui_run_job   : $JOB_ID"
 echo " started      : $(date -Is)"
 echo " interpreter  : $PY"
-echo " LD_PRELOAD   : $LD_PRELOAD"
+echo " LD_PRELOAD   : ${LD_PRELOAD:-<not set -- $LIBSTDCXX not found>}"
 echo " GPUs         : ${CUDA_VISIBLE_DEVICES:-all visible}"
 echo "=================================================================="
 

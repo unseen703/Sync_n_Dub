@@ -19,13 +19,13 @@ from fastapi import APIRouter, Body, Depends, HTTPException
 
 from .auth import basic_auth
 from . import enhance as _enhance
+from ._io import data_dir as _data_dir
 
 log = logging.getLogger(__name__)
 
 router = APIRouter()
 
-DATA_DIR = Path(os.getenv("DUBBING_DATA_DIR")
-                or Path(__file__).resolve().parent.parent / "data")
+DATA_DIR = _data_dir()
 
 #: Mirrors `routes_edits`' refusal style: a bad id is rejected, never
 #: sanitised. `Path / ".."` is not a string operation, and a cleaned-up id

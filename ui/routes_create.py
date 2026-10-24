@@ -53,10 +53,11 @@ from ui import jobqueue, langs, presets, ytmeta               # noqa: E402
 from ui.auth import basic_auth                                # noqa: E402
 from ui.progress import plan_stages, read_progress, write_atomic  # noqa: E402
 from ui.schemas import MIN_WINDOW_S, JobRequest, ProbeRequest    # noqa: E402
+from ui._io import data_dir as _data_dir, env_int as _env_int   # noqa: E402
 
 log = logging.getLogger("ui.routes_create")
 
-DATA_DIR = Path(os.environ.get("DUBBING_UI_DATA_DIR") or (REPO_ROOT / "data"))
+DATA_DIR = _data_dir()
 JOBS_DIR = DATA_DIR / "jobs"
 
 #: Where yt-dlp may be pointed. Everything else is refused before the probe.
@@ -85,11 +86,7 @@ def allowed_hosts() -> List[str]:
 
 
 def max_lipsync_s() -> int:
-    try:
-        return int(os.environ.get("DUBBING_UI_MAX_LIPSYNC_S",
-                                  str(MAX_LIPSYNC_S_DEFAULT)))
-    except ValueError:
-        return MAX_LIPSYNC_S_DEFAULT
+    return _env_int("DUBBING_UI_MAX_LIPSYNC_S", MAX_LIPSYNC_S_DEFAULT)
 
 
 # ---------------------------------------------------------------------------

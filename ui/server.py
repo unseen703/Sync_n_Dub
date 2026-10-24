@@ -31,16 +31,17 @@ from fastapi.staticfiles import StaticFiles
 
 from . import lipsync_models as _ls_models
 from .auth import basic_auth
+from ._io import data_dir as _data_dir, env_int as _env_int
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-# `DUBBING_UI_DATA_DIR` moves the whole UI, not part of it. `routes_create`
-# and `routes_edits` already read it; this module did not, so with the var
-# set the write path allocated jobs into one tree while the read path
-# listed another — a job that creates successfully and never appears.
-DATA_DIR = Path(os.environ.get("DUBBING_UI_DATA_DIR") or (REPO_ROOT / "data"))
+# `DUBBING_UI_DATA_DIR` moves the whole UI, not part of it. `_io.data_dir()`
+# is the one place that resolves it (plus the `DUBBING_DATA_DIR` alias
+# `routes_edits`/`routes_enhance` used to read on their own), so every
+# module agrees on where a job lives.
+DATA_DIR = _data_dir()
 JOBS_DIR = DATA_DIR / "jobs"
 
 #: The built Vite app, and the hand-written inspector that predates it.
@@ -57,7 +58,7 @@ LOG = logging.getLogger("ui")
 #: 20-minute render is between one and seven hours. Longer than that is
 #: refused rather than silently queued — stated, with the reason, at the
 #: point of submission.
-MAX_LIPSYNC_S = int(os.environ.get("DUBBING_UI_MAX_LIPSYNC_S", 20 * 60))
+MAX_LIPSYNC_S = _env_int("DUBBING_UI_MAX_LIPSYNC_S", 20 * 60)
 
 # ---------------------------------------------------------------------------
 # Job folder shape — the key realization is that there is no single schema.
@@ -797,6 +798,17 @@ def main() -> None:
         load_dotenv()
     except ImportError:                                  # pragma: no cover
         LOG.warning("python-dotenv is not installed; .env was not loaded")
+
+    # `scripts/ui_run_job.sh` resolves its interpreter from `DUBBING_PY`,
+    # falling back to a sibling conda env if it is unset. Defaulting it here
+    # to OUR OWN interpreter means a detached job runs under whatever env
+    # actually launched this server, rather than a second, independently
+    # resolved guess that could land somewhere else. `setdefault` so an
+    # operator-set value in `.env` still wins. Jobs launched via `Popen`
+    # (jobqueue's non-tmux fallback, and `routes_edits._launch_rerun`)
+    # inherit this from `os.environ` automatically; the tmux launch path
+    # does not inherit this process's environment and passes it explicitly.
+    os.environ.setdefault("DUBBING_PY", sys.executable)
 
     # Refuse a public bind without credentials, before uvicorn opens a socket.
     from .auth import require_auth_for_nonloopback

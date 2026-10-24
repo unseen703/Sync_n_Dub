@@ -1,5 +1,15 @@
 """Dubbing Studio — doctor, model fetcher, and dry-run.
 
+SUPERSEDED as of the portability pass that added `envs/*.yml`,
+`models/assets.lock.json`, `scripts/fetch_assets.py` and `scripts/doctor.py`.
+`./setup.sh` now execs `scripts/install.sh` and no longer calls this file at
+all -- it predates the 4-conda-env reality (CLAUDE.md), targets a single
+`.venv`, and its "Only ONE weights blob is fetched explicitly" design is
+exactly what `models/assets.lock.json` replaces. Left in place rather than
+deleted because nothing has been asked to remove it yet; it is not on any
+live entry point's path. Prefer `scripts/doctor.py` (checks) and
+`scripts/fetch_assets.py` (weights) to anything below.
+
 Entry point for `./setup.sh`; can also be run standalone inside the venv:
 
     python scripts/setup.py                 # fix anything missing + 60s dry run

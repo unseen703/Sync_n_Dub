@@ -87,13 +87,16 @@ from .speakers import TONE_ENGINES, supports_tone        # noqa: E402
 from . import transcript as _transcript                  # noqa: E402
 from . import bbox_video as _bbox                        # noqa: E402
 from . import presets                                    # noqa: E402
+from ._io import data_dir as _data_dir                   # noqa: E402
 
 log = logging.getLogger("ui.edits")
 
 #: Overridable so a test (and a relocated data folder) does not need the repo
-#: checkout's own `data/`. `ui.server` keeps its own copy of this constant;
-#: both resolve to the same place.
-DATA_DIR = Path(os.environ.get("DUBBING_DATA_DIR") or (REPO_ROOT / "data"))
+#: checkout's own `data/`. Goes through the shared `_io.data_dir()` so this
+#: module's copy and `ui.server`'s actually resolve to the same place —
+#: they read different env var names until this was centralised, which
+#: meant `DUBBING_DATA_DIR` alone moved only half the UI.
+DATA_DIR = _data_dir()
 
 PENDING_VERSION = 1
 

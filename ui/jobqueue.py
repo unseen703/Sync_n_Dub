@@ -23,9 +23,11 @@ import logging
 import os
 import signal
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from ._io import env_float as _env_float, env_int as _env_int
 from .progress import PROGRESS_FILE, write_atomic
 
 log = logging.getLogger("ui.jobqueue")
@@ -52,18 +54,11 @@ SPAWN_GRACE_ENV = "DUBBING_UI_SPAWN_GRACE_S"
 
 
 def max_concurrent() -> int:
-    try:
-        n = int(os.environ.get(MAX_CONCURRENT_ENV, "1"))
-    except ValueError:
-        n = 1
-    return max(1, n)
+    return max(1, _env_int(MAX_CONCURRENT_ENV, 1))
 
 
 def spawn_grace_s() -> float:
-    try:
-        return max(1.0, float(os.environ.get(SPAWN_GRACE_ENV, "300")))
-    except ValueError:
-        return 300.0
+    return max(1.0, _env_float(SPAWN_GRACE_ENV, 300.0))
 
 
 # ---------------------------------------------------------------------------
@@ -252,8 +247,16 @@ def spawn(job_id: str, job_root: Path, *, rerun: bool = False) -> Dict[str, Any]
 
     if _tmux_available():
         _ensure_session()
+        # `tmux new-window` runs under the tmux SERVER's stored environment,
+        # not this process's — if `dubsync` already existed when `ui.server`
+        # started, `DUBBING_PY` (set in `ui.server.main()` to this process's
+        # own interpreter) never reaches the launched script this way, and
+        # `scripts/ui_run_job.sh` falls back to its own sibling-env guess
+        # instead of the interpreter already proven to work. `-e` (tmux
+        # >=3.0) sets it for just this window.
+        env_py = os.environ.get("DUBBING_PY") or sys.executable
         cmd = ["tmux", "new-window", "-d", "-t", TMUX_SESSION, "-n", window,
-               *args]
+               "-e", f"DUBBING_PY={env_py}", *args]
         proc = subprocess.run(cmd, capture_output=True, text=True)
         if proc.returncode == 0:
             log.info("launched %s in tmux %s:%s", job_id, TMUX_SESSION, window)

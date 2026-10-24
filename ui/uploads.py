@@ -37,6 +37,8 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict
 
+from ._io import env_int as _env_int
+
 log = logging.getLogger("ui.uploads")
 
 #: Containers worth accepting. Deliberately short: every one of these is
@@ -47,10 +49,7 @@ _SAFE = re.compile(r"[^A-Za-z0-9._-]+")
 
 
 def max_upload_mb() -> int:
-    try:
-        return max(1, int(os.environ.get("DUBBING_UI_MAX_UPLOAD_MB", "4096")))
-    except ValueError:
-        return 4096
+    return max(1, _env_int("DUBBING_UI_MAX_UPLOAD_MB", 4096))
 
 
 def safe_stem(filename: str) -> str:

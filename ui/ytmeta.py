@@ -29,6 +29,8 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 from urllib.parse import urlparse
 
+from ._io import env_float as _env_float
+
 log = logging.getLogger("ui.ytmeta")
 
 THUMB_NAME = "meta.thumb.jpg"
@@ -45,7 +47,7 @@ _THUMB_HOSTS = (
 
 #: yt-dlp will spend a long time on a slow host. The UI is synchronous from
 #: the operator's point of view, so cap it.
-_SOCKET_TIMEOUT = float(os.environ.get("DUBBING_UI_PROBE_TIMEOUT_S", "20"))
+_SOCKET_TIMEOUT = _env_float("DUBBING_UI_PROBE_TIMEOUT_S", 20.0)
 
 
 def probe(url: str) -> Dict[str, Any]:

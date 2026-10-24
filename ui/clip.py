@@ -29,11 +29,13 @@ import subprocess
 from pathlib import Path
 from typing import Optional
 
+from ._io import env_int as _env_int
+
 log = logging.getLogger("ui.clip")
 
 #: Long enough that a stuck ffmpeg surfaces, short enough that it is not the
 #: thing holding a 20-minute render hostage.
-CUT_TIMEOUT_S = int(os.environ.get("DUBBING_UI_CUT_TIMEOUT_S", str(2 * 60 * 60)))
+CUT_TIMEOUT_S = _env_int("DUBBING_UI_CUT_TIMEOUT_S", 2 * 60 * 60)
 
 
 def cut_window(src: Path, out: Path, start_s: float, end_s: float,

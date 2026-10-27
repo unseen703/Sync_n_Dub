@@ -76,9 +76,9 @@ export function JobRail({ onNavigate }: { onNavigate?: () => void }) {
             <IconMenu />
           </button>
         </Tooltip>
-        <h2 className="text-[13px] font-semibold text-ink">Your dubs</h2>
+        <h2 className="text-[13px] font-semibold text-ink">My projects</h2>
         <span className="ml-auto text-[11.5px] text-ink4">
-          {loaded ? (running ? `${running} running` : `${total}`) : '…'}
+          {loaded ? (running ? `${running} project${running === 1 ? '' : 's'} processing` : `${total}`) : '…'}
         </span>
       </div>
 
@@ -99,7 +99,7 @@ export function JobRail({ onNavigate }: { onNavigate?: () => void }) {
             }
           }}
           placeholder="Search by title or language"
-          aria-label="Search your dubs"
+          aria-label="Search projects"
           className="field h-9 pl-8"
           style={{ paddingLeft: '2rem' }}
         />
@@ -120,7 +120,7 @@ export function JobRail({ onNavigate }: { onNavigate?: () => void }) {
           <div className="rounded-xl border border-danger/40 bg-danger/[0.07] px-3 py-3">
             <div className="flex items-center gap-2 text-[12.5px] font-medium text-danger">
               <IconAlert width={14} height={14} />
-              Could not load your dubs
+              Could not load projects
             </div>
             <p className="mt-1 text-[12px] leading-relaxed text-ink3">
               The studio server did not answer. It may be restarting.
@@ -146,8 +146,8 @@ export function JobRail({ onNavigate }: { onNavigate?: () => void }) {
           <EmptyState
             className="px-2 py-10"
             icon={<IconFilm width={18} height={18} />}
-            title="No dubs yet"
-            body="Start one from a YouTube link and it will appear here."
+            title="No projects yet"
+            body="Create a dubbed video from a YouTube link and it will appear here."
             action={
               <Button variant="primary" size="sm" onClick={() => setNewJobOpen(true)}>
                 New dub
@@ -172,7 +172,7 @@ export function JobRail({ onNavigate }: { onNavigate?: () => void }) {
 
       <div className="border-t border-line px-4 py-2.5 text-[11.5px] text-ink4">
         {loaded
-          ? `${total} dub${total === 1 ? '' : 's'}${filtered ? ` · ${jobs.length} shown` : ''}`
+          ? `${total} project${total === 1 ? '' : 's'}${filtered ? ` · ${jobs.length} shown` : ''}`
           : 'Loading…'}
       </div>
     </div>

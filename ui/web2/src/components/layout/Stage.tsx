@@ -3,7 +3,7 @@ import { TopBar } from './TopBar';
 import { Landing } from './Landing';
 import { EditPanel } from '../agent/EditPanel';
 import { TalkingHeadPage } from '../talkinghead/TalkingHeadPage';
-import { StageRibbon } from '../progress/StageRibbon';
+import { ResultHeader } from '../progress/ResultHeader';
 import { FailureCard } from '../progress/FailureCard';
 import { VideoStage } from '../video/VideoStage';
 import { SpeakerTable } from '../speakers/SpeakerTable';
@@ -79,8 +79,10 @@ export function Stage() {
       <TopBar />
 
       <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3 lg:px-5 lg:py-4">
-        <div className="mx-auto flex max-w-4xl flex-col gap-4">
-          <StageRibbon />
+        {/* The edit screen is a two-column layout and wants the room; a
+            running job is still the single centred column. */}
+        <div className="flex flex-col gap-4">
+          <ResultHeader />
 
           {centre === 'failed' ? (
             <FailureCard
@@ -101,28 +103,32 @@ export function Stage() {
             </div>
           ) : null}
 
-          {/* The player, from `video_ready` onward — including under a
-              failure banner, which is the whole point of mounting it
-              outside the failed branch. */}
-          {progress?.milestones?.video_ready ? (
-            <VideoStage />
-          ) : centre === 'preparing' || centre === 'creating' ? (
-            <section className="space-y-2">
-              <Eyebrow>{centre === 'creating' ? 'Queued' : 'Getting the video ready'}</Eyebrow>
-              <Skeleton className="aspect-video w-full" />
-              <p className="t-sm">
-                {centre === 'creating'
-                  ? 'Waiting for a free GPU — one dub renders at a time on this machine.'
-                  : 'The player appears as soon as the video has been fetched and trimmed.'}
-              </p>
-            </section>
-          ) : null}
-
-          {/* Everything you can do to the dub, directly under the dub.
-              While the run is still going there is nothing to edit yet, so
-              only the cast appears — it fills in from diarization onward,
-              several stages before the agent has a transcript to work on. */}
-          {running ? <SpeakerTable /> : <EditPanel jobId={selected} />}
+          {/* While the run is going it is the single centred column: the
+              player (from `video_ready`, including under a failure banner),
+              then the cast as it fills in from diarization. The edit screen
+              that replaces it once the run ends owns its own player, inside
+              its two-column layout — so the player is NOT rendered here for a
+              finished job, only for a running one. */}
+          {running ? (
+            <>
+              {progress?.milestones?.video_ready ? (
+                <VideoStage />
+              ) : centre === 'preparing' || centre === 'creating' ? (
+                <section className="space-y-2">
+                  <Eyebrow>{centre === 'creating' ? 'Queued' : 'Getting the video ready'}</Eyebrow>
+                  <Skeleton className="aspect-video w-full" />
+                  <p className="t-sm">
+                    {centre === 'creating'
+                      ? 'Waiting for a free GPU — one dub renders at a time on this machine.'
+                      : 'The player appears as soon as the video has been fetched and trimmed.'}
+                  </p>
+                </section>
+              ) : null}
+              <SpeakerTable />
+            </>
+          ) : (
+            <EditPanel jobId={selected} />
+          )}
 
           <div className="h-4" />
         </div>

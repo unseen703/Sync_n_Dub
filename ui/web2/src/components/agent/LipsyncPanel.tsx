@@ -37,6 +37,7 @@ export function LipsyncPanel({ jobId, onStarted }: {
   onStarted?: () => void;
 }) {
   const pushToast = useStore((s) => s.pushToast);
+  const admin = useStore((s) => s.mode === 'admin');
   const [ready, setReady] = useState<LipsyncReadiness | null>(null);
   const [model, setModel] = useState<string>('');
   const [busy, setBusy] = useState(false);
@@ -126,13 +127,20 @@ export function LipsyncPanel({ jobId, onStarted }: {
     ready?.model_rows ?? (ready?.models ?? []).map((id) => ({ id, label: id }));
 
   return (
-    <section className="card p-4">
+    <section id="lipsync-panel" className="card p-4">
       <Eyebrow className="mb-1">Lip-sync</Eyebrow>
       <p className="mb-3 text-[11px] text-ink4">
         The dub is done. This is the expensive part — choose a model.
       </p>
 
-      {/* ---- what ASD measured ---- */}
+      {/* ---- what ASD measured ----
+          Admin only: pixel heights and per-speaker frame counts are a
+          measurement, and nothing on this panel acts on them (see the
+          "shown, not acted on" note above). Someone choosing a model from
+          its label does not need them; someone debugging a bad mouth does.
+          The CHOICE itself stays in both modes — the model rows carry
+          server-supplied labels already. */}
+      {admin ? (
       <div className="mb-3 rounded-lg border border-line bg-surface/60 px-3 py-2">
         <div className="text-[11px] uppercase tracking-wide text-ink4">
           Average face size
@@ -165,6 +173,7 @@ export function LipsyncPanel({ jobId, onStarted }: {
           </p>
         )}
       </div>
+      ) : null}
 
       {/* ---- the choice ---- */}
       <div className="space-y-1.5">

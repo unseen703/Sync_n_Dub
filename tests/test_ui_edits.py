@@ -455,27 +455,13 @@ def test_routes_use_a_plain_path_parameter():
     assert not any(":path" in p for p in paths)
 
 
-def test_mutating_routes_carry_auth():
-    """A guard that refuses to bind but protects nothing once bound is worse
-    than none — every mutating route takes the dependency."""
-    from ui.auth import basic_auth
-    for route in R.router.routes:
-        if set(route.methods) & {"POST", "DELETE", "PUT", "PATCH"}:
-            deps = [d.call for d in route.dependant.dependencies]
-            assert basic_auth in deps, route.path
-
-
-def test_auth_is_enforced_not_merely_declared(client, monkeypatch):
-    """Gradio enforced `auth=` itself; FastAPI does not. Porting only the
-    refuse-to-bind half would leave a guard that protects nothing once bound,
-    so the dependency is checked against a live request, not just listed."""
+def test_mutating_routes_need_no_credentials(client):
+    """Auth was removed 2026-10-25. The UI is loopback-only and every route
+    is open — this pins that a mutating route answers without credentials,
+    so a half-restored dependency shows up as a 401 here."""
     root = _job(client.data_dir)
-    monkeypatch.setenv("DUBBING_UI_USER", "op")
-    monkeypatch.setenv("DUBBING_UI_PASS", "hunter2")
     body = {"edits": [{"speaker_id": "SPEAKER_00", "voice": HI_MALE}]}
-    assert client.post(f"/api/jobs/{root.name}/edits", json=body).status_code == 401
-    assert client.post(f"/api/jobs/{root.name}/edits", json=body,
-                       auth=("op", "hunter2")).status_code == 200
+    assert client.post(f"/api/jobs/{root.name}/edits", json=body).status_code == 200
 
 
 # ---------------------------------------------------------------------------

@@ -87,6 +87,18 @@ if [ -f "$LIBSTDCXX" ]; then
 fi
 export PYTHONUNBUFFERED=1
 
+# `--speed-mode warp` (the UI default since 2026-10-26) calls out to the
+# `rubberband` CLI through pyrubberband. It is installed in its own conda
+# env rather than in `dubbing` because pulling it into `dubbing` created a
+# libstdc++ fight with cv2's bundled libtbb -- the preload above resolves
+# that for `dubbing`, but the rubberband install would have moved it again.
+# Prepending its bin keeps the two envs apart and gives pyrubberband a
+# `rubberband` to shell out to; if the env is absent, the warp producer
+# falls back to pytsmod WSOLA.
+if [ -x "/data1/dipak_data/miniconda3/envs/rubberband/bin/rubberband" ]; then
+  export PATH="/data1/dipak_data/miniconda3/envs/rubberband/bin:$PATH"
+fi
+
 echo "=================================================================="
 echo " ui_run_job   : $JOB_ID"
 echo " started      : $(date -Is)"

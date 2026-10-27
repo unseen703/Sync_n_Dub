@@ -36,7 +36,7 @@ const STEPS = [
   {
     Icon: IconSparkle,
     title: 'Mouths matched to the new audio',
-    body: 'Optional lip-sync re-renders the speaker’s mouth with Wav2Lip, MuseTalk or LatentSync.',
+    body: 'Optional lip-sync re-renders the speaker’s mouth to match the new audio.',
   },
 ];
 
@@ -64,19 +64,17 @@ export function Landing() {
         </span>
 
         <h1 className="max-w-2xl text-[30px] font-semibold leading-[1.15] tracking-tight text-ink sm:text-[38px]">
-          Dub a video into an Indian language
+          Bring your videos to more
           <span className="bg-gradient-to-r from-brand-ink to-aqua-ink bg-clip-text text-transparent">
             {' '}
-            without re-shooting it
+            Indian-language audiences
           </span>
           .
         </h1>
 
         <p className="max-w-2xl text-[15px] leading-relaxed text-ink2">
-          Dubbing Studio takes the video you already have, works out who is speaking, translates
-          what they say, gives each speaker a voice in the target language and — when you want it
-          — moves their mouth to match. You watch the result here, compare it against the
-          original, and recast a voice without re-running the whole thing.
+          Transcribe, translate and re-voice your video in any supported Indian language
+          — with optional lip-sync to match the speaker's mouth.
         </p>
 
         <div className="flex flex-wrap items-center gap-3">
@@ -85,10 +83,10 @@ export function Landing() {
             size="lg"
             onClick={() => document.querySelector<HTMLInputElement>('#start-url')?.focus()}
           >
-            Start a dub
+            Create dubbed video
           </Button>
           <span className="text-[12.5px] text-ink3">
-            paste a link below — or press <Kbd>N</Kbd> from anywhere
+            add your source below — or press <Kbd>N</Kbd> from anywhere
           </span>
         </div>
       </div>
@@ -99,34 +97,6 @@ export function Landing() {
       <div className="mt-8">
         <StartPanel />
       </div>
-
-      {/* The other thing this tool can do. Kept to one line and one link:
-          it is a different job from dubbing a video, and burying it in the
-          dub form would make both harder to find. */}
-      <button
-        type="button"
-        onClick={() => {
-          location.hash = '#/talking-head';
-        }}
-        className="card mt-3 flex w-full items-center gap-3 p-4 text-left transition-colors
-                   hover:border-edge/70 hover:bg-surface"
-      >
-        <span
-          className="grid h-9 w-9 flex-none place-items-center rounded-xl border border-line
-                     bg-gradient-to-br from-brand/25 to-aqua/15 text-brand-ink"
-          aria-hidden="true"
-        >
-          <IconSparkle width={17} height={17} />
-        </span>
-        <span className="min-w-0">
-          <span className="block text-[13.5px] font-semibold text-ink">
-            Talking head — make a photo speak
-          </span>
-          <span className="mt-1 block text-[12.5px] leading-relaxed text-ink3">
-            Upload a portrait, pick a language and a line. No video needed.
-          </span>
-        </span>
-      </button>
 
       <ol className="mt-10 grid gap-3 sm:grid-cols-2">
         {STEPS.map(({ Icon, title, body }, i) => (
@@ -170,6 +140,31 @@ export function Landing() {
           </li>
         </ul>
       </section>
+
+      <button
+        type="button"
+        onClick={() => {
+          location.hash = '#/talking-head';
+        }}
+        className="card mt-3 flex w-full items-center gap-3 p-4 text-left transition-colors
+                   hover:border-edge/70 hover:bg-surface"
+      >
+        <span
+          className="grid h-9 w-9 flex-none place-items-center rounded-xl border border-line
+                     bg-gradient-to-br from-brand/25 to-aqua/15 text-brand-ink"
+          aria-hidden="true"
+        >
+          <IconSparkle width={17} height={17} />
+        </span>
+        <span className="min-w-0">
+          <span className="block text-[13.5px] font-semibold text-ink">
+            Create a talking photo
+          </span>
+          <span className="mt-1 block text-[12.5px] leading-relaxed text-ink3">
+            Upload a portrait, pick a language and a line. No video needed.
+          </span>
+        </span>
+      </button>
 
       {loaded && recent.length > 0 ? (
         <section className="mt-8">

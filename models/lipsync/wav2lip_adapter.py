@@ -36,7 +36,7 @@ from typing import Optional
 from backend.media_io import probe_video as _probe_video
 from . import coords
 from .base import (BaseLipSync, LipSyncRequest, LipSyncResult,
-                   resolve_vendor_repo)
+                   resolve_vendor_repo, run_streaming)
 
 log = logging.getLogger(__name__)
 
@@ -306,4 +306,119 @@ class Wav2LipSync(BaseLipSync):
             extra={"licence": self.licence,
                    "checkpoint": str(self.checkpoint)},
         )
+
+    def sync_many(self, requests):
+        """Render many pieces in ONE process, loading the net once.
+
+        Wav2Lip's vendored `inference.py` loads the net inside its render loop,
+        so a segmented render reloaded it per piece. For more than one piece
+        this shells out to `_wav2lip_worker.py`, which loads once and loops. A
+        single piece keeps the proven per-call path. The coord cache is handled
+        here, as in `sync()`: stage a hit before the run, copy the fresh boxes
+        out after -- per piece.
+        """
+        if not requests:
+            return []
+        if len(requests) == 1:
+            return [self.sync(requests[0])]
+        self._ensure_loaded()
+
+        import json
+
+        worker = Path(__file__).resolve().parent / "_wav2lip_worker.py"
+        manifest = []
+        staged = []            # (out, video_abs, coord_params, coord_file|None)
+        for request in requests:
+            out = Path(request.out_path)
+            out.parent.mkdir(parents=True, exist_ok=True)
+            video_abs = Path(request.video).resolve()
+            # Per video, as in sync(): the resolved factor moves the box, so it
+            # is part of the cache key.
+            resize_factor, why = resolve_resize_factor(
+                video_abs, self.resize_factor)
+            log.info("wav2lip[gpu=%s]: piece %s resize_factor=%d (%s)",
+                     self.cuda_device, out.name, resize_factor, why)
+            coord_params = {"pads": self.pads,
+                            "resize_factor": resize_factor,
+                            "nosmooth": True}
+            coord_file = None
+            use_saved = False
+            if self.use_coord_cache:
+                coord_file = out.parent / f"{out.stem}.coords.pkl"
+                cached = coords.load(video_abs, "wav2lip", coord_params)
+                if cached is not None:
+                    coord_file.write_bytes(pickle.dumps(cached))
+                    use_saved = True
+            manifest.append({
+                "face": str(video_abs),
+                "audio": str(Path(request.audio).resolve()),
+                "out": str(out.resolve()),
+                "pads": [int(x) for x in self.pads.split(",")],
+                "resize_factor": resize_factor,
+                "wav2lip_batch_size": self.wav2lip_batch_size,
+                "face_det_batch_size": self.face_det_batch_size,
+                "use_saved_coord": use_saved,
+                "saved_coord": bool(self.use_coord_cache),
+                "coord_path": str(coord_file.resolve()) if coord_file else None,
+            })
+            staged.append((out, video_abs, coord_params, coord_file))
+
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as mf:
+            json.dump(manifest, mf)
+            mf_path = mf.name
+
+        cmd = [self.python_bin, str(worker),
+               "--repo", str(self.repo_path.resolve()),
+               "--manifest", mf_path,
+               "--checkpoint_path", str(self.checkpoint.resolve())]
+        log.info("wav2lip[gpu=%s]: warm worker, %d piece(s): %s",
+                 self.cuda_device, len(requests), " ".join(cmd))
+        try:
+            # Stream live: the worker prints `[worker] start/ok/fail` per piece.
+            proc = run_streaming(cmd, cwd=str(self.repo_path),
+                                 env=self._subprocess_env(), log=log,
+                                 tag=f"wav2lip[gpu={self.cuda_device}]")
+        finally:
+            Path(mf_path).unlink(missing_ok=True)
+
+        reasons = {}
+        for line in (proc.stdout or "").splitlines():
+            if line.startswith("[worker] fail "):
+                rest = line[len("[worker] fail "):]
+                path, _, w = rest.partition(" :: ")
+                reasons[path.strip()] = w.strip() or "worker reported failure"
+        batch_err = None
+        if proc.returncode != 0 and not reasons:
+            batch_err = (f"wav2lip worker rc={proc.returncode}: "
+                         f"{proc.stdout.strip()[-3000:]}")
+
+        results = []
+        for out, video_abs, coord_params, coord_file in staged:
+            # Copy fresh boxes into the cache and clean up, whatever the
+            # outcome -- a cache write must never fail a good render.
+            if self.use_coord_cache and coord_file and coord_file.is_file():
+                try:
+                    blob = pickle.loads(coord_file.read_bytes())
+                    coords.save(video_abs, "wav2lip", coord_params, blob,
+                                frames=len(blob.get("boxes", [])))
+                except Exception as e:                       # noqa: BLE001
+                    log.warning("wav2lip: could not cache coords (%s)", e)
+                finally:
+                    coord_file.unlink(missing_ok=True)
+
+            ok = out.is_file() and out.stat().st_size > 0
+            if not ok:
+                err = (reasons.get(str(out.resolve())) or batch_err
+                       or f"wav2lip produced no output for {out.name}")
+                results.append(LipSyncResult(
+                    model_name="wav2lip", out_video=out, duration_s=0.0,
+                    fps=0.0, error=err))
+                continue
+            fps, dur = _probe_video(out)
+            results.append(LipSyncResult(
+                model_name="wav2lip", out_video=out, duration_s=dur, fps=fps,
+                extra={"licence": self.licence,
+                       "checkpoint": str(self.checkpoint),
+                       "warm_batch": len(requests)}))
+        return results
 

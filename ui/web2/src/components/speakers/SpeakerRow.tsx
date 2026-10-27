@@ -7,7 +7,8 @@ import { StagedValue } from '../ui/StagedValue';
 import { VoicePicker } from './VoicePicker';
 import { SpeakerNameField } from './SpeakerNameField';
 import { togglePreview, useAudioPreview } from '../../hooks/useAudioPreview';
-import type { AgentSpeaker, Speaker, SpeakerTable, VoiceOption } from '../../api/types';
+import { useStore } from '../../store/useStore';
+import type { AgentScriptRow, AgentSpeaker, Speaker, SpeakerTable, VoiceOption } from '../../api/types';
 import type { StagedChange } from '../../store/useStore';
 
 /**
@@ -17,13 +18,8 @@ import type { StagedChange } from '../../store/useStore';
  *
  *   name     EDITABLE, display only. Renaming dirties no stage — see
  *            `SpeakerNameField`.
- *   gender   READ-ONLY here — there is no picker for it. It is not a
- *            setting, it is the *reason* a particular voice was suggested,
- *            and showing it next to the picker is what makes the suggestion
- *            legible instead of arbitrary. It is also a prediction, and is
- *            labelled as one. It CAN be changed, but only by asking the
- *            agent ("make SPEAKER_00 female"), and a change asked for that
- *            way shows up here.
+ *   gender   STAGED. A picker offers male/female; changing it recasts the
+ *            voice from the matching-gender pool (`set_gender`).
  *   voice    STAGED. Applied by an explicit button that prices it first.
  *   tone     STAGED, and ABSENT — not disabled — when the engine would
  *            ignore it. `ui/speakers.py::supports_tone` uses the exact
@@ -34,18 +30,17 @@ import type { StagedChange } from '../../store/useStore';
  *
  * Two staging paths reach this row and both have to show. The pickers write
  * `staged` (local, in the browser, not yet posted); the chat box writes the
- * job's `pending.json`, which arrives as `fromAgent`. Gender only ever comes
- * from the second. A row that rendered only the first showed nothing at all
- * for a gender edit until it had been applied and the dub came back in a
- * different voice.
+ * job's `pending.json`, which arrives as `fromAgent`.
  */
 export function SpeakerRow({
   speaker,
   table,
   staged,
   fromAgent,
+  cues,
   onVoice,
   onTone,
+  onGender,
   onRevert,
   editable,
 }: {
@@ -53,14 +48,27 @@ export function SpeakerRow({
   table: SpeakerTable;
   staged?: StagedChange;
   fromAgent?: AgentSpeaker | null;
+  cues?: AgentScriptRow[];
   onVoice: (voice: string) => void;
   onTone: (tone: string) => void;
+  onGender: (gender: string) => void;
   onRevert: () => void;
   editable: boolean;
 }) {
+  const requestSeek = useStore((s) => s.requestSeek);
+  const selectedSpeaker = useStore((s) => s.selectedSpeaker);
+  const setSelectedSpeaker = useStore((s) => s.setSelectedSpeaker);
+  const selected = selectedSpeaker === speaker.id;
   const playing = useAudioPreview();
   const isPlaying = Boolean(speaker.reference_url && playing === speaker.reference_url);
   const dirty = Boolean(staged);
+  // The post-MT cast gate. While it is up, each speaker is either auto-detected
+  // (gender predicted, voice auto-cast) or chosen by hand; the pickers only
+  // apply in the latter mode.
+  const awaitingCast = useStore((s) => Boolean(s.progress?.milestones?.awaiting_cast));
+  const castMode = useStore((s) => s.castMode[speaker.id] ?? 'autodetect');
+  const setCastMode = useStore((s) => s.setCastMode);
+  const pickersEnabled = editable && (!awaitingCast || castMode === 'select');
 
   // The picker's own value is what the CONTROL shows, so it keeps following
   // the local store. The before/after beneath is the separate question of
@@ -90,13 +98,18 @@ export function SpeakerRow({
   const currentTone = toneLabel(
     staged?.fromTone !== undefined ? staged.fromTone : speaker.tone);
 
-  const gender = genderWord(speaker.gender);
-  const stagedGender = genderWord(fromAgent?.gender.staged ?? null);
+  const genderRaw = staged?.gender !== undefined ? staged.gender : speaker.gender;
+  const gender = genderWord(genderRaw);
+  const stagedGender = staged?.gender !== undefined && staged.gender !== staged.fromGender
+    ? genderWord(staged.gender)
+    : genderWord(fromAgent?.gender.staged ?? null);
+  const currentGender = genderWord(
+    staged?.fromGender !== undefined ? staged.fromGender : speaker.gender);
   // Any of the three about to change, from either path.
   const willChange = Boolean(
     (stagedVoice && stagedVoice !== currentVoice)
     || (stagedTone && stagedTone !== currentTone)
-    || (stagedGender && stagedGender !== gender),
+    || (stagedGender && stagedGender !== currentGender),
   );
 
   const rationale = fmtRationale(speaker.voice_rationale);
@@ -104,20 +117,30 @@ export function SpeakerRow({
   return (
     <div
       className={cn(
-        'relative grid items-center gap-3 px-3.5 py-3',
-        'grid-cols-1 sm:grid-cols-[minmax(0,1fr)_auto]',
+        'relative flex flex-wrap items-center gap-3 px-3.5 py-2',
         dirty && 'bg-warn/[0.06]',
+        selected && 'ring-2 ring-inset ring-brand',
       )}
     >
       {dirty ? (
         <span className="absolute inset-y-0 left-0 w-[3px] bg-warn" aria-hidden="true" />
       ) : null}
 
-      <div className="flex min-w-0 items-center gap-2.5">
-        <span
-          className="h-2.5 w-2.5 shrink-0 rounded-full"
+      <div className="flex min-w-0 flex-1 basis-[15rem] items-center gap-2.5">
+        <button
+          type="button"
+          onClick={() => setSelectedSpeaker(selected ? null : speaker.id)}
+          aria-label={
+            selected
+              ? `Stop aiming edits at ${speaker.label ?? speaker.id}`
+              : `Aim edits at ${speaker.label ?? speaker.id}`
+          }
+          title="Aim edits at this speaker"
+          className={cn(
+            'h-3 w-3 shrink-0 rounded-full transition-shadow',
+            selected && 'ring-2 ring-brand ring-offset-1 ring-offset-canvas',
+          )}
           style={{ background: speaker.color }}
-          aria-hidden="true"
         />
 
         <button
@@ -135,7 +158,7 @@ export function SpeakerRow({
               : 'No reference clip was saved for this speaker'
           }
           className={cn(
-            'grid h-7 w-7 shrink-0 place-items-center rounded-full transition-colors',
+            'grid h-6 w-6 shrink-0 place-items-center rounded-full transition-colors',
             speaker.reference_url
               ? 'bg-ink/[0.1] text-ink hover:bg-ink/[0.18]'
               : 'cursor-not-allowed bg-ink/[0.04] text-ink4',
@@ -146,35 +169,65 @@ export function SpeakerRow({
 
         <div className="min-w-0">
           <SpeakerNameField speaker={speaker} />
-          <div className="mt-0.5 flex flex-wrap items-center gap-x-1.5 gap-y-1 pl-1 text-[11.5px] text-ink4">
+          <div className="mt-0 flex flex-wrap items-center gap-x-1.5 gap-y-1 pl-1 text-[11.5px] text-ink4">
             <span>{fmtClock(speaker.speech_s)} of speech</span>
-            {speaker.n_segments ? (
-              <>
-                <span aria-hidden="true">·</span>
-                <span>
-                  {speaker.n_segments} line{speaker.n_segments === 1 ? '' : 's'}
-                </span>
-              </>
+            {awaitingCast ? (
+              <Select
+                ariaLabel={`Cast mode for ${speaker.label ?? speaker.id}`}
+                value={castMode}
+                onValueChange={(m) =>
+                  setCastMode(speaker.id, m as 'autodetect' | 'select')}
+                className="h-6 w-[8.5rem] shrink-0 text-[11px]"
+                items={[
+                  { value: 'autodetect', label: 'Auto-detect' },
+                  { value: 'select', label: 'Choose' },
+                ]}
+              />
             ) : null}
-            {gender ? (
-              <Tooltip label="Detected from this speaker's reference clip. It is why the voices below are suggested — it is a prediction, and you can ignore it.">
-                <span
-                  className="cursor-help rounded-md border border-line bg-ink/[0.05] px-1.5
-                             py-px text-[11px] font-medium text-ink3"
-                >
-                  {gender} · predicted
-                </span>
-              </Tooltip>
+            {pickersEnabled ? (
+              <Select
+                ariaLabel={`Gender for ${speaker.label ?? speaker.id}`}
+                value={genderRaw ?? undefined}
+                onValueChange={onGender}
+                placeholder="Gender"
+                className="h-6 w-[9rem] shrink-0 text-[11px]"
+                items={[
+                  { value: 'male', label: 'Male' },
+                  { value: 'female', label: 'Female' },
+                ]}
+              />
+            ) : gender ? (
+              <span className="rounded-md border border-line bg-ink/[0.05] px-1.5 py-px text-[11px] font-medium text-ink3">
+                {gender}
+              </span>
             ) : (
-              <Tooltip label="The voice-casting stage records a predicted gender from the reference clip. It has not run for this speaker, so every voice is offered equally.">
-                <span className="cursor-help text-ink4">gender not detected</span>
-              </Tooltip>
+              <span className="text-[11px] text-ink4">gender unknown</span>
             )}
           </div>
+          {cues && cues.length > 0 && (
+            <div className="mt-0.5 flex flex-wrap items-center gap-x-2.5 gap-y-1 pl-1">
+              <span className="text-[10.5px] text-ink4">cues</span>
+              {cues.slice(0, 10).map((c) => (
+                <button
+                  key={c.id}
+                  type="button"
+                  onClick={() => requestSeek(c.start)}
+                  title={`Go to cue #${c.cue_no} at ${fmtClock(c.start)}`}
+                  className="rounded bg-brand/10 px-1.5 py-px text-[11px] font-medium text-brand
+                             hover:bg-brand/20 transition-colors"
+                >
+                  {c.cue_no}
+                </button>
+              ))}
+              {cues.length > 10 ? (
+                <span className="text-[10.5px] text-ink4">+{cues.length - 10} more</span>
+              ) : null}
+            </div>
+          )}
         </div>
       </div>
 
-      <div className="flex flex-wrap items-center justify-end gap-2">
+      <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
         {rationale && !dirty ? (
           <Tooltip label={rationale}>
             <span className="cursor-help text-[11.5px] text-ink4">why this voice</span>
@@ -186,7 +239,7 @@ export function SpeakerRow({
           options={table.voice_options}
           value={voice}
           onChange={onVoice}
-          disabled={!editable}
+          disabled={!pickersEnabled}
         />
 
         {/* Absent, not disabled, when the engine would ignore it. */}
@@ -196,7 +249,7 @@ export function SpeakerRow({
             value={tone ?? undefined}
             onValueChange={onTone}
             placeholder="Delivery"
-            className="h-9 w-[9.5rem]"
+            className="h-8 w-[9.5rem]"
             disabled={!editable}
             // `value` is the wire value and is sent verbatim — "AIR style
             // news", not "AIR-style news". An unknown value is a 422.
@@ -232,14 +285,14 @@ export function SpeakerRow({
           picker on this row, so the agent is the only way to change it and
           this is the only place the change can appear. */}
       {willChange ? (
-        <dl className="col-span-full -mt-0.5 flex flex-wrap items-baseline gap-x-4 gap-y-1
+        <dl className="w-full -mt-0.5 flex flex-wrap items-baseline gap-x-4 gap-y-1
                        pl-[3.5rem] text-[11.5px] sm:pl-0 sm:justify-end">
-          {stagedGender && stagedGender !== gender ? (
+          {stagedGender && stagedGender !== currentGender ? (
             <div className="flex items-baseline gap-1.5">
               <dt className="text-ink4">gender</dt>
               <dd>
                 <StagedValue
-                  current={gender}
+                  current={currentGender}
                   staged={stagedGender}
                   label={`Gender for ${speaker.label ?? speaker.id}`}
                 />

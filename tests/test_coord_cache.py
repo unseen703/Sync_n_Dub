@@ -157,11 +157,15 @@ def test_the_adapter_passes_saved_coord(tmp_path, monkeypatch):
     from models.lipsync.base import LipSyncRequest
     seen = {}
 
-    def _fake_run(cmd, **kw):
+    def _fake_run(cmd, **kw):            # ffprobe in _cap_resolution/_nb_frames
+        return sp.CompletedProcess(cmd, 0, "", "")
+
+    def _fake_stream(cmd, **kw):         # the render shells out through here now
         seen["cmd"] = cmd
         return sp.CompletedProcess(cmd, 0, "", "")
 
     monkeypatch.setattr(MA.subprocess, "run", _fake_run)
+    monkeypatch.setattr(MA, "run_streaming", _fake_stream)
     a = MA.MuseTalkSync()
     monkeypatch.setattr(a, "_ensure_loaded", lambda: None)
     a.sync(LipSyncRequest(video=tmp_path / "v.dubbed.mp4",

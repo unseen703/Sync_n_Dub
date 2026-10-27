@@ -50,6 +50,8 @@ is replayed.
 | `set_voice` | pin a specific TTS voice | `voice` | `engine` | `voices` |
 | `set_speed` | re-fit speech into a shorter/longer slot | `factor` (0.5–2.0) | — | `tts` |
 | `lipsync_window` | lip-sync only a time window | — | `model` (`wav2lip`\|`musetalk`\|`latentsync`) | `lipsync` |
+| `mute_cue` | silence scoped cues, release the slot as pause | — | — | `timing` |
+| `set_target_language` | switch the dub's output language via Bodhan MT | `target_language` (ISO code of a supported Indic language) | `target_script` | `codemix` (whole dub) or `tts` (per-cue) |
 
 Stage order for replay:
 `codemix → duration → voices → tts → vc → timing → mix → lipsync`.
@@ -131,6 +133,10 @@ addresses the video timeline rather than cues.
 | `lipsync_window` | `lipsync_window needs a time range (start and end)` |
 | `lipsync_window` | `lipsync window 0.30s is too short to render` |
 | `set_gender` | `cannot honour gender='female': <why>` — the voice pool was exhausted |
+| `set_target_language` | `set_target_language needs a 'target_language' ISO code, e.g. hi, mr, ta` |
+| `set_target_language` | `unknown or non-Indic target language 'xx'. Supported: as, bn, …` |
+| `set_target_language` | `set_target_language cannot scope to a speaker alone — add a time range …` |
+| `set_target_language` | `Bodhan MT refused the translation: <why>` — the API call failed; `BODHAN_MT_KEY` missing surfaces here |
 
 ### No LLM configured
 

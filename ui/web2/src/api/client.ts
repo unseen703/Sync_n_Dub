@@ -8,9 +8,11 @@
  * owns the cadence; this file only speaks HTTP.
  */
 import type {
+  EditHistory,
   EnhanceOptions,
   EnhanceReadiness,
   EnhanceStatus,
+  ReviewVideoStatus,
   ApplyResult,
   CreateJobRequest,
   CreateJobResult,
@@ -18,6 +20,8 @@ import type {
   JobList,
   LipsyncReadiness,
   LipsyncStarted,
+  CastStarted,
+  CastSelection,
   Media,
   Options,
   PendingEdit,
@@ -140,6 +144,7 @@ export const cancelJob = (id: string) =>
   req<{ job_id: string; state: string }>(`/api/jobs/${enc(id)}/cancel`, { method: 'POST' });
 
 export const getEdits = (id: string) => req<EditPlan>(`/api/jobs/${enc(id)}/edits`);
+export const getEditHistory = (id: string) => req<EditHistory>(`/api/jobs/${enc(id)}/history`);
 
 // --- the plain-language edit agent -----------------------------------------
 // `backend/edit_agent.py` behind three routes. `agentSend` STAGES; it never
@@ -191,6 +196,14 @@ export const stageScript = (id: string, edits: ScriptEdit[]) =>
     body: JSON.stringify({ edits }),
   });
 
+/** Mute a cue directly — not an agent parse. Deduped on the
+ *  server: muting the same cue twice replaces rather than stacking. */
+export const muteCue = (id: string, segmentId: string) =>
+  req<EditPlan & { turns?: AgentTurn[] }>(
+    `/api/jobs/${enc(id)}/script/mute`,
+    { method: 'POST', body: JSON.stringify({ segment_id: segmentId }) },
+  );
+
 export const applyEdits = (id: string) =>
   req<ApplyResult>(`/api/jobs/${enc(id)}/edits/apply`, { method: 'POST' });
 
@@ -222,6 +235,17 @@ export const startLipsync = (id: string, model: string) =>
     body: JSON.stringify({ model }),
   });
 
+/**
+ * Finish the cast step for a job stopped after MT, then run the post-MT
+ * stages. Each speaker carries a `mode`: `select` pins the chosen gender/
+ * voice as an override, `autodetect` lets the pipeline predict it.
+ */
+export const castJob = (id: string, speakers: Record<string, CastSelection>) =>
+  req<CastStarted>(`/api/jobs/${enc(id)}/cast`, {
+    method: 'POST',
+    body: JSON.stringify({ speakers }),
+  });
+
 /** Stage 9i readiness — drives the Enhance resolution button's state. */
 export const getEnhanceReadiness = (id: string, render?: string) =>
   req<EnhanceReadiness>(
@@ -242,3 +266,15 @@ export const startEnhance = (id: string, opts: EnhanceOptions = {}) =>
     method: 'POST',
     body: JSON.stringify({ gated: true, scale: 'same', ...opts }),
   });
+
+/** Poll the ASD review ("bbox") video. `url` appears once it is ready. */
+export const getReviewVideo = (id: string) =>
+  req<ReviewVideoStatus>(`/api/jobs/${enc(id)}/review-video`);
+
+/**
+ * Render the ASD review video in a background thread, returning immediately.
+ * A full decode + composite over a 1080p clip is minutes, so the panel polls
+ * `getReviewVideo` rather than waiting on this.
+ */
+export const makeReviewVideo = (id: string) =>
+  req<ReviewVideoStatus>(`/api/jobs/${enc(id)}/review-video`, { method: 'POST' });

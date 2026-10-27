@@ -123,11 +123,6 @@ export const JobCard = memo(function JobCard({
         </div>
       ) : null}
 
-      {job.lipsync_model ? (
-        <div className="mt-1.5 truncate text-[11px] text-ink4">
-          Lip-sync: {job.lipsync_model}
-        </div>
-      ) : null}
     </button>
   );
 });

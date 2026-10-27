@@ -148,6 +148,8 @@ def test_every_mutating_stage_snapshots():
         "backend/emotion.py": "emotion",
         "backend/tts.py": "tts",
         "backend/edit_agent.py": "edit_",
+        # The `warped` producer writes `tts_warped_audio` onto every segment.
+        "backend/warp_plan.py": "warp",
     }
     for rel, producer in expected.items():
         src = (REPO / rel).read_text()

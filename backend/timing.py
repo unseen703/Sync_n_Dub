@@ -28,7 +28,9 @@ integrate: it has no new rendering surface, only a different search.
 Time conventions, which are the likeliest source of an off-by-a-segment bug:
   * `slot`, `src_speech`, `src_pauses`, `dst_start` are ABSOLUTE seconds on the
     source/output timeline.
-  * `Piece.src_span` is RELATIVE to the start of that segment's raw TTS clip.
+  * `Piece.src_span` is RELATIVE to the start of the clip the MIX resolves
+    for that segment -- `tts_raw_audio` for every producer except `warped`,
+    whose pieces address the pre-stretched `tts_warped_audio` instead.
   * `segments[].words[]` in the merged JSON are absolute; `segments[].tts_words[]`
     are clip-relative. They are not interchangeable.
 """
@@ -42,7 +44,7 @@ from typing import Dict, List, Optional, Tuple
 
 log = logging.getLogger(__name__)
 
-PRODUCERS = ("naive_slot", "pause_aware", "word_anchored", "dp")
+PRODUCERS = ("naive_slot", "pause_aware", "word_anchored", "dp", "warped")
 
 SCHEMA_VERSION = 1
 
@@ -320,7 +322,7 @@ def _base_segment_plan(seg: dict, *, pause_min_s: float) -> SegmentPlan:
     start = float(seg.get("start", seg.get("start_s", 0.0)))
     end = float(seg.get("end", seg.get("end_s", 0.0)))
     speech, pauses = source_speech_and_pauses(seg, pause_min_s=pause_min_s)
-    return SegmentPlan(
+    sp = SegmentPlan(
         id=seg.get("id", "SEG_????"),
         speaker=seg.get("speaker"),
         slot=Span(start, end),
@@ -329,6 +331,12 @@ def _base_segment_plan(seg: dict, *, pause_min_s: float) -> SegmentPlan:
         src_lead_in_s=max(0.0, speech[0].start - start) if speech else 0.0,
         src_tail_out_s=max(0.0, end - speech[-1].end) if speech else 0.0,
     )
+    # Carried on the plan because `_next_slot_start` sees plans, not
+    # segments, and a muted cue has to disappear from that lookahead for
+    # its seconds to read as gap. See `edits._h_mute_cue`.
+    if seg.get("muted"):
+        sp.qc["muted"] = True
+    return sp
 
 
 def _clamp_tempo(t: float, lo: float, hi: float) -> Tuple[float, bool]:
@@ -352,6 +360,15 @@ def summarize(plan: TimingPlan, *, source_duration_s: Optional[float] = None) ->
             overlap_s += ov
             overlap_n += 1
     tempos = [p.local_tempo for s in segs for p in s.pieces]
+    # Speech-only tempo, which is the number a listener actually hears.
+    # `tempo_max` below is a PIECE number: with pause absorption on, a cue's
+    # pauses are gaps rather than pieces so the two agree, but under the
+    # blob path one `local_tempo` covers speech and silence together and
+    # overstates the rate. Every producer that knows the difference records
+    # `qc["speech_tempo"]`; one that does not is absent here rather than
+    # guessed at, the same convention `unfilled_slot_s` uses.
+    sp_tempos = [float(s.qc["speech_tempo"]) for s in segs
+                 if s.qc.get("speech_tempo") is not None]
     fit_end = max((s.dst_end for s in segs), default=0.0)
     out = {
         "segments": len(segs),
@@ -363,6 +380,25 @@ def summarize(plan: TimingPlan, *, source_duration_s: Optional[float] = None) ->
         "tempo_max": round(max(tempos), 4) if tempos else None,
         "tempo_mean": round(sum(tempos) / len(tempos), 4) if tempos else None,
         "tempo_cap_hits": sum(1 for s in segs if s.qc.get("tempo_cap_hit")),
+        "speech_tempo_max": round(max(sp_tempos), 4) if sp_tempos else None,
+        "speech_tempo_mean": (round(sum(sp_tempos) / len(sp_tempos), 4)
+                              if sp_tempos else None),
+        # The headline for pause absorption: how many cues fitted their slot
+        # without the speech being touched at all.
+        "speech_untouched_segments": sum(
+            1 for s in segs if s.qc.get("speech_untouched")),
+        "pause_absorbed_s": round(
+            sum(float(s.qc.get("pause_absorbed_s") or 0.0) for s in segs), 3),
+        "pause_added_s": round(
+            sum(float(s.qc.get("pause_added_s") or 0.0) for s in segs), 3),
+        # Deliberately separate from `overrun_into_gap_s`: the same seconds
+        # of gap, but a borrow is a decision and an overrun is damage the
+        # cap could not absorb. Summing them together would hide which.
+        "borrowed_s": round(
+            sum(float(s.qc.get("borrowed_s") or 0.0) for s in segs), 3),
+        "borrowed_segments": sum(1 for s in segs if s.qc.get("borrowed_s")),
+        "overrun_into_gap_s": round(
+            sum(float(s.qc.get("overrun_into_gap_s") or 0.0) for s in segs), 3),
         # Slot time a producer could not fill because its slowdown floor
         # bound first -- i.e. audible silence left inside a segment's own
         # slot. 0.0 means every short clip was stretched out to cover its
@@ -396,9 +432,22 @@ def _next_slot_start(plans: List["SegmentPlan"], i: int) -> Optional[float]:
     source gap after slot `i`, and a cue that starts *inside* slot `i` does
     not end it -- taking the next slot in list order would measure a negative
     gap for exactly the segments that are followed by music.
+
+    MUTED cues are skipped for the same reason, one step further on. The
+    operator took that cue out of the dub, so the next boundary is the next
+    cue that is still spoken. Stopping at the muted one would measure the
+    gap as ending where the dub has nothing left to say, which walls the
+    released seconds off behind a slot nobody occupies.
+
+    Widening the gap does not spend it. `borrow_gap_s` is 0.0 by default,
+    so the only visible effect on an unconfigured run is that the barrier
+    now sees the true distance to the next spoken line -- which is the
+    distance the cursor would have to cross anyway.
     """
     end = plans[i].slot.end
     for j in range(i + 1, len(plans)):
+        if plans[j].qc.get("muted"):
+            continue
         if plans[j].slot.start >= end - 1e-3:
             return plans[j].slot.start
     return None
@@ -414,6 +463,12 @@ def plan_naive_slot(
     use_target_duration: bool = False,
     overlap_policy: str = "serialize",
     gap_barrier_s: float = 0.0,
+    borrow_gap_s: float = 0.0,
+    borrow_frac: float = 0.5,
+    absorb_pauses: bool = False,
+    absorb_max_frac: float = 0.60,
+    absorb_vad_backend: str = "energy",
+    absorb_max_runs: int = 8,
     out_json: Optional[Path] = None,
 ) -> TimingPlan:
     """Reproduce today's behaviour AS A TIMING PLAN.
@@ -466,6 +521,37 @@ def plan_naive_slot(
     a line is worse than a short bleed. Clamping the cue also resets the
     cursor for free: it now ends before the gap, so the next cue is placed at
     its own slot start instead of inheriting the drift.
+
+    `borrow_gap_s` (0.0 = off) turns that same gap from a WALL into a BUDGET.
+    The barrier says "do not run on into the music"; borrowing says "but you
+    may have this much of it, on purpose". The cue's target is extended by
+    `min(borrow_gap_s, gap_after * borrow_frac)` before the tempo is
+    computed, so a cue that needed 1.30x gets 1.20x and one that was pinned
+    at the cap may come under it. Three limits, each for a reason:
+    `borrow_frac` leaves half the silence silent, because the gap is shared
+    and taking all of it restarts the cascade in the next cue; a NESTED cue
+    never borrows, because it does not advance the cursor and two cues would
+    then spend the same seconds; and the LAST cue never borrows, because
+    `_next_slot_start` returns None and there is no measured gap to take
+    from. The seconds are the same ones `overrun_into_gap_s` reports, but
+    the two are opposite claims -- an overrun is damage the cap could not
+    absorb, a borrow is a decision -- so they are recorded separately, and
+    `qc["tempo_unborrowed"]` carries the counterfactual so the trade is
+    legible after the fact rather than inferred.
+
+    `absorb_pauses` changes WHERE the compression is spent inside the clip.
+    Off (the default) the whole clip gets one `local_tempo`, so the engine's
+    own silence at commas and sentence breaks is compressed at the same rate
+    as the speech -- budget spent on something no listener was going to
+    notice. On, `backend.pause_absorb` VADs the clip, shrinks its gaps to
+    their tiered floors first, and only then speeds the speech up; the cue
+    becomes one Piece per speech run with the kept gaps between them.
+    `qc["speech_tempo"]` is then the number a listener actually hears, and
+    `speech_untouched` records the common case where the silence covered the
+    whole deficit and the speech rendered at exactly 1.0x. It runs in
+    reverse too: a clip shorter than its slot grows its pauses rather than
+    drawling at `min_tempo`. A clip the VAD cannot use falls straight back
+    to the single-Piece blob, so this never costs a render.
     """
     if overlap_policy not in OVERLAP_POLICIES:
         raise ValueError(f"unknown overlap_policy {overlap_policy!r}; "
@@ -479,6 +565,12 @@ def plan_naive_slot(
         "use_target_duration": use_target_duration,
         "overlap_policy": overlap_policy,
         "gap_barrier_s": gap_barrier_s,
+        "borrow_gap_s": borrow_gap_s,
+        "borrow_frac": borrow_frac,
+        "absorb_pauses": absorb_pauses,
+        "absorb_max_frac": absorb_max_frac,
+        "absorb_vad_backend": absorb_vad_backend,
+        "absorb_max_runs": absorb_max_runs,
     })
 
     # Built up front because the gap barrier needs to look AHEAD at the next
@@ -508,41 +600,115 @@ def plan_naive_slot(
 
         # 2. how long it is allowed to be
         slot_dur = sp.slot.dur
+        used_target_duration = False
         if use_target_duration and seg.get("target_duration_s") is not None:
             try:
                 slot_dur = max(0.0, float(seg["target_duration_s"]))
+                used_target_duration = True
             except (TypeError, ValueError):
                 pass
         target = max(0.01, slot_dur - safety_margin_s)
+        target_unborrowed = target
+
+        # The lookahead is hoisted out of the barrier test because BOTH
+        # features need it and they need it at different thresholds: the
+        # barrier only fires at `gap_barrier_s` (1.0 s by default), while a
+        # 0.4 s gap is too short to be a wall and is still real slack.
+        gap_after: Optional[float] = None
+        if not nested:
+            nxt = _next_slot_start(plans, i)
+            if nxt is not None:
+                gap_after = max(0.0, nxt - sp.slot.end)
+                if gap_after > 1e-3:
+                    sp.qc["gap_after_s"] = round(gap_after, 3)
+
+        borrow = 0.0
+        if borrow_gap_s > 0 and gap_after is not None and not nested:
+            if used_target_duration:
+                # `set_speed` shortened this slot deliberately. Borrowing
+                # would hand the seconds straight back and cancel the edit
+                # at exit code 0 -- the same silent-no-op shape CLAUDE.md
+                # records for the replay path.
+                sp.qc["borrow_skipped"] = "target_duration_s"
+            else:
+                borrow = min(borrow_gap_s, gap_after * borrow_frac)
+                if borrow > 1e-3:
+                    target += borrow
+                    sp.qc["borrowed_s"] = round(borrow, 4)
+                else:
+                    borrow = 0.0
 
         barrier = False
-        if gap_barrier_s > 0 and not nested:
-            nxt = _next_slot_start(plans, i)
-            if nxt is not None and nxt - sp.slot.end >= gap_barrier_s:
-                barrier = True
-                sp.qc["gap_after_s"] = round(nxt - sp.slot.end, 3)
-                # Run to the music and not one frame past it. `placed` is
-                # already the drifted position, so this is what is actually
-                # left, not the slot's nominal length.
-                target = max(0.01, min(target, sp.slot.end - placed))
+        if (gap_barrier_s > 0 and not nested and gap_after is not None
+                and gap_after >= gap_barrier_s):
+            barrier = True
+            # Run to the music and not one frame past it -- plus whatever
+            # was deliberately borrowed, which is the one part of the gap
+            # this cue is allowed to own. `placed` is already the drifted
+            # position, so this is what is actually left, not the slot's
+            # nominal length.
+            target = max(0.01, min(target, sp.slot.end + borrow - placed))
 
-        # 3. how fast
-        tempo, capped = _clamp_tempo(raw / target, min_tempo, max_tempo)
-        sp.pieces = [Piece(src_span=Span(0.0, raw), dst_start=placed,
-                           local_tempo=tempo, anchor="whole",
-                           text=seg.get("final_text") or seg.get("mt_text") or "")]
-        if capped:
-            sp.qc["tempo_cap_hit"] = True
-            # Only an expansion that hit the FLOOR leaves silence. A
-            # compression pinned at the ceiling overruns instead, which the
-            # shift-forward cursor already accounts for.
-            unfilled = target - raw / tempo
-            if unfilled > 1e-3:
-                sp.qc["unfilled_s"] = round(unfilled, 4)
+        # 3. how fast, and WHERE the compression is spent
+        text = seg.get("final_text") or seg.get("mt_text") or ""
+        absorbed = None
+        if absorb_pauses:
+            clip = seg.get("tts_raw_audio") or seg.get("tts_audio")
+            if clip:
+                from . import pause_absorb as _absorb
+                try:
+                    absorbed = _absorb.plan_segment(
+                        Path(clip), raw_s=raw, target_s=target,
+                        placed_s=placed,
+                        max_speech_tempo=max_tempo, min_speech_tempo=min_tempo,
+                        max_absorb_frac=absorb_max_frac,
+                        vad_backend=absorb_vad_backend,
+                        max_runs=absorb_max_runs,
+                    )
+                except Exception as exc:                    # noqa: BLE001
+                    # A planning optimisation must never be the difference
+                    # between a dub and no dub.
+                    log.warning("timing[naive_slot]: pause absorption failed "
+                                "on %s (%s: %s); using the blob tempo",
+                                sp.id, type(exc).__name__, exc)
+                    sp.qc["absorb_error"] = f"{type(exc).__name__}: {exc}"
+
+        if absorbed is not None and absorbed.pieces:
+            sp.pieces = [
+                Piece(src_span=Span(a, b), dst_start=d, local_tempo=t,
+                      anchor="phrase" if len(absorbed.pieces) > 1 else "whole",
+                      text=text if len(absorbed.pieces) == 1 else "")
+                for a, b, d, t in absorbed.pieces
+            ]
+            sp.qc.update(absorbed.qc)
+        else:
+            tempo, capped = _clamp_tempo(raw / target, min_tempo, max_tempo)
+            sp.pieces = [Piece(src_span=Span(0.0, raw), dst_start=placed,
+                               local_tempo=tempo, anchor="whole", text=text)]
+            # The blob tempo IS the speech tempo when nothing was absorbed,
+            # and saying so keeps `summarize` from having to guess which
+            # path a segment took.
+            sp.qc["speech_tempo"] = round(tempo, 4)
+            if capped:
+                sp.qc["tempo_cap_hit"] = True
+                # Only an expansion that hit the FLOOR leaves silence. A
+                # compression pinned at the ceiling overruns instead, which
+                # the shift-forward cursor already accounts for.
+                unfilled = target - raw / tempo
+                if unfilled > 1e-3:
+                    sp.qc["unfilled_s"] = round(unfilled, 4)
+
+        if borrow > 1e-3:
+            # The counterfactual, recorded now because the pre-borrow target
+            # does not survive this loop. Without it you can see WHICH cues
+            # borrowed but never what the borrowing bought, which is the
+            # whole question when deciding whether to keep the feature.
+            t_un, _ = _clamp_tempo(raw / target_unborrowed, min_tempo, max_tempo)
+            sp.qc["tempo_unborrowed"] = round(t_un, 4)
         if placed > sp.slot.start + 1e-3:
             sp.qc["shifted_s"] = round(placed - sp.slot.start, 4)
         if barrier:
-            over = (placed + sp.pieces[0].dst_dur) - sp.slot.end
+            over = sp.dst_end - (sp.slot.end + borrow)
             if over > 1e-3:
                 sp.qc["overrun_into_gap_s"] = round(over, 4)
         if nested:
@@ -550,7 +716,10 @@ def plan_naive_slot(
             # over still owns the timeline.
             sp.qc["overlap_kept"] = True
         else:
-            cursor = placed + sp.pieces[0].dst_dur
+            # `sp.dst_end`, not `placed + pieces[0].dst_dur`: under pause
+            # absorption a cue is several Pieces and the first one's end is
+            # nowhere near the cue's.
+            cursor = sp.dst_end
             prev_slot_end = (sp.slot.end if prev_slot_end is None
                              else max(prev_slot_end, sp.slot.end))
         plan.segments.append(sp)
@@ -567,6 +736,25 @@ def plan_naive_slot(
 # ---------------------------------------------------------------------------
 # merged-JSON integration
 # ---------------------------------------------------------------------------
+
+def plan_warped(merged_json: Path, **params) -> TimingPlan:
+    """The `warped` producer. See `backend.warp_plan` for what it does.
+
+    A thin wrapper so the producer registry keeps working unchanged:
+    `plan()` looks for `plan_<name>` on this module first. The import is
+    lazy because `backend.warp_plan` pulls in scipy, soundfile and a VAD,
+    and a process that only reads a plan back should pay for none of them.
+
+    It is also the one producer that RENDERS AUDIO -- it writes a warped
+    clip per cue and `tts_warped_audio` onto each segment -- because a
+    `Piece` cannot express a time-varying rate, so the plan it returns is
+    only meaningful against files that already exist. Mix it with
+    `clip_source="warped"`.
+    """
+    from .warp_plan import plan_warped as _impl
+
+    return _impl(merged_json, **params)
+
 
 def apply_plan_to_merged(
     plan: TimingPlan,

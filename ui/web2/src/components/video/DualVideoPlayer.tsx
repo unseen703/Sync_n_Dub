@@ -22,16 +22,43 @@ export function DualVideoPlayer({
   active,
   poster,
   className,
+  onTime,
+  seekTo,
 }: {
   original: MediaRef | null;
   lipsync: MediaRef | null;
   active: 'original' | 'lipsync';
   poster?: string | null;
   className?: string;
+  /** Called from the ACTIVE element's `timeupdate` — the follow-along panel
+      tracks this. The inactive element is paused and never fires it. */
+  onTime?: (t: number) => void;
+  /** A one-shot jump request; the `nonce` is what re-fires it for a repeat
+      click on the same cue. */
+  seekTo?: { t: number; nonce: number } | null;
 }) {
   const aRef = useRef<HTMLVideoElement>(null);
   const bRef = useRef<HTMLVideoElement>(null);
   const prev = useRef<'original' | 'lipsync'>(active);
+
+  // A clicked cue seeks the element that is actually on screen, then plays it.
+  // Keyed on the nonce so the same destination can be requested twice.
+  useEffect(() => {
+    if (!seekTo) return;
+    const el = active === 'original' ? aRef.current : bRef.current;
+    if (!el) return;
+    const jump = () => {
+      try {
+        el.currentTime = seekTo.t;
+      } catch {
+        /* seek refused while the element is reloading */
+      }
+      void el.play().catch(() => undefined);
+    };
+    if (el.readyState >= 1) jump();
+    else el.addEventListener('loadedmetadata', jump, { once: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [seekTo?.nonce]);
 
   useEffect(() => {
     if (prev.current === active) return;
@@ -78,6 +105,7 @@ export function DualVideoPlayer({
           poster={poster ?? undefined}
           controls
           playsInline
+          onTimeUpdate={active === 'original' ? (e) => onTime?.(e.currentTarget.currentTime) : undefined}
           preload={active === 'original' ? 'auto' : 'metadata'}
           className={cn(common, active === 'original' ? 'z-10 opacity-100' : 'z-0 opacity-0')}
         />
@@ -89,6 +117,7 @@ export function DualVideoPlayer({
           poster={poster ?? undefined}
           controls
           playsInline
+          onTimeUpdate={active === 'lipsync' ? (e) => onTime?.(e.currentTarget.currentTime) : undefined}
           preload={active === 'lipsync' ? 'auto' : 'metadata'}
           className={cn(common, active === 'lipsync' ? 'z-10 opacity-100' : 'z-0 opacity-0')}
         />

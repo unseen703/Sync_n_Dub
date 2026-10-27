@@ -147,6 +147,19 @@ def find_lipsync_video(job_root: Path, manifest: Dict[str, Any],
         best = _newest(hits)
         if best is not None:
             return best
+
+    # 4. Nothing current — check archived renders from previous runs.
+    prev = job_root / "lipsync" / "prev"
+    if prev.is_dir():
+        # Newest archive subfolder first (timestamped names sort correctly).
+        for sub in sorted(prev.iterdir(), reverse=True):
+            if not sub.is_dir():
+                continue
+            for pattern in _LIPSYNC_RANK:
+                hits = [p for p in sub.glob(pattern) if not _excluded(p)]
+                best = _newest(hits)
+                if best is not None:
+                    return best
     return None
 
 
@@ -223,6 +236,17 @@ def resolve(job_root: Path, *, data_dir: Path,
     lip_info = ((merged.get("extra") or {}).get("lipsync") or {})
     poster = job_root / "meta.thumb.jpg"
 
+    # Detect when the video is a previous render, not the current one.
+    lip_warning: Optional[str] = None
+    if lip_v is not None:
+        try:
+            prev_dir = job_root / "lipsync" / "prev"
+            if lip_v.resolve().is_relative_to(prev_dir.resolve()):
+                lip_warning = ("The latest lip-sync run failed. "
+                               "Showing the previous render.")
+        except (OSError, ValueError):
+            pass
+
     return {
         "poster_url": (_rel_url(job_root, poster, data_dir)
                        if poster.is_file() else None),
@@ -233,6 +257,7 @@ def resolve(job_root: Path, *, data_dir: Path,
                             window=lip_info.get("window")),
             "dubbed_no_lipsync": _ref(job_root, dub_v, data_dir,
                                       label="Dubbed (no lip-sync)"),
+            "lipsync_warning": lip_warning,
         },
         "audio": {
             "original": _ref(job_root, orig_a, data_dir, label="Original audio",

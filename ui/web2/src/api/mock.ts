@@ -299,13 +299,10 @@ for (const j of MOCK_JOBS.jobs) {
   };
   // Fold into the same coarse pills `ui/progress.py::PHASE_GROUPS` uses.
   const groups: Array<[string, string, string[]]> = [
-    ['download', 'Download video', ['1', '2']],
-    ['speakers', 'Speaker annotation', ['4']],
-    ['transcribe', 'Transcribe', ['7']],
+    ['prepare', 'Prepare', ['1', '2', '4', '7']],
     ['translate', 'Translate', ['9']],
-    ['speech', 'Speech generation', ['9d', '9e']],
-    ['mix', 'Mix', ['9g']],
-    ['lipsync', 'Lip sync', ['9h']],
+    ['dub', 'Dub audio', ['9d', '9e', '9g']],
+    ['lipsync', 'Lip-sync', ['9h']],
   ];
   MOCK_PROGRESS[j.job_id].phases = groups.map(([id, label, keys]) => {
     const subs = stages.filter((s) => keys.includes(s.key));
@@ -351,6 +348,7 @@ export async function getMedia(id: string): Promise<Media> {
       original: mk('Original', 'clip.mp4', 41_200_000),
       lipsync: done ? mk('Lip-synced', 'clip.musetalk.lipsync.mp4', 46_800_000) : null,
       dubbed_no_lipsync: done ? mk('Dubbed (no lip-sync)', 'clip.dubbed.mp4', 44_100_000) : null,
+      lipsync_warning: null,
     },
     audio: {
       original: mk('Original audio', 'clip.16k.mono.wav', 8_400_000, {

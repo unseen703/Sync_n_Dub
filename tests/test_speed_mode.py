@@ -261,12 +261,13 @@ def _args(tmp_path, *extra):
     return _parse_args(["-i", str(v), *extra])
 
 
-def test_segment_is_the_default(tmp_path):
-    """Changed 2026-10-22 by request. This file's header used to say `global`
-    "must stay bit-identical"; that decision was reversed deliberately,
-    because `global_tempo` resolved a +4.86 s TTS overrun by applying
-    `global_tempo: 1.0` -- i.e. no compression at all -- and the dub drifted
-    progressively late against the mouth it was dubbing.
+def test_warp_is_the_default(tmp_path):
+    """Changed 2026-10-26 by request. Was `segment` since 2026-10-22, before
+    that `global`. Each change for a measured reason: `global` drifted late
+    on long clips (one atempo for everything, 1.0 on overruns), `segment` had
+    no concept of a smooth joint between cues and the dub ramped audibly
+    between consecutive segments. `warp` plans a per-cue speech tempo under
+    a slew limit and borrows silence instead of only speeding speech.
 
     `--speed-mode` parses to None, not to a literal: the resolver needs to
     tell "nobody said" from "the operator asked", or every --timing-method
@@ -281,13 +282,14 @@ def test_segment_is_the_default(tmp_path):
     from backend.cli import resolve_speed_setup
     s = resolve_speed_setup(a)
     assert s.mix_strategy == "timing_plan"
-    assert s.timing_producer == "naive_slot"
-    assert s.timing_params["max_tempo"] == 1.8
-    assert s.timing_params["min_tempo"] == 0.75
-    # The companion keys are not optional: leaving the TTS stretch on would
-    # fit every clip to its slot twice, once here and once in the mix.
+    assert s.timing_producer == "warped"
+    assert s.timing_params["tempo_max"] == 1.45
+    assert s.timing_params["tempo_min"] == 0.75
+    # Both companion keys are load-bearing: leaving tts_apply_stretch on
+    # would stretch each clip twice (once in TTS, once again in the warp),
+    # and `raw` would place unstretched clips at warped positions.
     assert s.tts_apply_stretch is False
-    assert s.mix_clip_source == "raw"
+    assert s.mix_clip_source == "warped"
 
 
 def test_global_is_still_reachable(tmp_path):
@@ -342,19 +344,26 @@ def test_segment_and_timing_method_are_mutually_exclusive(tmp_path):
 def test_the_ui_and_the_cli_agree_on_the_bounds(tmp_path):
     """They agree by construction now, and this is what says so.
 
-    `UI_TIMING_DEFAULTS` was a hand-kept COPY of what `resolve_speed_setup`
-    builds — the CLI resolver takes an argparse namespace the UI path does
-    not have — and this test existed because the two could drift in silence.
-    Since 2026-10-23 both call `backend.speed.segment_timing_kwargs`, so the
+    `UI_TIMING_DEFAULTS` was once a hand-kept COPY of what `resolve_speed_setup`
+    builds -- the CLI resolver takes an argparse namespace the UI path does
+    not have -- and this test existed because the two could drift in silence.
+    Since 2026-10-23 both call `backend.speed.<mode>_timing_kwargs`, so the
     assertions below are close to a tautology and are kept deliberately:
     they are what fails if someone reintroduces a second copy, or gives the
     UI its own bounds without routing them through the same function.
+
+    Keyset moved with the 2026-10-26 default flip to warp: `max_tempo` and
+    `min_tempo` were renamed to `tempo_max`/`tempo_min` in the warp producer,
+    and the absorb/borrow knobs are inside the warp solve rather than being
+    pipeline-visible kwargs.
     """
     from backend.cli import resolve_speed_setup
     from ui.presets import UI_TIMING_DEFAULTS
     s = resolve_speed_setup(_args(tmp_path))
-    for k in ("max_tempo", "min_tempo", "safety_margin_s", "use_target_duration",
-              "overlap_policy", "gap_barrier_s"):
+    for k in ("tempo_max", "tempo_min", "tempo_hard_max", "max_rel_step",
+              "pause_borrow_s", "island_gap_s", "ramp_s",
+              "absorb_max_frac", "vad_backend", "warp_backend",
+              "break_on_speaker"):
         assert UI_TIMING_DEFAULTS["timing_params"][k] == s.timing_params[k], (
             f"UI and CLI disagree on timing_params[{k!r}]")
     assert UI_TIMING_DEFAULTS["mix_strategy"] == s.mix_strategy

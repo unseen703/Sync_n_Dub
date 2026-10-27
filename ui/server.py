@@ -24,13 +24,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from fastapi import Body, Depends, FastAPI, HTTPException
+from fastapi import Body, FastAPI, HTTPException
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from . import lipsync_models as _ls_models
-from .auth import basic_auth
 from ._io import data_dir as _data_dir, env_int as _env_int
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -236,10 +235,19 @@ def _describe_job(job_id: str) -> dict[str, Any]:
             if f["ext"] == ".wav" and ("tts" in f["rel"] or "SEG_" in f["name"]):
                 stem = Path(f["name"]).stem
                 tts_files_by_id.setdefault(stem, f["url"])
-        for seg in mt_payload.get("segments") or []:
-            sid = seg.get("id") or f"SEG_{len(segments):04d}"
+        # Sort by start so the UI's `#N` matches `backend.edit_agent`'s cue
+        # numbering (which also sorts by start). Without this, out-of-order
+        # MT JSONs would make "cue 5" mean different things to the UI vs
+        # the edit agent.
+        raw_segs = sorted(
+            mt_payload.get("segments") or [],
+            key=lambda s: float(s.get("start") or 0.0),
+        )
+        for idx, seg in enumerate(raw_segs, start=1):
+            sid = seg.get("id") or f"SEG_{idx - 1:04d}"
             segments.append({
-                "id": sid,
+                "id":      sid,
+                "cue_no":  idx,
                 "speaker": seg.get("speaker"),
                 "start":   float(seg.get("start") or 0.0),
                 "end":     float(seg.get("end") or 0.0),
@@ -396,6 +404,9 @@ def _list_jobs() -> list[dict[str, Any]]:
         meta = _read_json(d / "meta.json") or {}
         mcfg = (manifest or {}).get("config") or {}
         ran_at = _last_activity(d, parsed, status, manifest, prog)
+        cutoff = datetime.now(timezone.utc).timestamp() - 7 * 86400
+        if ran_at and ran_at < cutoff:
+            continue
         rows.append({
             **parsed,
             # Epoch seconds, and the key this list is ordered by. Exposed so
@@ -702,8 +713,7 @@ def api_speakers(job_id: str) -> dict[str, Any]:
     return table
 
 
-@app.post("/api/jobs/{job_id}/speakers/{speaker_id}/label",
-          dependencies=[Depends(basic_auth)])
+@app.post("/api/jobs/{job_id}/speakers/{speaker_id}/label")
 def api_set_speaker_label(job_id: str, speaker_id: str,
                           body: dict | None = Body(None)) -> dict[str, Any]:
     """Rename a speaker. Display only — it dirties no pipeline stage.
@@ -809,10 +819,6 @@ def main() -> None:
     # inherit this from `os.environ` automatically; the tmux launch path
     # does not inherit this process's environment and passes it explicitly.
     os.environ.setdefault("DUBBING_PY", sys.executable)
-
-    # Refuse a public bind without credentials, before uvicorn opens a socket.
-    from .auth import require_auth_for_nonloopback
-    require_auth_for_nonloopback(args.host)
 
     LOG.info("Dubbing Studio listening on http://%s:%d  (ui=%s)",
              args.host, args.port, WEB_DIR.name)

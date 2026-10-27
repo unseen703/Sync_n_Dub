@@ -1,19 +1,23 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { Button } from '../ui/Button';
 import { Eyebrow } from '../ui/Card';
-import { IconAlert, IconSpinner } from '../ui/Icons';
-import { StagedText, StagedValue } from '../ui/StagedValue';
 import { SpeakerTable } from '../speakers/SpeakerTable';
+import { VideoStage } from '../video/VideoStage';
+import { NowPlayingCues } from '../video/NowPlayingCues';
 import { useStore } from '../../store/useStore';
 import * as api from '../../api';
 import { fmtClock } from '../../lib/format';
+import { ActionWorkspace } from './ActionWorkspace';
 import { LipsyncPanel } from './LipsyncPanel';
 import { EnhancePanel } from './EnhancePanel';
+import { ReviewVideoPanel } from './ReviewVideoPanel';
+import { HistoryPanel } from './HistoryPanel';
 import type {
-  AgentAction,
-  AgentPrompt,
   AgentScript,
+  AgentScriptRow,
+  AgentSpeaker,
   AgentTurn,
+  CostPreview,
   ScriptEdit,
 } from '../../api/types';
 
@@ -52,27 +56,13 @@ export function EditPanel({ jobId }: { jobId: string }) {
   const params = useStore((s) => s.agentParams);
   const refreshParams = useStore((s) => s.refreshAgentParams);
   const refreshSpeakers = useStore((s) => s.refreshSpeakers);
+  const refreshHistory = useStore((s) => s.refreshEditHistory);
   const [script, setScript] = useState<AgentScript | null>(null);
   const [msg, setMsg] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const endRef = useRef<HTMLDivElement>(null);
-  // Hand-edited lines, keyed by segment id, holding ONLY what differs from
-  // what is on screen. A sentence to the agent and a typed correction are
-  // two ways to reach the same `set_text` op; the difference is that here
-  // the user supplies the wording, so nothing is inferred and the quoted
-  // cost is the applied cost.
-  const [drafts, setDrafts] = useState<Record<string, string>>({});
-  const [editing, setEditing] = useState<string | null>(null);
-  // Index of the staged change whose remove button is asking to be
-  // confirmed. One at a time: pressing remove on another turn moves the
-  // question rather than arming two at once.
-  const [confirming, setConfirming] = useState<number | null>(null);
 
   const load = useCallback(async () => {
-    // Params go through the store, because the cast table reads them too —
-    // a gender or voice change asked for in the chat box has to light up on
-    // the row it is about, and that row is rendered by `SpeakerTable`.
     const [, s] = await Promise.all([
       refreshParams(),
       api.getAgentScript(jobId),
@@ -80,22 +70,11 @@ export function EditPanel({ jobId }: { jobId: string }) {
     setScript(s);
   }, [jobId, refreshParams]);
 
-  const dirty = Object.keys(drafts);
-
-  /**
-   * Drop one staged change and keep the rest.
-   *
-   * The server rebuilds the remaining plan from the turns already on disk —
-   * no sentence is re-parsed, so removing the third of five cannot change
-   * how the other four were understood. It also re-prices, because dropping
-   * an op changes which stages replay.
-   */
   const dropTurn = useCallback(async (index: number) => {
     setBusy(true);
     setError(null);
     try {
       await api.dropStagedTurn(jobId, index);
-      setConfirming(null);
       await load();
     } catch (e) {
       setError((e as Error).message);
@@ -104,20 +83,25 @@ export function EditPanel({ jobId }: { jobId: string }) {
     }
   }, [jobId, load]);
 
-  const stageScript = useCallback(async () => {
-    const edits: ScriptEdit[] = Object.entries(drafts).map(([segment_id, text]) => ({
-      segment_id,
-      text,
-    }));
+  const muteCue = useCallback(async (segId: string) => {
+    setBusy(true);
+    setError(null);
+    try {
+      await api.muteCue(jobId, segId);
+      await load();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }, [jobId, load]);
+
+  const stageScript = useCallback(async (edits: ScriptEdit[]) => {
     if (!edits.length) return;
     setBusy(true);
     setError(null);
     try {
       const plan = await api.stageScript(jobId, edits);
-      // Staged, not applied. The pending bar owns Apply, which is the one
-      // call that spends GPU time -- a typo here costs nothing until then.
-      setDrafts({});
-      setEditing(null);
       pushToast({
         kind: 'success',
         title: `${edits.length} line${edits.length === 1 ? '' : 's'} staged`,
@@ -129,14 +113,11 @@ export function EditPanel({ jobId }: { jobId: string }) {
     } finally {
       setBusy(false);
     }
-  }, [drafts, jobId, load, pushToast]);
+  }, [jobId, load, pushToast]);
 
   useEffect(() => {
     void load().catch((e) => setError((e as Error).message));
   }, [load]);
-  useEffect(() => {
-    endRef.current?.scrollIntoView({ block: 'end' });
-  }, [params?.turns?.length]);
 
   const send = async () => {
     const text = msg.trim();
@@ -168,6 +149,21 @@ export function EditPanel({ jobId }: { jobId: string }) {
       // The cast is re-derived by the replay, so the table's own payload is
       // stale from here on.
       void refreshSpeakers();
+      void refreshHistory();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const discard = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await api.discardEdits(jobId);
+      pushToast({ kind: 'success', title: 'Discarded', body: 'All pending edits removed.' });
+      await load();
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -179,379 +175,362 @@ export function EditPanel({ jobId }: { jobId: string }) {
 
   return (
     <div className="space-y-4">
-      {/* ---- 1. the cast: who, in which voice, in which delivery ---- */}
-      <SpeakerTable />
+      {/* ---- top row: the dub on the left, the cues and cast on the right ----
 
-      {/* ---- 2. the chat ---- */}
-      <section className="card p-4">
-        <Eyebrow className="mb-2">Ask for a change</Eyebrow>
-        {params?.turns?.length ? (
-          <div className="max-h-56 space-y-2 overflow-y-auto">
-            {params.turns.map((t: AgentTurn, i: number) => (
-              <div
-                key={i}
-                className="flex items-center gap-2 rounded-lg border border-line
-                           bg-surface/60 px-3 py-2"
-              >
-                <div className="min-w-0 flex-1">
-                  <div className="text-[12.5px] text-ink">{t.message}</div>
-                  <div className="mt-1 text-[11.5px] text-ink4">
-                    {t.ops.length} op{t.ops.length === 1 ? '' : 's'} · parsed by {t.source}
-                  </div>
-                </div>
-                {/* Two-step, never a one-click delete: the first press turns
-                    the control into the question. `window.confirm` would do
-                    the same job but blocks the tab and reads as a browser
-                    error; this keeps the warning next to the thing it is
-                    about. Clicking any other remove resets this one. */}
-                <button
-                  type="button"
-                  onClick={() => {
-                    if (confirming === i) void dropTurn(i);
-                    else setConfirming(i);
-                  }}
-                  onBlur={() => setConfirming((c) => (c === i ? null : c))}
-                  disabled={busy}
-                  aria-label={
-                    confirming === i
-                      ? `Confirm removing: ${t.message}`
-                      : `Remove staged change: ${t.message}`
-                  }
-                  title={confirming === i ? 'Click again to remove' : 'Remove this change'}
-                  /* `danger`, not a raw Tailwind red: it is the project's
-                     semantic token, it follows both themes, and its contrast
-                     against white text is what `npm run contrast` checks. */
-                  className={`flex flex-none items-center justify-center gap-1 self-center
-                              rounded-lg px-2.5 py-1.5 text-[12px] font-medium text-white
-                              transition-colors disabled:opacity-50 ${
-                                confirming === i
-                                  ? 'bg-danger-fill ring-1 ring-danger'
-                                  : 'bg-danger-fill/85 hover:bg-danger-fill'
-                              }`}
-                >
-                  <span aria-hidden="true">🗑</span>
-                  {confirming === i ? <span>Remove?</span> : null}
-                </button>
-              </div>
-            ))}
-            <div ref={endRef} />
-          </div>
-        ) : (
-          <p className="mb-2 text-[11.5px] text-ink4">
-            Changes you ask for are staged and shown above and below, against
-            the thing they change. Nothing re-renders until you apply.
-          </p>
-        )}
+          The video, the chat box and the staged edits stack down the LEFT —
+          you describe a change right under the thing it changes. The cues that
+          follow playback and the cast sit on the RIGHT, the two read-mostly
+          panels. On a narrow screen the grid collapses to one column and the
+          same top-to-bottom order holds. */}
+      <div className="grid gap-4 lg:grid-cols-[minmax(0,1.7fr)_minmax(0,1fr)]">
+        {/* LEFT: player → chat → staged edits */}
+        <div className="min-w-0 space-y-4">
+          <VideoStage />
 
-        <div className="mt-2 flex gap-2">
-          <input
-            value={msg}
-            onChange={(e) => setMsg(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' && !e.shiftKey) void send();
-            }}
-            placeholder='e.g. "make SPEAKER_00 female and speed up 0:30 to 0:45"'
-            aria-label="Describe the change"
-            className="min-w-0 flex-1 rounded-lg border border-edge/70 bg-canvas/60 px-3 py-2
-                       text-[13px] text-ink placeholder:text-ink4"
+          <ActionWorkspace
+            msg={msg}
+            setMsg={setMsg}
+            onSend={() => void send()}
+            busy={busy}
+            error={error}
+            warnings={params?.warnings ?? []}
+            actions={params?.actions ?? []}
+            script={script?.segments ?? []}
           />
-          <Button onClick={() => void send()} disabled={busy || !msg.trim()}>
-            {busy ? <IconSpinner /> : null} Send
-          </Button>
+
+          <StagedChanges
+            turns={params?.turns ?? []}
+            script={script}
+            speakers={params?.speakers ?? []}
+            busy={busy}
+            onDrop={(i) => void dropTurn(i)}
+            canApply={staged}
+            dirtyStages={params?.dirty_stages ?? []}
+            cost={params?.cost ?? null}
+            onApply={() => void apply()}
+            onDiscard={() => void discard()}
+          />
         </div>
 
-        {error ? (
-          <p className="mt-2 flex items-start gap-1.5 text-[12.5px] text-warn">
-            <IconAlert width={13} height={13} className="mt-0.5 flex-none" />
-            <span>{error}</span>
-          </p>
-        ) : null}
-
-        {(params?.warnings ?? []).map((w, i) => (
-          <p key={i} className="mt-2 text-[12px] text-ink3">
-            {w}
-          </p>
-        ))}
-
-        {staged ? (
-          <div className="mt-3 flex flex-wrap items-center gap-3 border-t border-line/60 pt-3">
-            <Button variant="primary" onClick={() => void apply()} disabled={busy}>
-              Apply &amp; re-render
-            </Button>
-            <span className="text-[12px] text-ink3">
-              re-runs {params?.dirty_stages.join(' → ')}
-              {params?.cost?.total_est_s ? ` · about ${fmtClock(params.cost.total_est_s)}` : ''}
-            </span>
-          </div>
-        ) : null}
-      </section>
-
-      {/* ---- 3. the script ---- */}
-      <section className="card p-4">
-        <div className="mb-2 flex items-baseline gap-3">
-          <Eyebrow>Script{script ? ` · ${script.total} cues` : ''}</Eyebrow>
-          <span className="text-[11px] text-ink4">
-            Click a line to rewrite it — nothing re-renders until you apply.
-          </span>
+        {/* RIGHT: the line playing now → the cast */}
+        <div className="min-w-0 space-y-4">
+          <NowPlayingCues
+            segments={script?.segments ?? []}
+            busy={busy}
+            onMute={(segId) => void muteCue(segId)}
+            onStageScript={(edits) => void stageScript(edits)}
+          />
+          <SpeakerTable scroll segments={script?.segments ?? []} />
         </div>
+      </div>
 
-        {dirty.length ? (
-          <div className="mb-2 flex flex-wrap items-center gap-3 rounded-lg bg-amber-400/10 px-3 py-2 ring-1 ring-amber-400/40">
-            <span className="text-[12.5px] text-ink">
-              {dirty.length} line{dirty.length === 1 ? '' : 's'} rewritten
-            </span>
-            <span className="text-[11px] text-ink4">
-              Replays speech, mix and lip-sync. Translation, transcript and
-              speakers stay as they are.
-            </span>
-            <div className="ml-auto flex gap-2">
-              <Button
-                variant="ghost"
-                onClick={() => {
-                  setDrafts({});
-                  setEditing(null);
-                }}
-              >
-                Discard
-              </Button>
-              <Button onClick={stageScript} disabled={busy}>
-                {busy ? <IconSpinner /> : null} Review &amp; apply
-              </Button>
-            </div>
-          </div>
-        ) : null}
-        <ol className="space-y-1">
-          {(script?.segments ?? []).map((r) => {
-            // What this line READS AS right now: an unsaved draft, else the
-            // wording already staged, else what is in the dub. Editing a
-            // staged line used to reopen on the ORIGINAL text and compare
-            // against it, so a second edit redrew the row unchanged and
-            // looked like it had been ignored.
-            const shown = drafts[r.id] ?? r.staged_text ?? r.text ?? '';
-            // The reading this one REPLACES, for the before/after below. A
-            // typed draft is measured against whatever was on screen when
-            // the user clicked into it; a server-staged rewrite against the
-            // wording in the dub.
-            const was = drafts[r.id] !== undefined
-              ? (r.staged_text ?? r.text)
-              : r.staged_text ? r.text : null;
-            return (
-              <li
-                key={r.id}
-                className={`rounded-lg px-2.5 py-1.5 text-[12.5px] ${
-                  drafts[r.id] !== undefined
-                    ? 'bg-amber-400/10 ring-1 ring-amber-400/40'
-                    : r.staged
-                      ? 'bg-brand/10 ring-1 ring-brand/30'
-                      : 'odd:bg-surface/40'
-                }`}
-              >
-                <div className="flex items-baseline gap-2">
-                  <span className="flex-none font-mono text-[11px] text-ink4">
-                    {fmtClock(r.start)}
-                  </span>
-                  {r.speaker ? (
-                    <span className="flex-none font-mono text-[11px] text-ink3">{r.speaker}</span>
-                  ) : null}
-                  {editing === r.id ? (
-                    <input
-                      autoFocus
-                      className="min-w-0 flex-1 rounded border border-brand/40 bg-surface px-1.5 py-0.5 text-ink outline-none"
-                      defaultValue={shown}
-                      onBlur={(e) => {
-                        const next = e.currentTarget.value.trim();
-                        const before = r.staged_text ?? r.text;
-                        setEditing(null);
-                        setDrafts((d) => {
-                          const copy = { ...d };
-                          // Only a REAL change is kept, and "real" is against
-                          // what the line currently reads as. Clicking into a
-                          // line and out again must not stage an identical
-                          // edit — that would re-render the dub to produce
-                          // the same audio and charge GPU time for it.
-                          if (!next || next === before) delete copy[r.id];
-                          else copy[r.id] = next;
-                          return copy;
-                        });
-                      }}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter') e.currentTarget.blur();
-                        if (e.key === 'Escape') {
-                          e.currentTarget.value = shown;
-                          e.currentTarget.blur();
-                        }
-                      }}
-                    />
-                  ) : (
-                    <button
-                      type="button"
-                      className="min-w-0 flex-1 cursor-text text-left text-ink hover:underline decoration-dotted underline-offset-2"
-                      title="Click to edit this line"
-                      onClick={() => setEditing(r.id)}
-                    >
-                      {shown || <em className="text-ink4">—</em>}
-                    </button>
-                  )}
-                  {/* Speed per cue. Shown only when it is not 1.0 or about
-                      to change — a column of "1.0×" down every row is
-                      noise, and the one cue that differs is the whole
-                      point. */}
-                  {r.staged_speed != null && r.staged_speed !== r.speed ? (
-                    <span className="ml-auto flex-none font-mono text-[11px]">
-                      <StagedValue
-                        current={`${r.speed.toFixed(2)}×`}
-                        staged={`${r.staged_speed.toFixed(2)}×`}
-                        label={`Speed of the cue at ${fmtClock(r.start)}`}
-                      />
-                    </span>
-                  ) : r.speed !== 1 ? (
-                    <span
-                      className="ml-auto flex-none font-mono text-[11px] text-ink3"
-                      title="How fast this cue is spoken, against its own slot"
-                    >
-                      {r.speed.toFixed(2)}×
-                    </span>
-                  ) : null}
-                  {was !== null ? (
-                    <span className="flex-none text-[11px] text-blue-ink">
-                      {drafts[r.id] !== undefined ? 'edited' : 'staged'}
-                    </span>
-                  ) : r.staged ? (
-                    <span className="flex-none text-[11px] text-blue-ink">staged</span>
-                  ) : null}
-                </div>
-                {/* The change itself, UNDER the line rather than beside it.
-                    This used to be a right-aligned `was <first 24 chars>`,
-                    which is shorter than most cues — so it hid the very
-                    words that were changing, which is the one thing a
-                    translation edit has to be judged on. */}
-                {was !== null && editing !== r.id ? (
-                  <StagedText current={was} staged={shown} />
-                ) : null}
-              </li>
-            );
-          })}
-        </ol>
-        {script && script.segments.length === 0 ? (
-          <p className="text-[12.5px] text-ink4">
-            No transcript yet — the agent works on a finished dub.
-          </p>
-        ) : null}
-      </section>
-
-      {/* ---- 4. finish the job ---- */}
+      {/* ---- finish the job ---- */}
       <LipsyncPanel jobId={jobId} onStarted={() => void load()} />
       {/* 9i sits under 9h: it restores whatever that produced, and is
           disabled by the server until there is a render to restore. */}
       <EnhancePanel jobId={jobId} />
-
-      {/* ---- 5. reference ---- */}
-      <div className="grid gap-4 lg:grid-cols-2">
-        <PromptBook prompts={params?.prompts ?? []} onPick={(t) => setMsg(t)} />
-        <ActionBook actions={params?.actions ?? []} />
-      </div>
+      {/* The ASD review video: a read-off-disk overlay of who the run thought
+          was speaking. A download, not inline playback — the renderer writes
+          mp4v, which browsers will not play. */}
+      <ReviewVideoPanel jobId={jobId} />
+      <HistoryPanel jobId={jobId} />
     </div>
   );
 }
 
-/**
- * Requests the user can copy, three at a time.
- *
- * The list comes from the backend, which builds it from each operation's own
- * worked examples. Writing it here would let the panel advertise a phrasing
- * the parser does not accept -- the failure `ui/speakers.py` already shipped
- * once with an invented tone vocabulary.
- *
- * Clicking one fills the message box rather than sending it: the point is to
- * show the SHAPE, and the times and speaker still have to be the user's.
- */
-function PromptBook({
-  prompts,
-  onPick,
-}: {
-  prompts: AgentPrompt[];
-  onPick: (text: string) => void;
-}) {
-  const [all, setAll] = useState(false);
-  const shown = all ? prompts : prompts.slice(0, 3);
-  if (!prompts.length) return null;
-  return (
-    <section className="card p-4">
-      <Eyebrow className="mb-1">Things you can say</Eyebrow>
-      <p className="mb-2 text-[11px] text-ink4">
-        Click one to put it in the box, then change the times and names.
-      </p>
-      <ul className="space-y-1">
-        {shown.map((p) => (
-          <li key={p.text}>
-            <button
-              type="button"
-              onClick={() => onPick(p.text)}
-              title={p.does}
-              className="w-full rounded-lg bg-surface/50 px-2.5 py-1.5 text-left text-[12px] text-ink
-                         hover:bg-surface hover:ring-1 hover:ring-brand/30"
-            >
-              &ldquo;{p.text}&rdquo;
-            </button>
-          </li>
-        ))}
-      </ul>
-      {prompts.length > 3 ? (
-        <button
-          type="button"
-          onClick={() => setAll((v) => !v)}
-          className="mt-2 text-[11.5px] text-ink3 hover:text-ink"
-        >
-          {all ? 'Show fewer' : `Show ${prompts.length - 3} more`}
-        </button>
-      ) : null}
-    </section>
-  );
+/** One concrete before/after inside a staged turn. */
+interface Diff {
+  object: string;
+  before: string;
+  after: string;
+  /** The result only exists once the LLM/render runs, so "after" is a
+      promise, not a value — shown in a quieter style. */
+  pending?: boolean;
 }
 
 /**
- * What the agent can do, three at a time: the action, what it needs from
- * you, and what it changes about the dub.
- *
- * `replays` is shown as a separate, quieter line because it is a different
- * kind of fact -- the cost, not the effect -- and the backend derives it
- * from the operation's own `dirty_from` so it cannot claim a cheaper
- * re-render than it causes.
+ * Turn an agent op (opaque `{op, scope, params}`) into the one or more
+ * before/after rows a human can read. The "before" is looked up from the
+ * current script and cast so the card shows what the dub says NOW, not just
+ * what the op asked for. Defensive about param key names — small models nest
+ * them inconsistently, and an unrecognised op still names itself rather than
+ * vanishing.
  */
-function ActionBook({ actions }: { actions: AgentAction[] }) {
-  const [all, setAll] = useState(false);
-  const shown = all ? actions : actions.slice(0, 3);
-  if (!actions.length) return null;
+function opDiffs(
+  op: Record<string, unknown>,
+  segById: Map<string, AgentScriptRow>,
+  speakers: AgentSpeaker[],
+): Diff[] {
+  const name = String(op?.op ?? '').toLowerCase();
+  const scope = (op?.scope ?? {}) as Record<string, unknown>;
+  const params = (op?.params ?? {}) as Record<string, unknown>;
+
+  const segsRaw = scope.segments ?? scope.segment_ids;
+  const segIds = Array.isArray(segsRaw)
+    ? segsRaw.map(String)
+    : segsRaw
+      ? [String(segsRaw)]
+      : [];
+  const rows = segIds.map((id) => segById.get(id)).filter(Boolean) as AgentScriptRow[];
+
+  let tgt: string;
+  if (rows.length) {
+    tgt = rows.length <= 2
+      ? rows.map((r) => `cue #${r.cue_no}`).join(', ')
+      : `${rows.length} cues (from #${rows[0].cue_no})`;
+  } else if (scope.speaker) {
+    tgt = String(scope.speaker);
+  } else if (scope.all) {
+    tgt = 'whole dub';
+  } else {
+    const s = scope.start_s ?? scope.start;
+    const e = scope.end_s ?? scope.end;
+    if (s != null && e != null) tgt = `${fmtClock(Number(s))}–${fmtClock(Number(e))}`;
+    else if (s != null) tgt = `at ${fmtClock(Number(s))}`;
+    else tgt = 'the dub';
+  }
+
+  const spk = scope.speaker
+    ? speakers.find((s) => s.id === String(scope.speaker)) ?? null
+    : null;
+  const spkName = spk?.label || (scope.speaker ? String(scope.speaker) : tgt);
+  const firstText = rows[0]?.text ?? '';
+
+  switch (name) {
+    case 'set_text':
+      return [{ object: tgt, before: firstText, after: String(params.text ?? '') }];
+    case 'replace_term': {
+      const find = String(params.find ?? params.term ?? params.search ?? '');
+      const repl = String(params.replace ?? params.with ?? '');
+      return [{
+        object: tgt,
+        before: find ? `"${find}"` : firstText,
+        after: repl ? `"${repl}"` : '(removed)',
+      }];
+    }
+    case 'set_speed': {
+      const factor = Number(params.factor ?? params.speed);
+      const before = rows[0]?.speed != null ? `${rows[0].speed.toFixed(2)}×` : '1.00×';
+      return [{
+        object: `${tgt} · speed`,
+        before,
+        after: Number.isFinite(factor) ? `${factor.toFixed(2)}×` : '—',
+      }];
+    }
+    case 'set_voice':
+      return [{
+        object: `${spkName} · voice`,
+        before: spk?.voice.current ?? '—',
+        after: String(params.voice ?? spk?.voice.staged ?? '—'),
+      }];
+    case 'set_gender':
+      return [{
+        object: `${spkName} · gender`,
+        before: spk?.gender.current ?? '—',
+        after: String(params.gender ?? spk?.gender.staged ?? '—'),
+      }];
+    case 'set_tone':
+      return [{
+        object: `${spkName} · delivery`,
+        before: spk?.tone.current ?? '—',
+        after: String(params.tone ?? spk?.tone.staged ?? '—'),
+        pending: Boolean(params.rewrite_text),
+      }];
+    case 'retranslate':
+      return [{ object: tgt, before: firstText, after: 're-translated on apply', pending: true }];
+    case 'code_mix':
+      return [{
+        object: tgt,
+        before: firstText,
+        after: `code-mixed${params.mode ? ` (${String(params.mode)})` : ''}`,
+        pending: true,
+      }];
+    case 'mute_cue':
+      return [{ object: tgt, before: firstText || 'this cue', after: 'muted', pending: true }];
+    case 'set_lipsync':
+    case 'lipsync':
+      return [{
+        object: 'Lip-sync model',
+        before: '—',
+        after: String(params.model ?? params.lipsync ?? '—'),
+      }];
+    default:
+      return [{ object: tgt, before: '', after: name || 'change' }];
+  }
+}
+
+/**
+ * The staged edits, newest first, as before/after cards — the committed plan,
+ * directly under the chat box that builds it.
+ *
+ * Each card is one turn (one thing asked for, in the user's words), broken
+ * into the concrete objects it changes and what each reads as before and
+ * after. Removal is two-step and per card: the first press arms the question,
+ * the second drops that turn and the server rebuilds the rest of the plan.
+ *
+ * The Apply bar lives here, with the edits it applies, rather than up in the
+ * chat box — nothing re-renders until it is pressed.
+ */
+function sourceLabel(source: string): string {
+  switch (source) {
+    case 'script': return 'direct edit';
+    case 'llm': return 'parsed by LLM';
+    case 'rules': return 'parsed by rules';
+    default: return source;
+  }
+}
+
+function StagedChanges({
+  turns,
+  script,
+  speakers,
+  busy,
+  onDrop,
+  canApply,
+  dirtyStages,
+  cost,
+  onApply,
+  onDiscard,
+}: {
+  turns: AgentTurn[];
+  script: AgentScript | null;
+  speakers: AgentSpeaker[];
+  busy: boolean;
+  onDrop: (index: number) => void;
+  canApply: boolean;
+  dirtyStages: string[];
+  cost: CostPreview | null;
+  onApply: () => void;
+  onDiscard: () => void;
+}) {
+  // One armed remove at a time, keyed by the turn's real index. Pressing
+  // remove on another card moves the question rather than arming two.
+  const [confirming, setConfirming] = useState<number | null>(null);
+
+  const segById = new Map((script?.segments ?? []).map((r) => [r.id, r]));
+
   return (
     <section className="card p-4">
-      <Eyebrow className="mb-1">What it can do</Eyebrow>
-      <p className="mb-2 text-[11px] text-ink4">
-        Nothing re-renders until you apply.
-      </p>
-      <ul className="space-y-2.5">
-        {shown.map((a) => (
-          <li key={a.op} className="rounded-lg bg-surface/40 px-2.5 py-2">
-            <p className="text-[12.5px] font-medium text-ink">{a.title}</p>
-            <p className="mt-0.5 text-[11.5px] text-ink3">
-              <span className="text-ink4">You give it </span>
-              {a.takes}
+      <Eyebrow className="mb-2">
+        Pending edits{turns.length ? ` · ${turns.length}` : ''}
+      </Eyebrow>
+      {turns.length > 0 && (
+        <p className="mb-2 text-[11px] text-amber-600">
+          Not yet included in the rendered video.
+        </p>
+      )}
+
+      {turns.length === 0 ? (
+        <p className="text-[11.5px] text-ink4">
+          Changes appear here as before → after cards, newest on
+          top. Nothing re-renders until you apply.
+        </p>
+      ) : (
+        <div className="max-h-[22rem] space-y-2 overflow-y-auto pr-0.5">
+          {/* Newest first, but keep each turn's REAL index for removal. */}
+          {turns
+            .map((t, i) => ({ t, i }))
+            .reverse()
+            .map(({ t, i }) => {
+              const diffs = t.ops.flatMap((op) => opDiffs(op, segById, speakers));
+              const armed = confirming === i;
+              return (
+                <div
+                  key={i}
+                  className="rounded-lg border border-line bg-surface/60 px-3 py-2"
+                >
+                  <div className="flex items-start gap-2">
+                    <div className="min-w-0 flex-1">
+                      <div className="text-[12.5px] text-ink">{t.message}</div>
+                      <div className="mt-0.5 flex items-center gap-1.5 text-[11px] text-ink4">
+                        <span
+                          className={`inline-block rounded px-1.5 py-px text-[10px] font-medium ${
+                            t.source === 'script'
+                              ? 'bg-emerald-500/15 text-emerald-700'
+                              : 'bg-violet-500/15 text-violet-700'
+                          }`}
+                        >
+                          {t.source === 'script' ? 'user' : 'agent'}
+                        </span>
+                        <span>{sourceLabel(t.source)}</span>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (armed) onDrop(i);
+                        else setConfirming(i);
+                      }}
+                      onBlur={() => setConfirming((c) => (c === i ? null : c))}
+                      disabled={busy}
+                      aria-label={
+                        armed
+                          ? `Confirm removing: ${t.message}`
+                          : `Remove staged change: ${t.message}`
+                      }
+                      title={armed ? 'Click again to remove' : 'Remove this change'}
+                      className={`flex flex-none items-center justify-center gap-1 self-start
+                                  rounded-lg px-2.5 py-1.5 text-[12px] font-medium text-white
+                                  transition-colors disabled:opacity-50 ${
+                                    armed
+                                      ? 'bg-danger-fill ring-1 ring-danger'
+                                      : 'bg-danger-fill/85 hover:bg-danger-fill'
+                                  }`}
+                    >
+                      <span aria-hidden="true">🗑</span>
+                      {armed ? <span>Remove?</span> : null}
+                    </button>
+                  </div>
+
+                  <div className="mt-2 space-y-1.5">
+                    {diffs.map((d, k) => (
+                      <div key={k} className="rounded-md bg-canvas/50 px-2.5 py-1.5">
+                        <div className="font-mono text-[11px] text-ink3">{d.object}</div>
+                        {d.before ? (
+                          <div className="mt-0.5 text-[12px] text-ink4 line-through">
+                            {d.before}
+                          </div>
+                        ) : null}
+                        <div
+                          className={`mt-0.5 text-[12.5px] ${
+                            d.pending ? 'italic text-ink3' : 'text-ink'
+                          }`}
+                        >
+                          {d.after}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              );
+            })}
+        </div>
+      )}
+
+      {canApply ? (
+        <div className="mt-3 space-y-2 border-t border-line/60 pt-3">
+          <div className="flex flex-wrap items-center gap-3">
+            <Button variant="primary" onClick={onApply} disabled={busy}>
+              Apply edits
+            </Button>
+            <Button variant="ghost" onClick={onDiscard} disabled={busy}>
+              Discard edits
+            </Button>
+            <span className="text-[12px] text-ink3">
+              re-runs {dirtyStages.join(' → ')}
+              {cost?.total_est_s ? ` · about ${fmtClock(cost.total_est_s)}` : ''}
+              {cost?.gpu_required ? ' · uses the GPU' : ''}
+            </span>
+          </div>
+          {/* The compute cost a re-render actually incurs, stated before the
+              click rather than discovered after it. */}
+          {(cost?.warnings ?? []).map((w, i) => (
+            <p key={i} className="flex items-start gap-1.5 text-[12px] text-warn">
+              <span aria-hidden="true">⚠</span>
+              <span>{w}</span>
             </p>
-            <p className="mt-0.5 text-[11.5px] text-ink3">
-              <span className="text-ink4">Then </span>
-              {a.changes}
-            </p>
-            <p className="mt-1 text-[11px] text-ink4">Re-runs: {a.replays}</p>
-          </li>
-        ))}
-      </ul>
-      {actions.length > 3 ? (
-        <button
-          type="button"
-          onClick={() => setAll((v) => !v)}
-          className="mt-2 text-[11.5px] text-ink3 hover:text-ink"
-        >
-          {all ? 'Show fewer' : `Show ${actions.length - 3} more`}
-        </button>
+          ))}
+        </div>
       ) : null}
     </section>
   );

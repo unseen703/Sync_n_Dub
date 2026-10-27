@@ -1,3 +1,4 @@
+import { useMemo } from 'react';
 import { useStore } from '../../store/useStore';
 import { SpeakerRow } from './SpeakerRow';
 import { PendingBar } from './PendingBar';
@@ -5,6 +6,7 @@ import { EmptyState, Eyebrow, Skeleton } from '../ui/Card';
 import { Tooltip } from '../ui/Tooltip';
 import { IconWave } from '../ui/Icons';
 import { langClass } from '../../lib/lang';
+import type { AgentScriptRow } from '../../api/types';
 
 /**
  * The cast: every speaker, their voice, and — where the engine supports it
@@ -22,21 +24,38 @@ import { langClass } from '../../lib/lang';
  * what re-running costs and an explicit button applies it. Renaming a
  * speaker is the exception and is NOT staged — it changes no audio.
  */
-export function SpeakerTable() {
+/**
+ * `scroll` enables vertical scrolling so the cast does not push the cue panel
+ * off the page when there are many speakers.
+ */
+export function SpeakerTable({ scroll = false, segments = [] }: { scroll?: boolean; segments?: AgentScriptRow[] } = {}) {
   const table = useStore((s) => s.speakers);
   const staged = useStore((s) => s.staged);
   const stageVoice = useStore((s) => s.stageVoice);
   const stageTone = useStore((s) => s.stageTone);
+  const stageGender = useStore((s) => s.stageGender);
   const revertSpeaker = useStore((s) => s.revertSpeaker);
   const diarized = useStore((s) => Boolean(s.progress?.milestones?.diarization_done));
   const state = useStore((s) => s.progress?.state);
   // What the AGENT has staged, which is a different path to the same rows.
-  // A voice or tone changed with the picker lives in `staged` above and
-  // never left the browser; one asked for in the chat box is already in the
-  // job's `pending.json`, and gender can ONLY arrive that way — there is no
-  // picker for it. A row reading only the local store showed nothing at all
-  // for "make SPEAKER_00 female" until it had been applied.
+  // A voice, tone or gender changed with the picker lives in `staged` above
+  // and never left the browser; one asked for in the chat box is already in
+  // the job's `pending.json`. Both paths show on the row.
   const agent = useStore((s) => s.agentParams);
+  const awaitingCast = useStore((s) => Boolean(s.progress?.milestones?.awaiting_cast));
+  const cast = useStore((s) => s.cast);
+  const applying = useStore((s) => s.applying);
+
+  const cuesBySpeaker = useMemo(() => {
+    const m = new Map<string, AgentScriptRow[]>();
+    for (const seg of [...segments].sort((a, b) => a.start - b.start)) {
+      if (!seg.speaker) continue;
+      const arr = m.get(seg.speaker);
+      if (arr) arr.push(seg);
+      else m.set(seg.speaker, [seg]);
+    }
+    return m;
+  }, [segments]);
 
   if (!diarized) return null;
 
@@ -77,7 +96,11 @@ export function SpeakerTable() {
         </div>
       </div>
 
-      <div className="card divide-y divide-line overflow-hidden">
+      <div
+        className={`card divide-y divide-line overflow-hidden ${
+          scroll ? 'max-h-64 overflow-y-auto scroll-smooth' : ''
+        }`}
+      >
         {table.speakers.length === 0 ? (
           <EmptyState
             icon={<IconWave width={18} height={18} />}
@@ -92,9 +115,11 @@ export function SpeakerTable() {
               table={table}
               staged={staged[sp.id]}
               fromAgent={agent?.speakers.find((a) => a.id === sp.id) ?? null}
+              cues={cuesBySpeaker.get(sp.id)}
               editable={editable}
               onVoice={(v) => stageVoice(sp.id, v)}
               onTone={(t) => stageTone(sp.id, t)}
+              onGender={(g) => stageGender(sp.id, g)}
               onRevert={() => revertSpeaker(sp.id)}
             />
           ))
@@ -108,7 +133,28 @@ export function SpeakerTable() {
         </p>
       ) : null}
 
-      <PendingBar />
+      {awaitingCast ? (
+        <div className="card flex flex-wrap items-center justify-between gap-3
+                        border-brand/40 bg-brand/[0.06] px-3.5 py-3">
+          <p className="max-w-[32rem] text-[12.5px] text-ink3">
+            Set a gender and voice for each speaker, or leave them on{' '}
+            <span className="font-medium text-ink">Auto-detect</span>. Casting
+            runs the speech and mix with your choices — lip-sync is a separate
+            step afterwards.
+          </p>
+          <button
+            type="button"
+            onClick={() => void cast()}
+            disabled={applying || !editable}
+            className="shrink-0 rounded-lg bg-brand px-3.5 py-2 text-[13px] font-semibold
+                       text-white transition-colors hover:bg-brand/90 disabled:opacity-60"
+          >
+            {applying ? 'Casting…' : 'Cast & continue'}
+          </button>
+        </div>
+      ) : (
+        <PendingBar />
+      )}
     </section>
   );
 }

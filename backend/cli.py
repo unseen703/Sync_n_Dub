@@ -472,7 +472,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     # asked for segment" apart from "nobody said", and only the first
     # collides.
     ap.add_argument("--speed-mode", default=None,
-                    choices=("global", "segment"),
+                    choices=("global", "segment", "warp"),
                     help="How the dub is re-paced to fit the source timeline. "
                          "`segment` (DEFAULT since 2026-10-22): each clip "
                          "is fitted to its own slot -- compressed when the "
@@ -516,6 +516,100 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                          "rather than running on over whatever fills the gap "
                          "— usually music. Default 1.0 s; 0 disables it and "
                          "restores the plain shift-forward cascade.")
+    ap.add_argument("--speed-borrow-gap", type=float,
+                    default=_speed.DEFAULT_BORROW_GAP,
+                    help="With --speed-mode segment: seconds of the gap "
+                         "AFTER a cue that the cue may take rather than "
+                         "speed up. Turns --speed-gap-barrier from a wall "
+                         "into a budget. DEFAULT 0.0 (off), because any "
+                         "other value re-paces every cue that has a gap "
+                         "after it. 0.3-0.5 is the range the prosodic-"
+                         "alignment literature works in. A nested cue and "
+                         "the last cue never borrow, and a cue whose slot "
+                         "was shortened by `set_speed` does not either — "
+                         "borrowing would cancel that edit. Reported per "
+                         "segment as borrowed_s, with the tempo it would "
+                         "have had as tempo_unborrowed.")
+    ap.add_argument("--speed-borrow-frac", type=float,
+                    default=_speed.DEFAULT_BORROW_FRAC,
+                    help="With --speed-borrow-gap: the share of the "
+                         "following gap a cue may take. Default 0.5 — the "
+                         "gap is shared, and taking all of it leaves the "
+                         "next cue no cushion.")
+    ap.add_argument("--absorb-pauses", action="store_true",
+                    help="With --speed-mode segment: spend a cue's duration "
+                         "deficit on the SILENCE inside its own TTS clip "
+                         "before speeding the speech up. The clip is VADed, "
+                         "its gaps are shrunk to tiered floors (sentence "
+                         "boundaries keep more than breaths), and only what "
+                         "the silence cannot cover reaches the speech — so a "
+                         "line with sentence breaks in it often renders at "
+                         "exactly 1.0x. Runs in reverse too: a clip shorter "
+                         "than its slot grows its pauses instead of drawling "
+                         "at --speed-floor. The cue becomes one piece per "
+                         "speech run; a clip the VAD cannot use falls back "
+                         "to the single-clip tempo. Read speech_tempo_max in "
+                         "the plan summary, not tempo_max.")
+    ap.add_argument("--absorb-max-frac", type=float,
+                    default=_speed.DEFAULT_ABSORB_MAX_FRAC,
+                    help="With --absorb-pauses: the most any ONE pause may "
+                         "give up, even where its floor would allow more. "
+                         "Default 0.60. A dub with every pause floored is "
+                         "relentless.")
+    ap.add_argument("--absorb-vad-backend",
+                    default=_speed.DEFAULT_ABSORB_VAD_BACKEND,
+                    choices=("energy", "pyannote", "auto"),
+                    help="With --absorb-pauses: VAD used to find the clip's "
+                         "pauses. Default 'energy' — a TTS clip is clean "
+                         "audio with near-digital silence in its gaps, which "
+                         "is energy's good case, and pyannote would load a "
+                         "model and hold VRAM into stage 9h.")
+
+    # --speed-mode warp ---------------------------------------------------
+    ap.add_argument("--speed-step", type=float,
+                    default=_speed.DEFAULT_WARP_STEP,
+                    help="With --speed-mode warp: the largest RELATIVE tempo "
+                         "change allowed between adjacent cues. Default 0.20. "
+                         "The just-noticeable difference for speech tempo is "
+                         "about 10%% (Quene 2007), so 0.20 is roughly twice "
+                         "the detection threshold — audible but not a lurch. "
+                         "Enforced per island, symmetric in the log domain, "
+                         "and VERIFIED on what was rendered: read "
+                         "tempo_step_max / tempo_step_ok in the plan summary.")
+    ap.add_argument("--speed-tempo-max", type=float,
+                    default=_speed.DEFAULT_WARP_TEMPO_MAX,
+                    help="With --speed-mode warp: the soft SPEECH-rate "
+                         "ceiling. Default 1.45. This is a speech rate, not "
+                         "the blob rate --speed-cap bounds: the engine's own "
+                         "silence is compressed separately and much harder.")
+    ap.add_argument("--speed-tempo-hard-max", type=float,
+                    default=_speed.DEFAULT_WARP_TEMPO_HARD_MAX,
+                    help="With --speed-mode warp: the rate a cue may be "
+                         "pushed to when nothing else fits. Default 1.80. "
+                         "Reaching it is flagged budget_violation — the "
+                         "answer there is to shorten the line "
+                         "(--condense-overlong), not to push harder.")
+    ap.add_argument("--speed-island-gap", type=float,
+                    default=_speed.DEFAULT_WARP_ISLAND_GAP,
+                    help="With --speed-mode warp: a gap at least this long "
+                         "breaks the smoothing chain. Each island's total "
+                         "duration is conserved exactly, so drift can only "
+                         "live inside one. Default 1.0 s.")
+    ap.add_argument("--speed-ramp", type=float,
+                    default=_speed.DEFAULT_WARP_RAMP_S,
+                    help="With --speed-mode warp: width of the smoothstep "
+                         "rate transition at each cue joint. Default 0.18 s. "
+                         "Slid into a nearby pause when there is one — a rate "
+                         "change inside silence is far less audible than one "
+                         "mid-phoneme.")
+    ap.add_argument("--warp-backend", default="auto",
+                    choices=("auto", "rubberband", "pytsmod"),
+                    help="With --speed-mode warp: the time-map stretcher. "
+                         "'auto' prefers rubberband (pyrubberband + the "
+                         "rubberband CLI) and falls back to pytsmod's WSOLA. "
+                         "Note the ffmpeg `rubberband` FILTER in the "
+                         "imageio build is a different thing and cannot take "
+                         "a time map.")
 
     ap.add_argument("--timing-method", default=None,
                     choices=("m2", "m4", "m7"),
@@ -657,12 +751,12 @@ def resolve_speed_setup(args) -> "SpeedSetup":
     # research arms use: `segment` IS naive_slot rendered through the timing
     # plan, with a zero margin and a symmetric cap. `global` leaves every
     # default exactly where it was.
-    # `segment` became the default on 2026-10-22. `--speed-mode` now parses
-    # to None when nobody passed it, so the two cases are distinguishable:
-    # an EXPLICIT `segment` beside `--timing-method` is a contradiction and
-    # is refused, while the default quietly yields to the arm, which sets
+    # `warp` became the default on 2026-10-26. `--speed-mode` still parses
+    # to None when nobody passed it, so the two cases stay distinguishable:
+    # an EXPLICIT mode beside `--timing-method` is a contradiction and is
+    # refused, while the default quietly yields to the arm, which sets
     # mix_strategy / tts_apply_stretch / mix_clip_source itself.
-    speed_mode = args.speed_mode or ("global" if args.timing_method else "segment")
+    speed_mode = args.speed_mode or ("global" if args.timing_method else "warp")
 
     if speed_mode == "segment":
         if args.timing_method:
@@ -672,6 +766,9 @@ def resolve_speed_setup(args) -> "SpeedSetup":
                 "--timing-method for the measured research arms (m2 is the "
                 "same producer with a 0.10 s slot margin).")
         _speed.validate_segment_bounds(args.speed_cap, args.speed_floor)
+        _speed.validate_absorb_bounds(
+            args.speed_borrow_gap, args.speed_borrow_frac,
+            args.absorb_max_frac)
         # The values themselves live in `backend/speed.py`, which `ui/presets`
         # also calls — they used to be a hand-kept copy on each side.
         _seg = _speed.segment_timing_kwargs(
@@ -679,12 +776,65 @@ def resolve_speed_setup(args) -> "SpeedSetup":
             speed_floor=args.speed_floor,
             slot_margin=args.speed_slot_margin,
             gap_barrier=args.speed_gap_barrier,
+            borrow_gap=args.speed_borrow_gap,
+            borrow_frac=args.speed_borrow_frac,
+            absorb_pauses=args.absorb_pauses,
+            absorb_max_frac=args.absorb_max_frac,
+            absorb_vad_backend=args.absorb_vad_backend,
         )
         timing_producer = _seg["timing_producer"]
         timing_params = _seg["timing_params"]
         tts_apply_stretch = _seg["tts_apply_stretch"]
         mix_strategy = _seg["mix_strategy"]
         mix_clip_source = _seg["mix_clip_source"]
+
+    if speed_mode == "warp":
+        if args.timing_method:
+            raise SystemExit(
+                "--speed-mode warp and --timing-method set the same knobs. "
+                "Use one: --speed-mode warp for the continuous-rate "
+                "producer, --timing-method for the measured research arms.")
+        _speed.validate_warp_bounds(args.speed_step, args.speed_tempo_max,
+                                    args.speed_tempo_hard_max)
+        _speed.validate_segment_bounds(args.speed_cap, args.speed_floor)
+        _warp = _speed.warp_timing_kwargs(
+            speed_floor=args.speed_floor,
+            step=args.speed_step,
+            tempo_max=args.speed_tempo_max,
+            tempo_hard_max=args.speed_tempo_hard_max,
+            island_gap=args.speed_island_gap,
+            ramp_s=args.speed_ramp,
+            absorb_max_frac=args.absorb_max_frac,
+            vad_backend=args.absorb_vad_backend,
+            warp_backend=args.warp_backend,
+        )
+        timing_producer = _warp["timing_producer"]
+        timing_params = _warp["timing_params"]
+        tts_apply_stretch = _warp["tts_apply_stretch"]
+        mix_strategy = _warp["mix_strategy"]
+        mix_clip_source = _warp["mix_clip_source"]
+
+    # Both knobs reach the pipeline ONLY through `segment_timing_params`, so
+    # anywhere else they are silently inert — and a flag that is accepted and
+    # then ignored is how an operator concludes a feature does not work.
+    # `global` builds no timing plan at all; the research arms set their own
+    # `timing_params` wholesale, a few lines below; and `warp` does both of
+    # these things by construction, so asking for them again is a
+    # contradiction rather than a no-op.
+    if speed_mode != "segment" and (args.absorb_pauses
+                                    or args.speed_borrow_gap > 0):
+        asked = [n for n, on in (("--absorb-pauses", args.absorb_pauses),
+                                 ("--speed-borrow-gap", args.speed_borrow_gap > 0))
+                 if on]
+        why = {
+            "warp": " — warp absorbs pauses and borrows across boundaries as "
+                    "part of its solve; use --absorb-max-frac and "
+                    "--speed-island-gap to steer it",
+            "global": " (--speed-mode global builds no timing plan at all)",
+        }.get(speed_mode, " (--timing-method sets its own timing_params)")
+        raise SystemExit(
+            f"{' and '.join(asked)} only applies to --speed-mode segment, "
+            f"and this run resolved to {speed_mode!r}{why}.")
 
     tm = args.timing_method
     if tm == "m2":

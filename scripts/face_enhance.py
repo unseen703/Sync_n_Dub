@@ -71,6 +71,45 @@ the last three are measured on this host.
    verifies each shard and joins them. One worker runs inline, so there is
    no subprocess on a single-GPU host.
 
+7. **`--seek-shards` stops every shard decoding from frame 0.** OFF by
+   default; see the warning below. Each worker opens the file at frame 0 and
+   decodes forward to its own start, so four shards decode 2.5x the video
+   between them and the last one decodes all of it. That is paid serially
+   inside each worker, on the critical path of the slowest shard -- which is
+   the number anyone waits for. It is also getting worse rather than better:
+   `--frame-mask` cut the RESTORATION work by ~84% and did not touch decode
+   at all, and more workers means more redundant decode.
+
+   With the flag, the parent indexes the video's keyframes once and tells
+   each worker the last keyframe at or before its start; the worker seeks
+   there with ffmpeg input-seek and discards forward over at most one GOP.
+
+WHY SEEKING IS OPT-IN AND NOT THE DEFAULT
+-----------------------------------------
+`cv2.CAP_PROP_POS_FRAMES` is unreliable on B-frames, which is why the
+decode-and-discard above exists at all. An off-by-one seek does not crash and
+does not change the frame COUNT -- it shifts every whole-video index in the
+shard by one, so `--frame-mask` restores the wrong mouths and the run exits
+0. That is the same shape as the coord-cache trap in
+`models/lipsync/coords.py`, and the parent's decode-and-count verification
+cannot see it: the shard has the right number of the wrong frames.
+
+So the seek is built to be verifiable rather than trusted:
+
+  * The index comes from ffprobe's own keyframe list, not from arithmetic on
+    a guessed GOP length.
+  * A keyframe whose timestamp does not land on a multiple of 1/fps means
+    the source is not CFR, the index would be a rounded guess, and the whole
+    optimisation is abandoned for that run rather than applied approximately.
+  * `-ss` targets half a frame BEFORE the keyframe. There is no frame in
+    that gap, so an accurate seek still returns the keyframe itself, and a
+    timestamp that rounds the wrong way cannot land past it.
+  * ffmpeg does the seek, not cv2.
+
+Prove it on your own media before turning it on: render one shard range with
+the flag and the same range without it, and compare the outputs byte for
+byte. Equal means the indices line up.
+
 LOW-RESOLUTION SOURCES
 ----------------------
 This gets MORE out of a 512p render than a 1080p one, which is the opposite
@@ -121,9 +160,11 @@ load-bearing -- `backend/lipsync.py` treats any difference as a failure.
 from __future__ import annotations
 
 import argparse
+import bisect
 import json
 import math
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -140,6 +181,13 @@ SELF = Path(__file__).resolve()
 #: saves. Model load alone is ~25-40 s: three networks (RetinaFace resnet50,
 #: GFPGAN v1.4, ParseNet) per worker.
 MIN_FRAMES_PER_SHARD = 120
+
+#: A worker's own summary line, which the parent reads back out of the part
+#: logs. A shard's stdout goes to its log and never reaches whoever called the
+#: parent, so without this the totals of a sharded run are simply absent --
+#: and the caller that parses them (`models/restore/gfpgan_adapter.py`)
+#: reported 0 frames / 0 restored for every multi-GPU run, i.e. the default.
+_WORKER_SUMMARY_RE = re.compile(r"restored (\d+), passed through (\d+)")
 
 
 # --------------------------------------------------------------------------
@@ -256,6 +304,115 @@ def probe_rate(ffprobe: str, path: str) -> str | None:
     return out[0].strip() if out and "/" in out[0] else None
 
 
+def fps_to_float(fps: str) -> float:
+    """The probed rational as a float, for timestamp arithmetic only.
+
+    Never for encoding -- the rational is passed to ffmpeg verbatim, because
+    a rate that disagrees with a sibling shard is what lets concat drop one.
+    """
+    try:
+        if "/" in str(fps):
+            num, den = str(fps).split("/", 1)
+            return float(num) / float(den) if float(den) else 0.0
+        return float(fps)
+    except (TypeError, ValueError, ZeroDivisionError):
+        return 0.0
+
+
+def keyframe_index(ffprobe: str, path: str, fps_f: float) -> list[tuple[int, float]]:
+    """(frame index, timestamp) for every keyframe, or [] if not derivable.
+
+    `-skip_frame nokey` makes ffprobe report only keyframes, so this is one
+    cheap pass rather than a listing of every frame in the file.
+
+    Returns EMPTY rather than approximate whenever the index cannot be
+    derived exactly. On a CFR file a keyframe sits on a multiple of 1/fps; a
+    timestamp that does not means the source is variable-rate, and an index
+    obtained by rounding would silently shift every mask lookup in the shard
+    that used it. The caller then falls back to decoding from frame 0, which
+    is slower and exactly correct.
+    """
+    if fps_f <= 0:
+        return []
+    r = subprocess.run(
+        [ffprobe, "-v", "error", "-select_streams", "v:0",
+         "-skip_frame", "nokey", "-show_entries", "frame=pts_time",
+         "-of", "csv=p=0", path],
+        capture_output=True, text=True)
+    out: list[tuple[int, float]] = []
+    for line in (r.stdout or "").splitlines():
+        line = line.strip().rstrip(",")
+        if not line or line == "N/A":
+            continue
+        try:
+            t = float(line)
+        except ValueError:
+            continue
+        exact = t * fps_f
+        idx = int(round(exact))
+        if abs(exact - idx) > 0.05:
+            print(f"enhance: keyframe at {t:.6f}s is {exact:.3f} frames in, "
+                  f"not an integer -- treating this source as variable-rate "
+                  f"and decoding shards from frame 0", file=sys.stderr)
+            return []
+        out.append((idx, t))
+    out.sort()
+    return out
+
+
+def open_seek_pipe(a, src_path: str, start_t: float):
+    """ffmpeg decoding raw BGR from `start_t`, as a pipe.
+
+    `-ss` BEFORE `-i` is an input seek: ffmpeg jumps to the keyframe and
+    decodes from there, instead of walking the file. cv2 does not get to do
+    this -- its own seek is the unreliable one.
+    """
+    return subprocess.Popen(
+        [a.ffmpeg, "-v", "error", "-nostdin",
+         "-ss", f"{max(0.0, start_t):.6f}", "-i", src_path,
+         "-f", "rawvideo", "-pix_fmt", "bgr24", "-"],
+        stdout=subprocess.PIPE, bufsize=10 ** 8)
+
+
+def read_frames(src, pipe, sw: int, sh: int, base: int, f0: int, f1: int):
+    """Yield (whole-video index, BGR frame) over [f0, f1).
+
+    `base` is the index of the first frame the reader will produce: 0 for the
+    cv2 reader, the seeked-to keyframe for the pipe. Everything downstream
+    keys off the yielded index, including the mask -- using a write counter
+    instead would shift every lookup by `f0` in any shard but the first.
+
+    Frames before `f0` are dropped as cheaply as the reader allows. `grab()`
+    decodes without the colour conversion and the array allocation `read()`
+    pays for, which is most of the per-frame cost of a frame nobody wants.
+    """
+    nbytes = sw * sh * 3
+    idx = base - 1
+    while True:
+        idx += 1
+        if idx >= f1:
+            return
+        if idx < f0:
+            if pipe is not None:
+                if len(pipe.stdout.read(nbytes)) < nbytes:
+                    return
+            elif not src.grab():
+                return
+            continue
+        if pipe is not None:
+            buf = pipe.stdout.read(nbytes)
+            if len(buf) < nbytes:
+                return
+            # Copied because frombuffer is read-only and this frame is handed
+            # to OpenCV and GFPGAN, neither of which promises not to write.
+            yield idx, np.frombuffer(buf, np.uint8).reshape(sh, sw, 3).copy()
+        else:
+            ok, frame = src.read()
+            if not ok:
+                return
+            yield idx, frame
+
+
 def plan_gpus(spec: str) -> list[str]:
     """Device ids for the workers.
 
@@ -328,6 +485,24 @@ def render_range(a, src_path: str, out_path: str, f0: int, f1: int | None,
               f"(~2.4 s/frame at 512p, ~10.9 s/frame at 1080p).",
               file=sys.stderr, flush=True)
 
+    # Reader. The seek path replaces cv2 entirely for this shard: it starts
+    # at a keyframe the parent picked and the loop discards forward over at
+    # most one GOP, instead of decoding every frame since the start of the
+    # file. `base` is what keeps whole-video indices honest afterwards.
+    pipe = None
+    base = 0
+    kf, kf_t = a.seek_from_frame, a.seek_from_time
+    if kf and kf_t is not None and kf <= f0:
+        # Half a frame early: there is no frame in that gap, so an accurate
+        # seek still lands on the keyframe, and a timestamp that rounds the
+        # wrong way cannot overshoot it.
+        t = max(0.0, float(kf_t) - 0.5 / max(1e-9, fps_to_float(fps)))
+        pipe = open_seek_pipe(a, src_path, t)
+        base = int(kf)
+        src.release()
+        print(f"{tag}: seeking to keyframe {base} ({t:.3f}s) instead of "
+              f"decoding {f0} frame(s) from the start", flush=True)
+
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
     ff = subprocess.Popen(
         [a.ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
@@ -339,18 +514,8 @@ def render_range(a, src_path: str, out_path: str, f0: int, f1: int | None,
         stdin=subprocess.PIPE)
 
     written = restored = skipped = no_face = 0
-    idx = -1
     t0 = time.time()
-    while True:
-        ok, frame = src.read()
-        if not ok:
-            break
-        idx += 1
-        if idx < f0:
-            continue              # decoded and discarded, see --frame-start
-        if idx >= f1:
-            break
-
+    for idx, frame in read_frames(src, pipe, sw, sh, base, f0, f1):
         # --- restore (optional, gated) --------------------------------
         # `idx` is the WHOLE-VIDEO index, which is what the mask is keyed on.
         # Using the write counter instead would silently shift every lookup
@@ -409,6 +574,12 @@ def render_range(a, src_path: str, out_path: str, f0: int, f1: int | None,
                   f"passed {skipped})", flush=True)
 
     src.release()
+    if pipe is not None:
+        # Killed rather than waited on: a shard that stops at f1 leaves
+        # ffmpeg with a whole file still to decode and nowhere to put it.
+        pipe.stdout.close()
+        pipe.kill()
+        pipe.wait()
     ff.stdin.close()
     rc = ff.wait()
     dt = time.time() - t0
@@ -465,6 +636,18 @@ def run_sharded(a, gpus: list[str], n: int, fps: str) -> int:
     print(f"enhance: {n} frames @ {fps} -> {n_workers} worker(s) over gpu(s) "
           f"{','.join(gpus)}", flush=True)
 
+    # One keyframe index for the whole run, shared by every shard. Empty
+    # means either the flag is off or the source is not CFR, and every
+    # worker then decodes from frame 0 as it always did.
+    kfs = (keyframe_index(a.ffprobe, a.input, fps_to_float(fps))
+           if a.seek_shards else [])
+    kf_starts = [k for k, _t in kfs]
+    if a.seek_shards:
+        print(f"enhance: {len(kfs)} keyframe(s) indexed; shards will seek"
+              if kfs else
+              "enhance: no usable keyframe index; shards decode from frame 0",
+              flush=True)
+
     procs = []
     t0 = time.time()
     for i, (f0, f1) in enumerate(bounds):
@@ -493,6 +676,15 @@ def run_sharded(a, gpus: list[str], n: int, fps: str) -> int:
             cmd += ["--frame-mask", a.frame_mask]
         if not a.verify:
             cmd.append("--no-verify")
+
+        # The last keyframe at or before this shard's first frame. Shard 0
+        # starts at 0 and has nothing to skip, so it is left on the plain
+        # reader rather than seeking to where it already is.
+        if kfs and f0 > 0:
+            j = bisect.bisect_right(kf_starts, f0) - 1
+            if j >= 0 and kfs[j][0] > 0:
+                cmd += ["--seek-from-frame", str(kfs[j][0]),
+                        "--seek-from-time", f"{kfs[j][1]:.6f}"]
 
         env = dict(os.environ)
         # The child sees exactly one device and calls it 0, which is why
@@ -543,11 +735,25 @@ def run_sharded(a, gpus: list[str], n: int, fps: str) -> int:
                   f"expected {n}. Shards kept in {work}", file=sys.stderr)
             return 1
 
+    # Totals, summed from the part logs BEFORE they are removed. The shards
+    # are the only place the per-worker counts exist.
+    restored = passed = 0
+    for i, _f0, _f1, _o, _l, _p in procs:
+        try:
+            m = _WORKER_SUMMARY_RE.search((work / f"part{i:02d}.log").read_text())
+        except OSError:
+            continue
+        if m:
+            restored += int(m.group(1))
+            passed += int(m.group(2))
+
     if not a.keep_shards:
         shutil.rmtree(work, ignore_errors=True)
     print(f"enhance: DONE in {dt:.0f}s -> {a.output} "
-          f"({n} frames, {dt / max(1, n):.3f}s/frame, {n_workers} workers)")
+          f"({n} frames, {dt / max(1, n):.3f}s/frame, {n_workers} workers, "
+          f"restored {restored}, passed through {passed})")
     print(json.dumps({"frames": n, "workers": n_workers,
+                      "restored": restored, "passed_through": passed,
                       "wall_s": round(dt, 1),
                       "s_per_frame": round(dt / max(1, n), 4)}))
     return 0
@@ -626,6 +832,26 @@ def main() -> int:
                          "every mask index in the shard. Set by the parent; "
                          "rarely useful by hand.")
     ap.add_argument("--frame-end", type=int, default=None)
+    ap.add_argument("--seek-shards", action="store_true",
+                    help="Let each shard SEEK to its first frame instead of "
+                         "decoding every frame before it. Four shards "
+                         "otherwise decode 2.5x the video between them and "
+                         "the last decodes all of it, serially, on the "
+                         "critical path. OFF by default because the failure "
+                         "mode is silent: an off-by-one seek keeps the frame "
+                         "COUNT right and shifts every whole-video index, so "
+                         "--frame-mask restores the wrong mouths at rc=0 and "
+                         "the parent's count check cannot see it. The guards "
+                         "are in the module docstring; verify it on your own "
+                         "media before leaving it on.")
+    ap.add_argument("--seek-from-frame", type=int, default=None,
+                    help="Whole-video index of the keyframe this shard seeks "
+                         "to. Set by the parent from ffprobe's keyframe list, "
+                         "never by hand: a value that is not actually a "
+                         "keyframe shifts every index in the shard.")
+    ap.add_argument("--seek-from-time", type=float, default=None,
+                    help="That keyframe's timestamp, as ffprobe reported it. "
+                         "Paired with --seek-from-frame; both or neither.")
     ap.add_argument("--work-dir", default=None,
                     help="shard scratch; default <output>.shards")
     ap.add_argument("--keep-shards", action="store_true")

@@ -64,3 +64,91 @@ export function lipsyncToggleState(progress: Progress | null, media: Media | nul
   // overall job percentage; the ribbon and the log tail carry the detail.
   return { configured, ready, pct: progress?.pct ?? 0, running };
 }
+
+// ---------------------------------------------------------------------------
+// The product-level outcome: is the result usable, and what is the next step.
+// ---------------------------------------------------------------------------
+
+export type OutcomeKind = 'processing' | 'dub-ready' | 'lipsync-ready' | 'failed';
+export type OutcomeTone = 'ok' | 'progress' | 'bad';
+
+export interface OutcomeAction {
+  kind: 'sync-lips' | 'download';
+  label: string;
+  href?: string | null;
+}
+
+export interface Outcome {
+  kind: OutcomeKind;
+  /** The headline, e.g. "Dubbed video ready". */
+  status: string;
+  /** A second line, e.g. "Lip-sync hasn't been run yet." Null when the
+      headline says it all. */
+  sub: string | null;
+  /** Drives the icon AND the colour, so the state never rests on colour alone. */
+  tone: OutcomeTone;
+  action: OutcomeAction | null;
+  /** The dub download, offered as a secondary link when the headline action
+      is sync-lips — the dub is the deliverable even then. */
+  dubDownloadUrl: string | null;
+}
+
+/**
+ * The PRODUCT-level outcome, as opposed to `deriveCentreState`'s pipeline view.
+ *
+ * The distinction is the whole point: a finished dub with no lip-sync is a
+ * usable result, not an incomplete pipeline. This says "Dubbed video ready"
+ * where the stage ribbon would say "Lip sync not started".
+ *
+ * `failed` carries no action — `FailureCard` owns the explanation and the
+ * "Start it again" button, and two retry controls on one screen is one too many.
+ */
+export function deriveOutcome(progress: Progress | null, media: Media | null): Outcome {
+  const centre = deriveCentreState(progress, media);
+  const lip = lipsyncToggleState(progress, media);
+  const dubUrl = media?.video.dubbed_no_lipsync?.download_url ?? null;
+
+  if (centre === 'failed') {
+    const cancelled = progress?.state === 'cancelled';
+    return {
+      kind: 'failed',
+      status: cancelled ? 'Dub stopped' : 'Dub failed',
+      sub: null,
+      tone: 'bad',
+      action: null,
+      dubDownloadUrl: dubUrl,
+    };
+  }
+
+  if (centre === 'dub-ready') {
+    if (lip.ready) {
+      const url = media?.video.lipsync?.download_url ?? null;
+      return {
+        kind: 'lipsync-ready',
+        status: 'Lip-synced video ready',
+        sub: null,
+        tone: 'ok',
+        action: url ? { kind: 'download', label: 'Download video', href: url } : null,
+        dubDownloadUrl: dubUrl,
+      };
+    }
+    return {
+      kind: 'dub-ready',
+      status: 'Dubbed video ready',
+      sub: lip.running ? 'Lip-sync is still rendering.' : "Lip-sync hasn't been run yet.",
+      tone: 'ok',
+      action: lip.running ? null : { kind: 'sync-lips', label: "Sync speaker's lips" },
+      dubDownloadUrl: dubUrl,
+    };
+  }
+
+  // queued / preparing / source-only — the dub is not usable yet.
+  return {
+    kind: 'processing',
+    status: progress?.state === 'queued' ? 'Queued' : 'Processing…',
+    sub: null,
+    tone: 'progress',
+    action: null,
+    dubDownloadUrl: null,
+  };
+}

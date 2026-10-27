@@ -71,7 +71,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Body, Depends, HTTPException
+from fastapi import APIRouter, Body, HTTPException
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:                      # pragma: no cover
@@ -81,7 +81,6 @@ from backend import tracing as _tracing
 from backend import edits as E                          # noqa: E402
 from backend import edit_agent as A                     # noqa: E402
 
-from .auth import basic_auth                            # noqa: E402
 from .cost import estimate as cost_estimate             # noqa: E402
 from .speakers import TONE_ENGINES, supports_tone        # noqa: E402
 from . import transcript as _transcript                  # noqa: E402
@@ -105,7 +104,7 @@ PENDING_VERSION = 1
 #: What the STRUCTURED endpoint (`POST .../edits`) will stage. Both are
 #: deterministic, which is what lets it promise that the quoted cost is the
 #: applied cost.
-ALLOWED_OPS = ("set_voice", "set_tone")
+ALLOWED_OPS = ("set_voice", "set_tone", "set_gender", "mute_cue")
 
 #: What the AGENT endpoint (`POST .../agent`) will stage. The whole op
 #: catalogue, because the point of a sentence is that you do not have to
@@ -239,10 +238,11 @@ def _build_ops(raw_edits: List[Dict[str, Any]], *, config: Dict[str, Any],
 
         voice = item.get("voice")
         tone = item.get("tone")
-        if voice in ("", None) and tone in ("", None):
+        gender = item.get("gender")
+        if voice in ("", None) and tone in ("", None) and gender in ("", None):
             raise HTTPException(
                 422, f"{where}: nothing to change — give a voice, a tone, "
-                     f"or both")
+                     f"a gender, or all three")
 
         if voice not in ("", None):
             ops.append(E.EditOp(
@@ -261,6 +261,15 @@ def _build_ops(raw_edits: List[Dict[str, Any]], *, config: Dict[str, Any],
                 # rewrite_text=False is the whole reason this needs no LLM.
                 params={"tone": str(tone), "rewrite_text": False},
                 note=f"UI: tone for {speaker}"))
+        if gender not in ("", None):
+            gender = str(gender).strip().lower()
+            if gender not in ("male", "female"):
+                raise HTTPException(
+                    422, f"{where}: gender must be 'male' or 'female'")
+            ops.append(E.EditOp(
+                op="set_gender", scope=E.Scope(speaker=speaker),
+                params={"gender": gender},
+                note=f"UI: gender for {speaker}"))
 
     return ops
 
@@ -310,7 +319,7 @@ def _payload(job_id: str, raw_edits: List[Dict[str, Any]],
 # routes
 # ---------------------------------------------------------------------------
 
-@router.post("/api/jobs/{job_id}/edits", dependencies=[Depends(basic_auth)])
+@router.post("/api/jobs/{job_id}/edits")
 def stage_edits(job_id: str, body: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
     """Stage a voice/tone set and return what re-rendering it would cost.
 
@@ -358,8 +367,7 @@ def get_review_video(job_id: str) -> Dict[str, Any]:
     return {"job_id": view.job_id, **st}
 
 
-@router.post("/api/jobs/{job_id}/review-video",
-             dependencies=[Depends(basic_auth)])
+@router.post("/api/jobs/{job_id}/review-video")
 def make_review_video(job_id: str) -> Dict[str, Any]:
     """Render the boxes, in a thread.
 
@@ -415,7 +423,7 @@ def get_edits(job_id: str) -> Dict[str, Any]:
     return doc
 
 
-@router.delete("/api/jobs/{job_id}/edits", dependencies=[Depends(basic_auth)])
+@router.delete("/api/jobs/{job_id}/edits")
 def discard_edits(job_id: str) -> Dict[str, Any]:
     view = _open(job_id)
     p = _pending_path(view.root)
@@ -644,11 +652,22 @@ def agent_script(job_id: str, limit: int = 2000) -> Dict[str, Any]:
                 for s in (scope.get("segments") or []):
                     staged_speed[str(s)] = factor
 
+    # Sort by start so `cue_no` lines up with `backend.edit_agent`'s cue
+    # numbering (which also sorts by start). "cue 5" the user types in the
+    # agent panel means the fifth row shown here either way, and the two
+    # paths stay in sync only because both agree on the ordering.
+    all_segs = sorted(
+        merged.get("segments") or [],
+        key=lambda s: float(s.get("start") or 0.0),
+    )
     rows = []
-    for seg in (merged.get("segments") or [])[:max(1, min(limit, 5000))]:
+    for cue_no, seg in enumerate(all_segs[:max(1, min(limit, 5000))], start=1):
         sid = str(seg.get("id") or "")
         rows.append({
             "id": sid,
+            # 1-based cue number, start-ordered. Matches `#N` in the UI and
+            # the `cue N` / `#N` references the edit agent now resolves.
+            "cue_no": cue_no,
             "speaker": seg.get("speaker"),
             "start": float(seg.get("start") or 0.0),
             "end": float(seg.get("end") or 0.0),
@@ -699,7 +718,7 @@ def _cue_speed(seg: Dict[str, Any]) -> float:
         return 1.0
 
 
-@router.post("/api/jobs/{job_id}/agent", dependencies=[Depends(basic_auth)])
+@router.post("/api/jobs/{job_id}/agent")
 def agent_message(job_id: str, body: Dict[str, Any] = Body(...)
                   ) -> Dict[str, Any]:
     """Turn one sentence into staged edits. Stages; does NOT re-render.
@@ -770,7 +789,25 @@ def _agent_message_inner(job_id, body, view, data, message, client, rewriter):
                 ops = [E.EditOp.from_dict(o) for o in (prior.get("ops") or [])]
             except E.EditError:
                 ops = []            # a stale set is dropped, not fatal
-    ops = ops + new_ops
+    # Dedup: a new op that targets the same (op, segments) as an existing one
+    # replaces it rather than stacking. Muting SEG_0001 twice should not
+    # produce two identical ops, and a second speed edit on the same scope
+    # supersedes the first.
+    def _sig(raw: Dict[str, Any]) -> tuple:
+        return (raw.get("op"), tuple(sorted(
+            (raw.get("scope") or {}).get("segments") or [])))
+
+    new_sigs = {_sig(o.to_dict()) for o in new_ops}
+    ops = [o for o in ops if _sig(o.to_dict()) not in new_sigs] + new_ops
+
+    # Prune turns whose ops were all superseded.
+    pruned_turns: List[Dict[str, Any]] = []
+    for t in turns:
+        kept_t_ops = [o for o in (t.get("ops") or [])
+                      if _sig(o) not in new_sigs]
+        if kept_t_ops:
+            pruned_turns.append({**t, "ops": kept_t_ops})
+    turns = pruned_turns
 
     prev = _agent_preview(view, ops, rewriter=rewriter)
     payload = _payload(view.job_id, [], ops, prev)
@@ -801,8 +838,7 @@ def _agent_message_inner(job_id, body, view, data, message, client, rewriter):
     return payload
 
 
-@router.post("/api/jobs/{job_id}/edits/apply",
-             dependencies=[Depends(basic_auth)])
+@router.post("/api/jobs/{job_id}/edits/apply")
 def apply_pending(job_id: str) -> Dict[str, Any]:
     """Write the staged edits and launch the re-render, detached.
 
@@ -1049,8 +1085,7 @@ def lipsync_readiness(job_id: str) -> Dict[str, Any]:
     }
 
 
-@router.delete("/api/jobs/{job_id}/agent/turns/{index}",
-               dependencies=[Depends(basic_auth)])
+@router.delete("/api/jobs/{job_id}/agent/turns/{index}")
 def drop_staged_turn(job_id: str, index: int) -> Dict[str, Any]:
     """Remove ONE staged change, keeping the rest.
 
@@ -1114,7 +1149,7 @@ def drop_staged_turn(job_id: str, index: int) -> Dict[str, Any]:
     return payload
 
 
-@router.post("/api/jobs/{job_id}/lipsync", dependencies=[Depends(basic_auth)])
+@router.post("/api/jobs/{job_id}/lipsync")
 def run_lipsync_now(job_id: str,
                     body: Optional[Dict[str, Any]] = Body(None)) -> Dict[str, Any]:
     """Finish a job that was dubbed without lip-sync — the staged flow's
@@ -1209,7 +1244,59 @@ def run_lipsync_now(job_id: str,
             "warnings": list(res.warnings), "rerun": launch}
 
 
-@router.post("/api/jobs/{job_id}/revert", dependencies=[Depends(basic_auth)])
+@router.post("/api/jobs/{job_id}/cast")
+def cast_job(job_id: str,
+             body: Optional[Dict[str, Any]] = Body(None)) -> Dict[str, Any]:
+    """Finish the cast step for a job stopped after MT, then run post-MT stages.
+
+    Body: `{"speakers": {<id>: {"mode": "autodetect"|"select",
+    "gender": "male"|"female"|null, "voice": "<id>"|null,
+    "engine": "<engine>"|null}}}`. A speaker on `select` pins its gender/voice
+    as an override; `autodetect` carries none, so stage 9d predicts it (the
+    gate ASD runs for the face vote). Writes `<job>/cast.json` and launches
+    `ui.runner --cast` detached.
+
+    No GPU pre-flight here, unlike the lip-sync route: the post-MT chain is
+    TTS + mix, not a render. Lip-sync is still its own separate submission.
+    """
+    import json as _json
+    from pathlib import Path as _Path
+
+    view = _open(job_id)
+    speakers = (body or {}).get("speakers") or {}
+    gender_overrides: Dict[str, str] = {}
+    voice_overrides: Dict[str, dict] = {}
+    for sid, sel in speakers.items():
+        if not isinstance(sel, dict):
+            continue
+        if str(sel.get("mode") or "autodetect").lower() != "select":
+            continue
+        g = sel.get("gender")
+        if g in ("male", "female"):
+            gender_overrides[str(sid)] = g
+        v = sel.get("voice")
+        if v:
+            ov: Dict[str, Any] = {"voice": str(v)}
+            if sel.get("engine"):
+                ov["engine"] = str(sel["engine"])
+            voice_overrides[str(sid)] = ov
+
+    cast = {"gender_overrides": gender_overrides,
+            "speaker_voice_overrides": voice_overrides}
+    try:
+        (_Path(view.root) / "cast.json").write_text(_json.dumps(cast, indent=2))
+    except OSError as e:
+        raise HTTPException(500, f"could not write cast.json: {e}") from None
+
+    launch = _launch_rerun(view.job_id, _Path(view.root), flag="--cast")
+    log.info("cast: %s queued post-MT (gender=%d voice=%d forced)",
+             view.job_id, len(gender_overrides), len(voice_overrides))
+    return {"job_id": view.job_id, "status": "queued",
+            "gender_overrides": gender_overrides,
+            "speaker_voice_overrides": voice_overrides, "rerun": launch}
+
+
+@router.post("/api/jobs/{job_id}/revert")
 def revert_edits(job_id: str,
                  body: Optional[Dict[str, Any]] = Body(None)) -> Dict[str, Any]:
     """Undo recorded per-segment edits (all of them, or only `segments`).
@@ -1245,11 +1332,103 @@ def revert_edits(job_id: str,
 
 
 # ---------------------------------------------------------------------------
+# edit history
+# ---------------------------------------------------------------------------
+
+@router.get("/api/jobs/{job_id}/history")
+def get_edit_history(job_id: str) -> Dict[str, Any]:
+    """Every applied edit, oldest first, with what it changed and when.
+
+    Reads ``<job>/edits/edit_*.json`` (the committed journal) and the
+    ``mt/versions/`` directory (transcript snapshots). The pending set and
+    the current run state are included so the UI can say whether the latest
+    output is stale.
+    """
+    root = DATA_DIR / "jobs" / job_id.strip("/")
+    if not root.is_dir():
+        raise HTTPException(404, f"Job not found: {job_id}")
+
+    edits_dir = root / "edits"
+    records: List[Dict[str, Any]] = []
+    for path in sorted(edits_dir.glob("edit_*.json")) if edits_dir.is_dir() else []:
+        doc = _read_json(path) or {}
+        result = doc.get("result") or {}
+        ops_raw = doc.get("ops") or []
+        ops_summary = []
+        for op in ops_raw:
+            name = op.get("op", "unknown")
+            scope = op.get("scope") or {}
+            target = (scope.get("speaker")
+                      or (", ".join(scope["segments"][:3])
+                          + ("…" if len(scope.get("segments", [])) > 3 else "")
+                          if scope.get("segments") else None)
+                      or ("whole dub" if scope.get("all") else None)
+                      or "—")
+            ops_summary.append({"op": name, "target": target,
+                                "params": op.get("params") or {}})
+
+        records.append({
+            "file": path.name,
+            "index": len(records),
+            "nlq": doc.get("nlq") or None,
+            "parsed_by": doc.get("parsed_by") or None,
+            "ops": ops_summary,
+            "dirty_stages": list(result.get("dirty_stages") or []),
+            "warnings": list(result.get("warnings") or []),
+            "speaker_voice_overrides": result.get("speaker_voice_overrides") or {},
+            "applied_count": result.get("applied_count")
+                             or len(result.get("applied") or []),
+            "mtime": datetime.fromtimestamp(
+                path.stat().st_mtime, tz=timezone.utc
+            ).isoformat(timespec="seconds") if path.exists() else None,
+        })
+
+    # Transcript version snapshots
+    versions_dir = root / "mt" / "versions"
+    snapshots: List[Dict[str, str]] = []
+    if versions_dir.is_dir():
+        for vf in sorted(versions_dir.iterdir()):
+            if not vf.name.endswith(".json"):
+                continue
+            parts = vf.stem.rsplit(".", 1)
+            producer = parts[-1] if len(parts) > 1 else "unknown"
+            snapshots.append({
+                "file": vf.name,
+                "producer": producer,
+                "mtime": datetime.fromtimestamp(
+                    vf.stat().st_mtime, tz=timezone.utc
+                ).isoformat(timespec="seconds"),
+            })
+
+    # Pending state — so the UI can mark the output as outdated
+    pending = _read_json(_pending_path(root)) or {}
+    has_pending = bool(pending.get("ops") or pending.get("edits"))
+
+    # Current run state
+    progress_file = root / "progress.json"
+    is_running = False
+    if progress_file.is_file():
+        pj = _read_json(progress_file) or {}
+        st = (pj.get("state") or "").lower()
+        is_running = st in ("running", "queued")
+
+    return {
+        "job_id": job_id,
+        "edits": records,
+        "snapshots": snapshots,
+        "has_pending": has_pending,
+        "is_running": is_running,
+        "outdated": has_pending and not is_running,
+    }
+
+
+# ---------------------------------------------------------------------------
 # launching the re-render
 # ---------------------------------------------------------------------------
 
-def _launch_rerun(job_id: str, root: Path) -> Dict[str, Any]:
-    """`scripts/ui_run_job.sh <job_id> --rerun`, detached.
+def _launch_rerun(job_id: str, root: Path, *, flag: str = "--rerun"
+                  ) -> Dict[str, Any]:
+    """`scripts/ui_run_job.sh <job_id> <flag>`, detached (`--rerun` or `--cast`).
 
     Goes through the shell launcher rather than calling `python -m ui.runner`
     directly, for one reason: **LD_PRELOAD**. A voice change dirties the
@@ -1272,14 +1451,14 @@ def _launch_rerun(job_id: str, root: Path) -> Dict[str, Any]:
     logf = root / "run.log"
     launcher = REPO_ROOT / "scripts" / "ui_run_job.sh"
     if launcher.is_file():
-        cmd = [str(launcher), job_id, "--rerun"]
+        cmd = [str(launcher), job_id, flag]
     else:
         # Fall back rather than refuse, but say so: without the launcher the
         # preload is missing and a lip-sync re-render may fail oddly.
         log.warning("%s is missing; launching ui.runner directly, WITHOUT "
                     "LD_PRELOAD — a lip-sync re-render may fail on the "
                     "cv2/insightface import-order trap", launcher)
-        cmd = [sys.executable, "-m", "ui.runner", job_id, "--rerun"]
+        cmd = [sys.executable, "-m", "ui.runner", job_id, flag]
     try:
         logf.parent.mkdir(parents=True, exist_ok=True)
         fh = open(logf, "a", buffering=1)
@@ -1321,7 +1500,7 @@ def _launch_rerun(job_id: str, root: Path) -> Dict[str, Any]:
 SCRIPT_OPS = ("set_text",)
 
 
-@router.post("/api/jobs/{job_id}/script", dependencies=[Depends(basic_auth)])
+@router.post("/api/jobs/{job_id}/script")
 def stage_script(job_id: str, body: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
     """Stage hand-edited lines and price the re-render.
 
@@ -1442,4 +1621,81 @@ def stage_script(job_id: str, body: Dict[str, Any] = Body(...)) -> Dict[str, Any
     _tracing.flush()
     log.info("script: staged %d line edit(s) for %s -> %s",
              len(ops), view.job_id, payload["dirty_stages"])
+    return payload
+
+
+# ---------------------------------------------------------------------------
+# mute / unmute cue  (user op, no agent)
+# ---------------------------------------------------------------------------
+
+@router.post("/api/jobs/{job_id}/script/mute")
+def stage_mute(job_id: str, body: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
+    """Stage a mute_cue directly — a user action, not an agent parse.
+
+    Body: ``{"segment_id": "SEG_0003"}``.
+
+    A second mute on the same cue replaces the first rather than stacking,
+    and the corresponding prior turn is dropped, so the staged list never
+    shows the same mute twice.
+    """
+    view = _open(job_id)
+    sid = str(body.get("segment_id") or "").strip()
+    if not sid:
+        raise HTTPException(422, "segment_id is required")
+    merged = _read_json(view.merged_json) or {}
+    known = {str(s.get("id")): s for s in (merged.get("segments") or [])}
+    if not known:
+        raise HTTPException(409, "this job has no segments to mute yet")
+    if sid not in known:
+        raise HTTPException(422, f"no segment {sid!r}")
+
+    op = E.EditOp(op="mute_cue", scope=E.Scope(segments=[sid]),
+                  params={}, note=f"UI: mute {sid}")
+
+    # Merge with existing pending, dedup same-segment mute_cue.
+    prior = _read_json(_pending_path(view.root))
+    turns: List[Dict[str, Any]] = []
+    prior_ops: List[E.EditOp] = []
+    if isinstance(prior, dict):
+        turns = [t for t in (prior.get("turns") or []) if isinstance(t, dict)]
+        try:
+            prior_ops = [E.EditOp.from_dict(o) for o in (prior.get("ops") or [])]
+        except E.EditError:
+            prior_ops = []
+
+    def _same_mute(raw: Any) -> bool:
+        if not isinstance(raw, dict):
+            return False
+        return (raw.get("op") == "mute_cue"
+                and ((raw.get("scope") or {}).get("segments") or []) == [sid])
+
+    # Drop prior ops and turns that mute the same cue.
+    kept_ops = [o for o in prior_ops if not _same_mute(o.to_dict())]
+    pruned_turns: List[Dict[str, Any]] = []
+    for t in turns:
+        kept_t_ops = [o for o in (t.get("ops") or []) if not _same_mute(o)]
+        if kept_t_ops:
+            pruned_turns.append({**t, "ops": kept_t_ops})
+
+    all_ops = kept_ops + [op]
+    prev = _preview(view, all_ops)
+    payload = _payload(view.job_id, [], all_ops, prev)
+    seg = known[sid]
+    cue_no = None
+    # Find cue number for the message.
+    for idx, s in enumerate(sorted(merged.get("segments") or [],
+                                   key=lambda x: float(x.get("start") or 0))):
+        if str(s.get("id")) == sid:
+            cue_no = idx + 1
+            break
+    label = f"cue #{cue_no}" if cue_no else sid
+    payload["turns"] = pruned_turns + [{
+        "at": _now(),
+        "message": f"Muted {label}",
+        "source": "script",
+        "ops": [op.to_dict()],
+    }]
+    _write_atomic(_pending_path(view.root), payload)
+    log.info("mute: staged mute_cue on %s for %s -> %s",
+             sid, view.job_id, payload["dirty_stages"])
     return payload

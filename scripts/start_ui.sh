@@ -3,8 +3,10 @@
 # libstdc++ preload instead of needing either done by hand.
 #
 #   scripts/start_ui.sh                    # 127.0.0.1:7861
-#   scripts/start_ui.sh --host 0.0.0.0     # needs DUBBING_UI_USER/PASS in .env
 #   scripts/start_ui.sh --port 7900
+#
+# There is NO auth (removed 2026-10-25) -- `--host 0.0.0.0` exposes every
+# route, including the ones that start GPU jobs. Use the SSH tunnel instead.
 #
 # Replaces "started by hand" (README/CLAUDE.md's old `conda activate dubbing;
 # python ui/server.py`), which is how this host once ran the server from

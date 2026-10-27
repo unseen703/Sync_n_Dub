@@ -57,6 +57,9 @@ export const createJob: typeof live.createJob = mockWrites ? mock.createJob : li
 export const uploadVideo: typeof live.uploadVideo =
   mockWrites ? mock.uploadVideo : live.uploadVideo;
 
+// Edit history — read only, no mock needed.
+export const getEditHistory = live.getEditHistory;
+
 // The agent routes are read/stage only — `agentSend` writes `pending.json`
 // and nothing else, so there is no mock: a staged plan that did not stage
 // is exactly the kind of false success the mock chips exist to flag.
@@ -75,6 +78,8 @@ export const stageEdits: typeof live.stageEdits = mockWrites ? mock.stageEdits :
 // has no notion of per-segment text, and silently accepting an edit that
 // goes nowhere is worse in a mocked UI than the call simply failing.
 export const stageScript = live.stageScript;
+// Direct mute — no agent involved, deduped on the server.
+export const muteCue = live.muteCue;
 export const discardEdits: typeof live.discardEdits = mockWrites
   ? mock.discardEdits
   : live.discardEdits;
@@ -90,6 +95,13 @@ export const setSpeakerLabel: typeof live.setSpeakerLabel = mockWrites
 // green button against a server that would refuse.
 export const getLipsyncReadiness = live.getLipsyncReadiness;
 export const startLipsync = live.startLipsync;
+// The cast gate. Live like lip-sync: it launches the post-MT render, so a
+// mocked "started" would be the same false success.
+export const castJob = live.castJob;
 export const getEnhanceReadiness = live.getEnhanceReadiness;
 export const getEnhanceStatus = live.getEnhanceStatus;
 export const startEnhance = live.startEnhance;
+// The ASD review video. Live: it renders a real file the operator downloads,
+// so a mocked "done" with no mp4 would be the same false success as lip-sync.
+export const getReviewVideo = live.getReviewVideo;
+export const makeReviewVideo = live.makeReviewVideo;

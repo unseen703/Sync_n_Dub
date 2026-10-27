@@ -56,6 +56,58 @@ def main() -> int:
                          "its own face-detection smoothing, so the join can "
                          "show as a one-frame mouth jump; 1 is cleaner for a "
                          "final render.")
+    ap.add_argument("--inference-steps", type=int, default=None,
+                    help="diffusion denoising steps. LatentSync only -- the "
+                         "registry drops it for models that do not take it. "
+                         "The adapter's own default is 20; 10 halves the UNet "
+                         "passes and so roughly halves wall time, because "
+                         "LatentSync is UNet-bound rather than startup-bound.")
+    ap.add_argument("--deepcache", action="store_true",
+                    help="LatentSync only. Reuse the UNet's deep-block output "
+                         "between denoising steps, recomputing it every 3rd. "
+                         "Costs ~20 MiB of VRAM and nothing in host RAM. It "
+                         "attacks the same per-step cost as --inference-steps, "
+                         "so the two MULTIPLY: at 10 steps only 4 full passes "
+                         "survive. Compare against the plain run before "
+                         "trusting it on a final render.")
+    ap.add_argument("--memory-efficient", action="store_true",
+                    help="LatentSync only. Composite the rendered faces "
+                         "straight into the encoder instead of building the "
+                         "whole output clip in RAM first. Peak host memory "
+                         "per shard drops roughly 18 GB -> 9 GB at 1080p. "
+                         "The pixels are IDENTICAL -- unlike the speed knobs "
+                         "this trades nothing away.")
+    ap.add_argument("--max-segment-s", type=float, default=None,
+                    help="Cap how much video is resident at once. Longer clips "
+                         "are cut into pieces of seg/num_gpus each and rendered "
+                         "one warm worker per GPU -- the model loads once per "
+                         "card, and the pieces are sized so the cards running "
+                         "together hold ~seg's worth of frames, not more. "
+                         "run_lipsync's own default is 60, measured at 1080p. A "
+                         "4K frame is 23.7 MiB against 1080p's 5.9, so the same "
+                         "60s costs 4x the RAM -- use 30 or less on a 2160p "
+                         "source.")
+    ap.add_argument("--max-height", type=int, default=1080,
+                    help="Downscale source and dub to this many scanlines "
+                         "before rendering. A CEILING, never an upscale, so "
+                         "1080p and below pass through untouched. 0 disables. "
+                         "The lip-sync models rebuild the mouth at 256x256 "
+                         "regardless, so a 4K source spends 4x the decode, "
+                         "face-detection, compositing and encode cost to "
+                         "carry pixels the UNet never sees. Matches the "
+                         "ceiling wav2lip already applies.")
+    ap.add_argument("--targets", default=None,
+                    help="Per-frame face targets .npz (see "
+                         "backend.lipsync_targets.build_targets). LatentSync "
+                         "only. Decides WHICH face is animated: without it "
+                         "the stock detector takes the largest face per "
+                         "frame, so on a two-person shot it can animate the "
+                         "listener and flip between them. Sliced per shard "
+                         "and per segment automatically. Coordinates may be "
+                         "in a different resolution than the render -- the "
+                         "geometry is recorded in the file and scaled on "
+                         "read, so targets built on a 4K source drive a "
+                         "1080p render correctly.")
     a = ap.parse_args()
 
     job = ROOT / "data/jobs" / a.job_id
@@ -77,6 +129,46 @@ def main() -> int:
         if not p.is_file():
             log.error("missing: %s", p)
             return 2
+
+    # Resolution ceiling, applied ONCE to the whole clip rather than per
+    # shard: the shards are cut from these files, so capping here means one
+    # ffmpeg pass instead of one per shard, and every later stage -- decode,
+    # face detection, the compositing warp, the final encode -- sees the
+    # smaller frame. `cap_dims` is wav2lip's; importing it keeps the two
+    # models' ceilings from drifting apart.
+    if a.max_height and a.max_height > 0:
+        from models.lipsync.wav2lip_adapter import cap_dims
+        from backend.lipsync import _video_dims
+
+        dims = _video_dims(src)
+        if dims and dims[1] > a.max_height:
+            capped = cap_dims(dims, a.max_height)
+            log.info("capping %dx%d -> %dx%d (%.1fx fewer pixels per frame)",
+                     dims[0], dims[1], capped[0], capped[1],
+                     (dims[0] * dims[1]) / float(capped[0] * capped[1]))
+            cap_dir = job / "clips"
+            cap_dir.mkdir(parents=True, exist_ok=True)
+            ff = _ffmpeg_bin() or "ffmpeg"
+            scaled = []
+            for p in (src, dub):
+                out_p = cap_dir / f"{p.stem}.{capped[1]}p{p.suffix}"
+                if not out_p.is_file():
+                    subprocess.run(
+                        [ff, "-y", "-hide_banner", "-loglevel", "error",
+                         "-i", str(p),
+                         "-vf", f"scale={capped[0]}:{capped[1]}:flags=lanczos",
+                         "-c:v", "libx264", "-preset", "fast", "-crf", "18",
+                         "-pix_fmt", "yuv420p",
+                         "-c:a", "aac", "-ar", "48000", "-ac", "2",
+                         "-b:a", "192k", str(out_p)], check=True)
+                    log.info("  wrote %s", out_p.name)
+                else:
+                    log.info("  reusing %s", out_p.name)
+                scaled.append(out_p)
+            src, dub = scaled
+        elif dims:
+            log.info("source is %dx%d, at or under the %dp ceiling -- "
+                     "no downscale", dims[0], dims[1], a.max_height)
 
     s_n, d_n = _frame_count(src), _frame_count(dub)
     log.info("source %s: %d frames", src.name, s_n)
@@ -108,9 +200,53 @@ def main() -> int:
     t0 = time.time()
     out_dir = Path(a.out_dir) if a.out_dir else (job / "lipsync")
     out_dir.mkdir(parents=True, exist_ok=True)
+    ls_kwargs = {}
+    if a.inference_steps is not None:
+        ls_kwargs["inference_steps"] = a.inference_steps
+        log.info("inference_steps=%d (adapter default is 20)",
+                 a.inference_steps)
+    if a.deepcache:
+        ls_kwargs["enable_deepcache"] = True
+        log.info("deepcache=ON (full UNet pass every 3rd step)")
+    if a.memory_efficient:
+        ls_kwargs["memory_efficient"] = True
+        log.info("memory_efficient=ON (compositing streams into the encoder)")
+
+    seg_kwargs = {}
+    if a.max_segment_s is not None:
+        seg_kwargs["max_segment_s"] = a.max_segment_s
+        log.info("max_segment_s=%.0f (run_lipsync default is 60)",
+                 a.max_segment_s)
+    if a.targets:
+        tp = Path(a.targets).resolve()
+        if not tp.is_file():
+            log.error("targets file not found: %s", tp)
+            return 2
+        # Report what it covers BEFORE the render: a targets file that does
+        # not line up with this clip falls back to stock detection silently
+        # by design, and "it ran" would then look identical to "it animated
+        # the right face".
+        from backend.lipsync_targets import load_targets_payload
+        tpay = load_targets_payload(tp)
+        if tpay is None:
+            log.error("targets file unreadable: %s", tp)
+            return 2
+        import numpy as _np
+        _ft = _np.asarray(tpay["frame_track"])
+        log.info("targets: %s -- %d frame(s), %d targeted, %d run(s), "
+                 "built at %dx%d", tp.name, _ft.shape[0],
+                 int((_ft >= 0).sum()), int(_np.asarray(tpay["run_start"]).sum()),
+                 int(tpay["width"]), int(tpay["height"]))
+        if _ft.shape[0] != s_n:
+            log.warning("targets cover %d frame(s) but the source has %d; "
+                        "pieces whose slice does not line up will render "
+                        "with stock detection", _ft.shape[0], s_n)
+        seg_kwargs["targets_npz"] = tp
+
     r = run_lipsync(merged, model=a.model, source_video=src,
                     driving_audio=wav, pre_muxed_video=dub,
-                    out_dir=out_dir, num_gpus=a.gpus)
+                    out_dir=out_dir, num_gpus=a.gpus,
+                    lipsync_kwargs=ls_kwargs or None, **seg_kwargs)
     dt = time.time() - t0
 
     out = Path(r.out_video) if r.out_video else None

@@ -32,6 +32,7 @@ export function FailureCard({
   cancelled: boolean;
 }) {
   const setNewJobOpen = useStore((s) => s.setNewJobOpen);
+  const admin = useStore((s) => s.mode === 'admin');
 
   if (cancelled) {
     return (
@@ -70,7 +71,10 @@ export function FailureCard({
         </Button>
       </div>
 
-      {failure.raw ? (
+      {/* The sentence above is for everyone; the traceback line is for
+          whoever is going to read the log file, so it rides with admin
+          mode. `ui/errors.py` already made the recognised case readable. */}
+      {failure.raw && admin ? (
         <Collapsible.Root className="mt-3 border-t border-danger/25 pt-2.5">
           <Collapsible.Trigger
             className="group flex items-center gap-1.5 text-[12px] text-ink3

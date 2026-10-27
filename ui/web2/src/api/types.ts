@@ -37,7 +37,7 @@ export interface Stage {
   deferred?: boolean;
 }
 
-/** One pill in the ribbon. `ui/progress.py::PHASE_GROUPS` sets the order. */
+/** One pill in the ribbon. `ui/progress.py::PHASE_GROUPS` sets the four groups. */
 export interface Phase {
   id: string;
   label: string;
@@ -54,9 +54,31 @@ export interface Phase {
 export interface Milestones {
   video_ready: boolean;
   diarization_done: boolean;
+  /**
+   * Phase one stopped after MT and is waiting for the operator to set gender
+   * and voice per speaker. True until the cast run produces the mix. Gates
+   * the "Cast & continue" step in the speaker table.
+   */
+  awaiting_cast: boolean;
   speakers_ready: boolean;
   mix_done: boolean;
   lipsync_ready: boolean;
+}
+
+/** `POST /api/jobs/{id}/cast` reply. */
+export interface CastStarted {
+  job_id: string;
+  status: string;
+  gender_overrides: Record<string, string>;
+  speaker_voice_overrides: Record<string, { voice: string; engine?: string }>;
+}
+
+/** One speaker's choice in the cast gate. `autodetect` carries no override. */
+export interface CastSelection {
+  mode: 'autodetect' | 'select';
+  gender?: string | null;
+  voice?: string | null;
+  engine?: string | null;
 }
 
 /**
@@ -131,6 +153,7 @@ export interface Media {
     original: MediaRef | null;
     lipsync: MediaRef | null;
     dubbed_no_lipsync: MediaRef | null;
+    lipsync_warning: string | null;
   };
   audio: {
     original: MediaRef | null;
@@ -366,6 +389,7 @@ export interface ProbeResult {
    * lip-syncs at submit any more.
    */
   max_lipsync_s: number;
+  detected_source_language?: { code: string; language?: string; method?: string };
 }
 
 /** `POST /api/uploads` — a local file, probed with ffprobe not yt-dlp. */
@@ -381,6 +405,7 @@ export interface UploadResult {
   estimates: Record<string, RuntimeEstimate>;
   lipsync_estimates: Record<string, RuntimeEstimate>;
   max_lipsync_s: number;
+  detected_source_language?: { code: string; language?: string; method?: string };
 }
 
 /** One speaker's on-screen face, as ASD attributed it. */
@@ -483,6 +508,7 @@ export interface PendingEdit {
   speaker_id: string;
   voice?: string;
   tone?: string | null;
+  gender?: string;
 }
 
 /** One line of the cost dialog. `gpu` marks the minutes-not-seconds one. */
@@ -632,6 +658,12 @@ export interface AgentParams {
 
 export interface AgentScriptRow {
   id: string;
+  /**
+   * 1-based cue number, start-time-ordered — the `#N` shown in the UI and
+   * the number `backend.edit_agent` accepts in phrases like "cue 5" or
+   * "#5". Server-assigned so the UI and the agent cannot drift.
+   */
+  cue_no: number;
   speaker: string | null;
   start: number;
   end: number;
@@ -687,6 +719,24 @@ export interface AgentAction {
    *  `dirty_from`, so it cannot promise a cheaper render than it causes. */
   replays: string;
   examples: string[];
+  /**
+   * The intent group the edit workspace files this under — "Translation",
+   * "Voice", "Speakers", "Timing & audio", "Lip-sync & video", "Cleanup".
+   * Backend-owned (`backend/edits.py::USER_ACTIONS`) so the grouping cannot
+   * drift from the op registry.
+   */
+  category: string;
+  /** Which selections this op can be aimed at: 'segment' | 'speaker' | 'all'. */
+  scopes: string[];
+  /** One of the curated common actions, shown before "See all actions". */
+  quick: boolean;
+  /**
+   * A scope-agnostic phrasing the UI prefixes with the current selection
+   * ("cue 5: …", "SPEAKER_00: …"), so the user supplies no timestamp or id.
+   * Distinct from `examples`, which carry their own scope and are used as-is
+   * when nothing is selected.
+   */
+  fill: string;
 }
 
 /** A copyable request and what it would do. */
@@ -743,6 +793,48 @@ export interface EnhanceStatus {
   started_at?: number;
 }
 
+// ---------------------------------------------------------------------------
+// edit history — GET /api/jobs/{id}/history
+// ---------------------------------------------------------------------------
+
+export interface EditOpSummary {
+  op: string;
+  target: string;
+  params: Record<string, unknown>;
+}
+
+export interface EditRecord {
+  file: string;
+  index: number;
+  nlq: string | null;
+  parsed_by: string | null;
+  ops: EditOpSummary[];
+  dirty_stages: string[];
+  warnings: string[];
+  speaker_voice_overrides: Record<string, unknown>;
+  applied_count: number;
+  mtime: string | null;
+}
+
+export interface VersionSnapshot {
+  file: string;
+  producer: string;
+  mtime: string;
+}
+
+export interface EditHistory {
+  job_id: string;
+  edits: EditRecord[];
+  snapshots: VersionSnapshot[];
+  has_pending: boolean;
+  is_running: boolean;
+  outdated: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// face restoration — POST /api/jobs/{id}/enhance
+// ---------------------------------------------------------------------------
+
 export interface EnhanceOptions {
   /** 0..1 blend toward the original. NOT GFPGAN's `weight`, which is inert. */
   strength?: number;
@@ -752,4 +844,22 @@ export interface EnhanceOptions {
   only_center_face?: boolean;
   /** Directory-qualified id from `EnhanceReadiness.renders`. */
   render?: string;
+}
+
+// ---------------------------------------------------------------------------
+// ASD review ("bbox") video — GET/POST /api/jobs/{id}/review-video
+// ---------------------------------------------------------------------------
+
+export interface ReviewVideoStatus {
+  job_id?: string;
+  /** `absent` before the first render; the server treats the FILE as arbiter. */
+  state: 'absent' | 'running' | 'done' | 'failed';
+  ready: boolean;
+  /** `/files/...` path to the rendered mp4, present only once `ready`. */
+  url?: string | null;
+  frames_total?: number;
+  frames_done?: number;
+  threshold?: number;
+  error?: string;
+  updated_at?: number;
 }

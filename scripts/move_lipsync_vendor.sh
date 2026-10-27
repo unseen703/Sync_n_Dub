@@ -105,18 +105,36 @@ fi
 # --- verify ----------------------------------------------------------------
 # The adapters are the thing that has to be right, so ask THEM rather than
 # checking the paths by eye.
+#
+# ASD is checked too, since 2026-10-25. The list above moves TalkNet, so
+# leaving the check at lip-sync meant the one ASD repo this script relocates
+# was the one repo nothing verified afterwards. Light-ASD and LR-ASD are
+# absent from REPOS on purpose -- both are cloned straight to
+# models/asd/vendor/ and neither has ever been in third_party/ -- but they
+# are still checked here, because "did you clone it" is the same question.
 echo "=== what the adapters resolve now:"
 PY="${PY:-/data1/dipak_data/miniconda3/envs/dubbing/bin/python}"
 "$PY" - <<'PYEOF'
 import sys
 sys.path.insert(0, ".")
-from models.lipsync import available_models, get_lipsync
 ok = True
-for m in available_models():
-    a = get_lipsync(m)
-    exists = a.repo_path.exists()
-    ok &= exists
-    print(f"  {m:<14} {'OK ' if exists else 'MISSING'} {a.repo_path}")
+for stage, lister, getter in (
+    ("lipsync", "models.lipsync", "get_lipsync"),
+    ("asd", "models.asd", "get_asd"),
+):
+    mod = __import__(lister, fromlist=["*"])
+    get = getattr(mod, getter)
+    for m in mod.available_models():
+        try:
+            a = get(m)
+        except Exception as e:                       # noqa: BLE001
+            ok = False
+            print(f"  {stage:<8} {m:<14} ERROR   {type(e).__name__}: {e}")
+            continue
+        repo = getattr(a, "repo_path", None)
+        exists = bool(repo and repo.exists())
+        ok &= exists
+        print(f"  {stage:<8} {m:<14} {'OK ' if exists else 'MISSING'} {repo}")
 print("\nall adapters resolved" if ok else "\nSOME ADAPTERS CANNOT FIND THEIR REPO")
 sys.exit(0 if ok else 1)
 PYEOF

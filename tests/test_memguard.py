@@ -118,10 +118,12 @@ def test_there_is_no_watchdog():
 
 # --- the cheap checks around a render -------------------------------------
 
-def test_the_segment_loop_rechecks_between_segments():
-    """A batch check covers the segment that is running. Memory already
-    gone when the NEXT segment starts is a different case, and starting
-    anyway pays for a model load that then has nowhere to go."""
+def test_the_segment_loop_rechecks_memory_before_launch():
+    """The warm workers are spawned once per GPU, so the parent rechecks
+    memory just before launching them -- loading a model per GPU into a host
+    that cannot hold a piece's frames only buys a render killed a minute
+    later. Growth DURING a run is caught per batch inside each worker (the
+    vendored MuseTalk guard and the two driver guards)."""
     src = (REPO / "backend" / "lipsync.py").read_text()
     fn = src[src.index("def _run_lipsync_segmented"):
              src.index("def _run_lipsync_sharded")]

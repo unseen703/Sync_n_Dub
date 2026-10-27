@@ -95,6 +95,9 @@ def probe(url: str) -> Dict[str, Any]:
         "thumbnail_url": info.get("thumbnail"),
         "webpage_url":   info.get("webpage_url") or url,
         "live_status":   info.get("live_status"),
+        "language":      info.get("language"),
+        "original_language": info.get("original_language"),
+        "description":   info.get("description"),
     }
 
 

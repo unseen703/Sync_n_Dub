@@ -758,6 +758,54 @@ holds the incident history.
   mean 0.411 / max 0.798 / 31 of 75 after. The stage never errored — it just
   answered "nobody is speaking" every time, so any archived `assignments.json`
   or on-screen count from an earlier run is stale rather than reusable.
+- **The lip-synced mouth comes back softer than the face around it.**
+  (Moved from README 2026-10-26.) Lip-sync models rebuild the mouth at a
+  small fixed resolution — Wav2Lip **96×96**, MuseTalk 256×256 — and paste
+  it back, so the higher the source resolution, the more visible it is. On
+  a 4K frame with the face at 24% of frame height (~520 px), Wav2Lip's crop
+  is upscaled roughly 5×. MuseTalk gives ~2.7× the linear mouth resolution
+  at 8–21× clip length instead of 3–5×.
+
+  Face restoration was removed on 2026-10-17 (CodeFormer,
+  `--restore codeformer`) and **is back, now as GFPGAN** in
+  `models/restore/`, with `scripts/face_enhance.py` and the UI's enhance
+  routes (`ui/enhance.py`, `ui/routes_enhance.py`). For reference, the old
+  CodeFormer pass measured 386 s on 30 s / 747 frames of 720p (~13×
+  realtime, ~770 MiB VRAM), roughly doubling a Wav2Lip run, and raised
+  detail in a 139×131 face box by +36%.
+- **The 2026-10-17 cleanup pass.** (Moved from README 2026-10-26; the Edge
+  removal is its own entry above.) Each item was verified unreferenced
+  before deletion, and the suite passed either side of it.
+  - **`backend/jobs.py` lost its v1 half** (812 → 387 lines). Layout v1
+    only referenced artifacts in shared `data/<stage>/` folders, archived
+    on 2026-10-11. `python -m backend.jobs` keeps `list` and `show`;
+    `backfill` went with the layout it rebuilt.
+  - **The `pause_aware` stand-in in `backend/timing_advanced.py`** was
+    unreachable once `timing.plan_pause_aware` landed, and was removed with
+    its dead fallback branch.
+  - **Dead definitions** with zero references: `align.asr_result_from_json`,
+    `codemix.CodemixSegment`, `llm.get_client`, `facepick.probe_face_size`,
+    `timing_advanced._percentile` and `._split_groups_at`, and three unused
+    dataclass helpers in `models/faces/base.py`.
+  - **Six shell scripts.** `retry_wav2lip.sh`, `retry_latentsync.sh`,
+    `run_musetalk.sh` and `persistent_lipsync_runner.sh` were one script
+    pinned to a stem whose media the archive deleted;
+    `scripts/run_lipsync.sh <model> <stem>` replaces them.
+    `restore_nag_only.sh` and `fetch_nag.sh` were finished one-offs.
+  - **`attach_voice_references` cried wolf.** It logged "ECAPA similarity
+    term is INACTIVE" whenever one call attached zero clips — including
+    when all 45 were already attached by an earlier call. It now reports
+    how many voices *have* a clip.
+  - **`requirements.txt` pinned `onnxruntime`, the CPU build.** Installed
+    beside `onnxruntime-gpu`, the CPU build wins silently
+    (`get_available_providers()` still lists CUDA): 55.9 ms/infer versus
+    6.0 ms. Now `onnxruntime-gpu`.
+  - **`models/asd/ts_talknet_adapter.py` didn't import.** The 2026-10-11
+    TalkNet fix split `_crop_track` and never updated this sibling, so
+    `get_asd("ts_talknet")` raised the misleading "clone the upstream repo"
+    error. It had also missed the int16 PCM rescale (entry above). Both
+    fixed; still untested end-to-end because `third_party/TS-TalkNet` isn't
+    cloned here.
 
 ---
 

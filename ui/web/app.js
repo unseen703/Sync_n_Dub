@@ -645,23 +645,42 @@ const Clips = ({ job }) => {
               <span class="text-xs text-slate-400">showing ${visible.length} of ${segs.length}</span>
             </div>
             <div class="space-y-2">
-              ${visible.map((s, i) => html`
+              ${visible.map((s, i) => {
+                const cueNo  = s.cue_no ?? (i + 1);
+                const cueRef = `cue ${cueNo}`;
+                return html`
                 <div key=${s.id} class="rounded-xl border border-line/60 bg-slate-900/40 px-4 py-3">
                   <div class="flex items-center gap-3">
-                    <div class="font-mono text-sm text-slate-400 w-8">#${i + 1}</div>
+                    <!-- big cue number — this is what the edit agent accepts as "cue N" -->
+                    <div class="shrink-0 flex flex-col items-center justify-center w-14 py-1 rounded-lg bg-slate-800/70 border border-line/60">
+                      <div class="text-[10px] uppercase tracking-widest text-slate-500 leading-none">cue</div>
+                      <div class="font-mono text-xl font-semibold text-slate-100 leading-tight">#${cueNo}</div>
+                    </div>
+                    <button
+                      onClick=${() => copyUrl(cueRef)}
+                      title="Copy '${cueRef}' — paste into an edit-agent request"
+                      class="font-mono text-[10px] px-1.5 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-sky-300"
+                      >${s.id}</button>
                     <button onClick=${() => { if (videoRef.current) { videoRef.current.currentTime = s.start; videoRef.current.play().catch(() => {}); } }}
                       class="font-mono text-sm text-slate-200 hover:text-sky-300">
                       ${s.start.toFixed(1)}s – ${s.end.toFixed(1)}s
                     </button>
                     <div class="text-xs text-slate-500 w-14">${(s.end - s.start).toFixed(1)}s</div>
                     ${s.tts_url && html`<audio controls src=${s.tts_url} class="flex-1 h-8 min-w-0"></audio>`}
+                    <button
+                      onClick=${() => copyUrl(cueRef)}
+                      title="Copy '${cueRef}' to clipboard"
+                      class="shrink-0 text-[11px] px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-sky-300 inline-flex items-center gap-1">
+                      <svg class="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                      copy ref
+                    </button>
                   </div>
                   <div class="grid grid-cols-1 md:grid-cols-2 gap-3 mt-2 text-sm">
                     <div><span class="text-[10px] uppercase tracking-widest text-sky-300">Original</span><div>${s.src_text}</div></div>
                     <div><span class="text-[10px] uppercase tracking-widest text-violet-300">Translated</span><div>${s.final_text || s.mt_text}</div></div>
                   </div>
                 </div>
-              `)}
+              `;})}
             </div>
             ${segs.length > 10 && html`
               <div class="flex justify-center mt-4">

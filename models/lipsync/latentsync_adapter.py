@@ -54,7 +54,8 @@ from pathlib import Path
 from typing import Optional
 
 from backend.media_io import probe_video as _probe_video
-from .base import BaseLipSync, LipSyncRequest, LipSyncResult, resolve_env_python, resolve_vendor_repo
+from .base import (BaseLipSync, LipSyncRequest, LipSyncResult,
+                   resolve_env_python, resolve_vendor_repo, run_streaming)
 
 log = logging.getLogger(__name__)
 
@@ -120,6 +121,9 @@ class LatentSyncSync(BaseLipSync):
         inference_steps: int = 20,
         guidance_scale: float = 2.0,
         seed: int = 1247,
+        enable_deepcache: bool = False,
+        memory_efficient: bool = True,
+        targets_npz: Optional[str] = None,
         cuda_device: Optional[int] = None,
     ):
         super().__init__(device=device, cuda_device=cuda_device)
@@ -144,6 +148,36 @@ class LatentSyncSync(BaseLipSync):
         self.inference_steps = inference_steps
         self.guidance_scale = guidance_scale
         self.seed = seed
+        # Upstream wires DeepCache in `scripts/inference.py` but leaves it
+        # off: a full UNet pass every `cache_interval` (3) steps, the deep
+        # blocks reused in between. It attacks the SAME per-step cost as
+        # `inference_steps`, so the two multiply rather than add -- at 10
+        # steps it leaves only 4 full passes, which is where the mouth
+        # starts to soften. Pair it with 20 steps, not 10, unless the
+        # comparison says otherwise.
+        self.enable_deepcache = bool(enable_deepcache)
+        # Upstream builds the whole composited clip in RAM -- a list of
+        # full-resolution frames, then `np.stack` of that list, while the
+        # decoded source is still alive. Three copies, ~14 GB on a 750-frame
+        # 1080p shard. With this on, the frames are composited straight into
+        # the encoder and only the source copy remains (~4.7 GB). The PIXELS
+        # ARE IDENTICAL -- it changes when frames are freed, not how they are
+        # drawn -- so unlike the speed knobs it costs nothing to leave on.
+        self.memory_efficient = bool(memory_efficient)
+        # Per-frame face targets. CLAUDE.md records "lip-sync adapters do not
+        # choose the SPEAKING face" as a known rough edge, and LatentSync is
+        # one of the adapters that ignored `coord_list` rather than pretending
+        # to honour it. This is how it stops ignoring it: the targets carry
+        # 106 landmarks per frame, which is the ENTIRE contribution the stock
+        # InsightFace pass makes, so supplying them reproduces the stock warp
+        # while choosing the face.
+        #
+        # Indexed against the clip THIS adapter is handed, not the whole
+        # video -- `backend.lipsync` renumbers frames from zero for every
+        # shard and segment, so the caller slices before passing. The
+        # pipeline refuses a length mismatch rather than animating the wrong
+        # frames.
+        self.targets_npz = str(targets_npz) if targets_npz else None
 
     def _ensure_loaded(self) -> None:
         if self._loaded:
@@ -210,7 +244,19 @@ class LatentSyncSync(BaseLipSync):
             "--inference_steps", str(self.inference_steps),
             "--guidance_scale", str(self.guidance_scale),
             "--seed", str(self.seed),
+            "--temp_dir", str((out.parent / f"_temp_gpu{self.cuda_device}").resolve()),
         ]
+        if self.enable_deepcache:
+            cmd.append("--enable_deepcache")
+        if self.memory_efficient:
+            cmd.append("--memory_efficient")
+        # `request.extra["targets_npz"]` wins over the constructor kwarg: the
+        # sharded and segmented paths cut the clip and hand each piece its own
+        # slice, so the per-request value is the one indexed against the frames
+        # this call will actually see.
+        targets = (request.extra or {}).get("targets_npz") or self.targets_npz
+        if targets:
+            cmd += ["--targets_npz", str(Path(targets).resolve())]
         log.info("latentsync[gpu=%s]: %s", self.cuda_device, " ".join(cmd))
         proc = subprocess.run(cmd, cwd=str(self.repo_path),
                               env=self._subprocess_env(),
@@ -230,8 +276,125 @@ class LatentSyncSync(BaseLipSync):
                    "resolution": self.expected_resolution,
                    "unet_config": self.unet_config_path,
                    "inference_steps": self.inference_steps,
-                   "guidance_scale": self.guidance_scale},
+                   "guidance_scale": self.guidance_scale,
+                   "deepcache": self.enable_deepcache,
+                   "memory_efficient": self.memory_efficient},
         )
+
+    def sync_many(self, requests):
+        """Render many pieces in ONE process, loading the diffusion stack once.
+
+        The vendored `scripts/inference.py` builds the pipeline for a single
+        (video, audio) call, so a segmented render used to reload the whole
+        stack -- the heaviest load of the three models -- per piece. For more
+        than one piece this shells out to `_latentsync_worker.py`, which does
+        the one-time setup once and loops the pieces through the same
+        `pipeline(...)` call. A single piece keeps the proven per-call path
+        unchanged.
+        """
+        if not requests:
+            return []
+        if len(requests) == 1:
+            return [self.sync(requests[0])]
+        self._ensure_loaded()
+
+        import json
+        import tempfile
+
+        worker = Path(__file__).resolve().parent / "_latentsync_worker.py"
+        manifest = []
+        for request in requests:
+            out = Path(request.out_path)
+            out.parent.mkdir(parents=True, exist_ok=True)
+            # The per-request targets win over the constructor kwarg: the
+            # caller slices the targets per piece, so the per-request value is
+            # the one indexed against the frames this piece will see.
+            targets = (request.extra or {}).get("targets_npz") or self.targets_npz
+            manifest.append({
+                "video": str(Path(request.video).resolve()),
+                "audio": str(Path(request.audio).resolve()),
+                "out": str(out.resolve()),
+                # Own temp dir per piece so sequential pieces cannot stomp each
+                # other's intermediates.
+                "temp_dir": str((out.parent /
+                                 f"_temp_gpu{self.cuda_device}_{out.stem}").resolve()),
+                "targets_npz": str(Path(targets).resolve()) if targets else None,
+            })
+
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as mf:
+            json.dump(manifest, mf)
+            mf_path = mf.name
+
+        cmd = [
+            self.python_bin, str(worker),
+            "--repo", str(self.repo_path.resolve()),
+            "--manifest", mf_path,
+            "--unet_config_path", self.unet_config_path,
+            "--inference_ckpt_path", self.unet_ckpt_path,
+            "--inference_steps", str(self.inference_steps),
+            "--guidance_scale", str(self.guidance_scale),
+            "--seed", str(self.seed),
+        ]
+        if self.enable_deepcache:
+            cmd.append("--enable_deepcache")
+        if self.memory_efficient:
+            cmd.append("--memory_efficient")
+        log.info("latentsync[gpu=%s]: warm worker, %d piece(s): %s",
+                 self.cuda_device, len(requests), " ".join(cmd))
+        try:
+            # Stream live: the worker prints `[worker] start/ok/fail` per piece,
+            # so progress lands in run.log as each piece runs rather than in one
+            # block when the whole batch finishes.
+            proc = run_streaming(cmd, cwd=str(self.repo_path),
+                                 env=self._subprocess_env(), log=log,
+                                 tag=f"latentsync[gpu={self.cuda_device}]")
+        finally:
+            Path(mf_path).unlink(missing_ok=True)
+
+        # Per-piece failure reasons the worker printed, keyed by output path.
+        reasons = {}
+        for line in (proc.stdout or "").splitlines():
+            if line.startswith("[worker] fail "):
+                rest = line[len("[worker] fail "):]
+                path, _, why = rest.partition(" :: ")
+                reasons[path.strip()] = why.strip() or "worker reported failure"
+
+        # A non-zero exit WITHOUT any per-piece reason is the batch dying at
+        # load (bad env, missing checkpoint): attribute it to every piece.
+        batch_err = None
+        if proc.returncode != 0 and not reasons:
+            batch_err = (f"latentsync worker rc={proc.returncode}: "
+                         f"{proc.stdout.strip()[-3000:]}")
+
+        results = []
+        for request in requests:
+            out = Path(request.out_path)
+            key = str(out.resolve())
+            # The file is the arbiter: upstream can exit 0 having written
+            # nothing (CLAUDE.md §1), so a present+non-empty file is success
+            # even if a reason was mis-parsed, and a missing file is failure
+            # even at rc=0.
+            ok = out.is_file() and out.stat().st_size > 0
+            if not ok:
+                err = (reasons.get(key) or batch_err
+                       or f"latentsync produced no output for {out.name}")
+                results.append(LipSyncResult(
+                    model_name=f"latentsync-{self.version}", out_video=out,
+                    duration_s=0.0, fps=0.0, error=err))
+                continue
+            fps, dur = _probe_video(out)
+            results.append(LipSyncResult(
+                model_name=f"latentsync-{self.version}", out_video=out,
+                duration_s=dur, fps=fps,
+                extra={"licence": self.licence, "version": self.version,
+                       "resolution": self.expected_resolution,
+                       "unet_config": self.unet_config_path,
+                       "inference_steps": self.inference_steps,
+                       "guidance_scale": self.guidance_scale,
+                       "deepcache": self.enable_deepcache,
+                       "memory_efficient": self.memory_efficient,
+                       "warm_batch": len(requests)}))
+        return results
 
 
 

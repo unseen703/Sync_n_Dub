@@ -71,7 +71,7 @@ export function SpeakerNameField({ speaker }: { speaker: Speaker }) {
           e.stopPropagation();
         }}
         placeholder={speaker.id}
-        className="field h-7 w-44 rounded-lg px-2 text-[13px]"
+        className="field h-8 w-44 rounded-lg px-2 text-[15px]"
       />
     );
   }
@@ -91,8 +91,8 @@ export function SpeakerNameField({ speaker }: { speaker: Speaker }) {
       >
         <span
           className={cn(
-            'truncate text-[13px]',
-            speaker.label ? 'font-medium text-ink' : 'font-mono text-[12.5px] text-ink3',
+            'truncate text-[15px]',
+            speaker.label ? 'font-semibold text-ink' : 'font-mono text-[13px] text-ink3',
             saving && 'opacity-60',
           )}
         >

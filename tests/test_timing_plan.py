@@ -151,8 +151,16 @@ def test_pieces_within_a_segment_do_not_overlap(producer, mini_merged):
 def test_pieces_are_monotone_and_cover_the_clip(producer, mini_merged):
     plan = T.plan(producer, mini_merged)
     import soundfile as sf
-    raws = {s["id"]: float(sf.info(s["tts_raw_audio"]).duration)
-            for s in json.loads(mini_merged.read_text())["segments"]}
+    # The clip a Piece indexes into is the one the MIX will resolve for that
+    # segment, which is not always `tts_raw_audio`: the `warped` producer
+    # pre-stretches each cue and its Pieces address `tts_warped_audio`
+    # instead. Measuring every producer against the raw clip would report
+    # that one as dropping the tail of a file it never referenced.
+    # `mix._build_plan_pieces` picks the clip the same way.
+    raws = {}
+    for s in json.loads(mini_merged.read_text())["segments"]:
+        clip = s.get("tts_warped_audio") or s["tts_raw_audio"]
+        raws[s["id"]] = float(sf.info(clip).duration)
     for sp in plan.segments:
         if not sp.pieces:
             continue

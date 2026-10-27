@@ -87,27 +87,21 @@ def test_every_stage_key_is_grouped_or_deliberately_hidden():
         f"HIDDEN_KEYS if they produce no part of the dub")
 
 
-def test_the_bar_shows_the_eight_named_stages():
-    """The pipeline as a person describes it. Eight, in order, no tree.
+def test_the_bar_shows_the_four_named_stages():
+    """The pipeline as a non-technical user describes it. Four outcome-level
+    stages, in order.
 
     Pinned because the grouping is the one place the UI editorialises about
     the pipeline, and a stage quietly appearing or being renamed changes
     what the whole product looks like it does.
-
-    `Enhance resolution` was added 2026-10-23 by request. It is its own pill
-    rather than a substage of `Lip sync` because it runs on the finished
-    render from any model and costs 2.6x the MuseTalk pass it cleans
-    (1156 s vs 447 s, measured 2026-10-22) -- folding it in would make a lit
-    `Lip sync` mean two different amounts of work.
     """
     assert [label for _id, label, _keys in P.PHASE_GROUPS] == [
-        'Download video', 'Speaker annotation', 'Transcribe', 'Translate',
-        'Speech generation', 'Mix', 'Lip sync', 'Enhance resolution',
+        'Prepare', 'Translate', 'Dub audio', 'Lip-sync',
     ]
 
 
-def test_the_bar_is_always_nine_pills_whatever_the_config():
-    """Eight groups plus `Finished`, identical on every run.
+def test_the_bar_is_always_five_pills_whatever_the_config():
+    """Four groups plus `Finished`, identical on every run.
 
     `_group_phases` used to drop a group with no planned substages, and
     `plan_stages` is config-driven — so a run enabling few optional stages
@@ -115,9 +109,7 @@ def test_the_bar_is_always_nine_pills_whatever_the_config():
     between two runs of the same video. An operator cannot tell "this
     pipeline has no transcribe step" from "the bar is broken".
     """
-    expected = ['Download video', 'Speaker annotation', 'Transcribe',
-                'Translate', 'Speech generation', 'Mix', 'Lip sync',
-                'Enhance resolution', 'Finished']
+    expected = ['Prepare', 'Translate', 'Dub audio', 'Lip-sync', 'Finished']
     for cfg in ({'asr': 'whisperx'},
                 {'asr': 'whisperx', 'mt': 'bodhan'},
                 {'asr': 'bodhan', 'mt': 'bodhan', 'tts': 'bodhan',
@@ -192,9 +184,9 @@ def test_evaluation_stages_stay_off_the_bar():
              for k in P.HIDDEN_KEYS]
     labels = [ph['label'] for ph in P._group_phases(plan)]
     assert 'Checks' not in labels
-    # Eight groups + `Finished`, and nothing else. The QA pass must not
-    # become a tenth pill.
-    assert len(labels) == 9
+    # Four groups + `Finished`, and nothing else. The QA pass must not
+    # become a sixth pill.
+    assert len(labels) == 5
 
 
 # ---------------------------------------------------------------------------

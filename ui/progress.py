@@ -94,33 +94,18 @@ STAGE_LABELS: Dict[str, str] = {
     "1-9a":   "Reusing the earlier run",
 }
 
-#: The pipeline as a person describes it: seven stages, in order, each one a
-#: thing you can picture. The 24 internal markers fold into these.
-#:
-#: This is deliberately NOT a tree. The sub-stages exist (`9f1b: viseme
-#: extraction`) and are still carried per stage for the log, but the UI shows
-#: one bar across these seven and nothing finer — a reader wants to know how
-#: far along the dub is, not which forced aligner is running.
+#: The pipeline as a non-technical user describes it: four outcome-level
+#: stages plus a synthetic Finished pill. The 24 internal markers fold into
+#: these; the substages still travel in each phase for the expandable detail
+#: row, but the ribbon itself shows only this many nodes.
 PHASE_GROUPS: List[tuple] = [
-    ("download",   "Download video",     ("fetch", "cut", "probe", "1", "2",
-                                          "3", "1-9a")),
-    ("speakers",   "Speaker annotation", ("4", "4b", "4c", "5", "6")),
-    ("transcribe", "Transcribe",         ("7", "8")),
-    ("translate",  "Translate",          ("9", "9b", "9c", "9c2")),
-    # 9b1 (content register) and 9b2 (source emotion) both decide HOW the
-    # line will be delivered, so they sit with speech generation rather than
-    # with translation, even though their markers are numbered next to 9b.
-    ("speech",     "Speech generation",  ("9b1", "9b2", "9d", "9e", "9f",
-                                          "9f1", "9f1b", "9f2")),
-    ("mix",        "Mix",                ("9g",)),
-    ("lipsync",    "Lip sync",           ("9h",)),
-    # Face restoration over the finished render. Its own pill rather than a
-    # substage of Lip sync, because it is not part of lip-syncing: it runs on
-    # any render from any model, costs 2.6x the MuseTalk pass it cleans
-    # (1156 s vs 447 s, measured 2026-10-22), and is always a separate act.
-    # Folding it into Lip sync would make a lit "Lip sync" mean two different
-    # amounts of work.
-    ("enhance",    "Enhance resolution", ("9i",)),
+    ("prepare",   "Prepare",    ("fetch", "cut", "probe", "1", "2", "3",
+                                 "1-9a", "4", "4b", "4c", "5", "6",
+                                 "7", "8")),
+    ("translate", "Translate",  ("9", "9b", "9c", "9c2")),
+    ("dub",       "Dub audio",  ("9b1", "9b2", "9d", "9e", "9f",
+                                 "9f1", "9f1b", "9f2", "9g")),
+    ("lipsync",   "Lip-sync",   ("9h", "9i")),
 ]
 
 #: Stages 10a/10b score the ASR and MT against ground-truth subtitles. They
@@ -137,14 +122,10 @@ _GROUP_OF: Dict[str, str] = {
 #: pipeline job read the same way on screen. Without this they all land in a
 #: single meaningless "Other" pill.
 _GROUP_OF.update({
-    "P1_CUT": "download", "P2_FACES": "speakers", "P3_ASD": "speakers",
-    "P4_MIX": "mix", "P5_LIPSYNC_BBOX_PREVIEW": "lipsync",
+    "P1_CUT": "prepare", "P2_FACES": "prepare", "P3_ASD": "prepare",
+    "P4_MIX": "dub", "P5_LIPSYNC_BBOX_PREVIEW": "lipsync",
     "P6_LIPSYNC": "lipsync", "P7_SPLICE": "lipsync", "P8_VERIFY": "lipsync",
-    # Shot segmentation — the clip runner cuts on shot boundaries so it can
-    # lip-sync only single-speaker shots. It is part of working out who is
-    # on screen, not a stage of its own. Present in 11 jobs on disk, and
-    # without this line it rendered as an eighth node labelled "Other".
-    "P5_SEGMENT": "speakers",
+    "P5_SEGMENT": "prepare",
 })
 
 #: Phase names used by `scripts/clip_asd_musetalk_run.py`'s STATUS.json.
@@ -809,12 +790,29 @@ def milestones(job_root: Path, doc: Optional[Dict[str, Any]] = None
         any(job_root.glob(pat))
         for pat in ("final.*.mp4", "*.lipsync.mp4", "*.codeformer.mp4")
     )
+    mix_done = (done("9g", "P4_MIX") or has("mix", "*.wav")
+                or has("audio", "*dub*.wav"))
+
+    # Phase one stopped after MT for the operator to set gender + voice. The
+    # runner stamps `awaiting_cast` on the manifest; gate it on the mix not
+    # existing yet so a stale flag clears itself once the cast run completes
+    # (or a crashed cast leaves the gate up rather than a half-done job).
+    awaiting_cast = False
+    try:
+        import json as _json
+        _mani = job_root / "manifest.json"
+        if _mani.is_file():
+            awaiting_cast = bool(
+                _json.loads(_mani.read_text()).get("awaiting_cast"))
+    except (OSError, ValueError):
+        awaiting_cast = False
+
     return {
         "video_ready":      done("1", "cut", "P1_CUT") or has("videos", "*.mp4"),
         "diarization_done": done("4") or has("diarization", "*.rttm"),
+        "awaiting_cast":    awaiting_cast and not mix_done,
         "speakers_ready":   done("9d") or has("voices", "*"),
-        "mix_done":         done("9g", "P4_MIX") or has("mix", "*.wav")
-                            or has("audio", "*dub*.wav"),
+        "mix_done":         mix_done,
         "lipsync_ready":    (done("9h", "P6_LIPSYNC", "P7_SPLICE") or final_at_root)
                             and (final_at_root or has("lipsync", "*.lipsync*.mp4")),
     }

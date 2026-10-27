@@ -128,6 +128,77 @@ def test_a_per_segment_tone_edit_outranks_the_register(tmp_path, monkeypatch):
                          ("SEG_0002", "educational lecture")]
 
 
+# --- incremental synthesis: a one-cue edit must not re-speak the dub -------
+
+def _run_keep_merged(tmp_path, monkeypatch, merged, vmap):
+    """Run the TTS stage against a PERSISTENT merged.json and return the ids
+    the engine was actually asked to synthesise.
+
+    Unlike `_run`, this does not rewrite the file, so the per-segment
+    signatures the stage writes survive into the next call — which is the
+    whole point of the incremental path.
+    """
+    import backend.tts as T
+    stub = _StubTTS()
+    monkeypatch.setattr(T, "get_tts", lambda *a, **k: stub)
+    monkeypatch.setattr(T, "available_models", lambda: ["stub"])
+    T.synthesize_segments(merged, tts_model="stub", language="hi",
+                          speaker_voice_map=vmap,
+                          out_dir=tmp_path / "tts", apply_stretch=False)
+    return [sid for sid, _ in stub.seen]
+
+
+_VMAP = {"SPK_00": {"engine": "indic-speak", "voice": "Amit"},
+         "SPK_01": {"engine": "indic-speak", "voice": "Kavya"}}
+
+
+def test_a_second_run_only_respeaks_changed_cues(tmp_path, monkeypatch):
+    """A one-word fix must cost one engine call, not a whole-dub re-speak.
+
+    The stage re-synthesises a segment only when its text/voice/style/rate
+    signature changes; everything else reuses the previous clip. Before this,
+    a replay from `tts` called the engine for every segment.
+    """
+    merged = tmp_path / "merged.json"
+    merged.write_text(json.dumps({"segments": [dict(s) for s in SEGS],
+                                  "extra": {}}))
+
+    # First run speaks everything.
+    assert sorted(_run_keep_merged(tmp_path, monkeypatch, merged, _VMAP)) == \
+        ["SEG_0001", "SEG_0002"]
+
+    # Edit one line; only that cue is re-spoken.
+    data = json.loads(merged.read_text())
+    data["segments"][0]["final_text"] = "बदला हुआ"
+    merged.write_text(json.dumps(data))
+    assert _run_keep_merged(tmp_path, monkeypatch, merged, _VMAP) == ["SEG_0001"]
+
+    # Nothing changed: the engine is not called at all.
+    assert _run_keep_merged(tmp_path, monkeypatch, merged, _VMAP) == []
+
+
+def test_a_speed_edit_does_not_respeak_the_cue(tmp_path, monkeypatch):
+    """A pure speed change re-fits the cached clip — no engine call.
+
+    `set_speed` touches only the stretch target (and a rate override the
+    engine here does not honour), so the raw synthesis is identical and
+    re-running TTS for it would be a wasted call.
+    """
+    merged = tmp_path / "merged.json"
+    merged.write_text(json.dumps({"segments": [dict(s) for s in SEGS],
+                                  "extra": {}}))
+    assert sorted(_run_keep_merged(tmp_path, monkeypatch, merged, _VMAP)) == \
+        ["SEG_0001", "SEG_0002"]
+
+    # Speed the first cue up, the way `backend.edits.set_speed` does.
+    data = json.loads(merged.read_text())
+    data["segments"][0]["target_duration_s"] = 1.0
+    data["segments"][0]["tts_rate_override"] = 1.5
+    data["segments"][0]["tts_max_stretch"] = 0.6
+    merged.write_text(json.dumps(data))
+    assert _run_keep_merged(tmp_path, monkeypatch, merged, _VMAP) == []
+
+
 # --- the one style that is the absence of a style -------------------------
 
 def test_neutral_takes_a_segment_off_the_register(tmp_path, monkeypatch):

@@ -39,7 +39,7 @@ import uuid as _uuid
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from fastapi import (APIRouter, Depends, File, HTTPException, UploadFile,
+from fastapi import (APIRouter, File, HTTPException, UploadFile,
                      status)
 from fastapi.concurrency import run_in_threadpool
 
@@ -47,7 +47,6 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:                      # pragma: no cover
     sys.path.insert(0, str(REPO_ROOT))
 
-from .auth import basic_auth                            # noqa: E402
 from . import talking_head as TH                        # noqa: E402
 
 log = logging.getLogger("ui.talkinghead")
@@ -144,8 +143,7 @@ def dialogues(language: str) -> Dict[str, Any]:
 
 
 @router.post("/api/talking-head/photo",
-             status_code=status.HTTP_201_CREATED,
-             dependencies=[Depends(basic_auth)])
+             status_code=status.HTTP_201_CREATED)
 async def upload_photo(file: UploadFile = File(...)) -> Dict[str, Any]:
     """Stage a photo and report whether it holds a usable face.
 
@@ -204,7 +202,7 @@ async def upload_photo(file: UploadFile = File(...)) -> Dict[str, Any]:
     return {"photo_id": photo_id, "url": url, "bytes": written, **probe}
 
 
-@router.post("/api/talking-head/render", dependencies=[Depends(basic_auth)])
+@router.post("/api/talking-head/render")
 def render(body: Dict[str, Any]) -> Dict[str, Any]:
     """Animate the photo against a chosen line.
 

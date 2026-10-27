@@ -27,7 +27,7 @@ def score_asd(
     audio: Path,
     tracks: FaceTracks,
     *,
-    model: str = "talknet",
+    model: str = "loconet",
     device: Optional[str] = None,
     reference_audio: Optional[Dict[str, Path]] = None,
     **model_kwargs,
@@ -120,12 +120,50 @@ def load_scores_npz(path: Path) -> ASDResult:
                          per_track=per_track)
 
 
+#: Which model's scores win when a job holds several `*.scores.npz`. loconet
+#: first (the default scorer, and the only joint multi-speaker one, so it is
+#: the one the lip-sync face-selection should be built from), then the rest
+#: best-to-worst. `find_scores_npz` consults this so "the default is loconet"
+#: actually selects loconet, instead of whatever a bare glob sorts first --
+#: `light_asd` sorts before `loconet`, so the glob alone picks the wrong file.
+ASD_MODEL_PREFERENCE = ("loconet", "lr_asd", "light_asd", "talknet")
+
+
+def find_scores_npz(asd_dir, stem=None, *, prefer: Optional[str] = None):
+    """The per-frame scores file to feed the lip-sync target builder.
+
+    Picks by MODEL, not by filename sort: `prefer` first (the configured ASD
+    model when the caller knows it), then `ASD_MODEL_PREFERENCE`, then any
+    remaining candidate. Returns a `Path` or None. This is the one place that
+    decides which model's ASD drives who-is-speaking, so both the pipeline's
+    `_asd_coord_list` (MuseTalk's coord list) and `build_lipsync_targets.py`
+    (LatentSync's targets) go through it and agree.
+    """
+    asd_dir = Path(asd_dir)
+    if not asd_dir.is_dir():
+        return None
+    cands = sorted(asd_dir.glob(f"{stem}.*{SCORES_SUFFIX}")) if stem else []
+    if not cands:
+        cands = sorted(asd_dir.glob(f"*{SCORES_SUFFIX}"))
+    if not cands:
+        return None
+    order = ([prefer] if prefer else []) + [
+        m for m in ASD_MODEL_PREFERENCE if m != prefer]
+    for m in order:
+        for c in cands:
+            if c.name.endswith(f".{m}{SCORES_SUFFIX}") or f".{m}." in c.name:
+                return c
+    return cands[0]
+
+
 __all__ = [
     "ASDResult",
+    "ASD_MODEL_PREFERENCE",
     "SCORES_SUFFIX",
     "SegmentAssignment",
     "assign_faces_to_turns",
     "assignments_to_jsonable",
+    "find_scores_npz",
     "load_scores_npz",
     "save_scores_npz",
     "score_asd",

@@ -91,7 +91,7 @@ class MixResult:
 
 STRATEGIES = ("global_tempo", "no_tempo", "timing_plan")
 
-CLIP_SOURCES = ("auto", "raw", "stretched", "vc")
+CLIP_SOURCES = ("auto", "raw", "stretched", "vc", "warped")
 
 # One ffmpeg `-i` per piece, so the argv and the filter graph both grow
 # linearly with the piece count. Past a few hundred the failure mode is an
@@ -114,12 +114,17 @@ _CLIP_FIELDS = {
     "raw": "tts_raw_audio",
     "stretched": "tts_audio",
     "vc": "vc_audio",
+    # Written by the `warped` timing producer: already at its planned length,
+    # with the rate varying INSIDE the file. Every Piece over one of these
+    # carries `local_tempo = 1.0`, so no stretch filter is built at all and
+    # the mix is pure placement.
+    "warped": "tts_warped_audio",
 }
 
 # Any field that counts as "this segment was synthesised", used to tell a
 # genuinely empty segment apart from one that is merely missing the
 # requested variant.
-_ALL_CLIP_FIELDS = ("vc_audio", "tts_audio", "tts_raw_audio")
+_ALL_CLIP_FIELDS = ("vc_audio", "tts_audio", "tts_raw_audio", "tts_warped_audio")
 
 
 def _resolve_clip(seg: dict, clip_source: str) -> tuple[Optional[str], Optional[str]]:
@@ -226,6 +231,11 @@ def _build_plan_pieces(
         seg = by_id.get(sp.id)
         if seg is None:
             skipped.append({"id": sp.id, "reason": "not_in_merged_json"})
+            continue
+        if seg.get("muted"):
+            # TTS still renders muted cues (see `edits._h_mute_cue`); mix is
+            # where they drop out, so the M&E bed covers the slot.
+            skipped.append({"id": sp.id, "reason": "muted"})
             continue
         if not sp.pieces:
             # Normal for a `no_audio` segment: the plan says "render nothing
@@ -437,6 +447,8 @@ def mix_dubbed_audio(
         segs = []
         clip_fields = []
         for seg in data.get("segments", []):
+            if seg.get("muted"):
+                continue
             clip_field, audio = _resolve_clip(seg, clip_source)
             if not audio:
                 continue

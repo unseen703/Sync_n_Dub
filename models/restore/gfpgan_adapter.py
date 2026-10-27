@@ -46,6 +46,29 @@ _SUMMARY_RE = re.compile(
     r"wrote (\d+) frame\(s\).*?restored (\d+), passed through (\d+)")
 
 
+def _parent_json(tail: str) -> Optional[dict]:
+    """The sharding parent's trailing JSON line, when the run sharded.
+
+    `_SUMMARY_RE` matches a WORKER's summary, and a worker's stdout is
+    redirected to its own part log -- so on a sharded run (every multi-GPU
+    run, which is the default) nothing in the captured output matched it and
+    the frame counts came back 0. The parent now prints the totals as JSON;
+    this reads them, and the regex stays for the single-worker shape, where
+    no parent exists to print anything.
+    """
+    for line in reversed((tail or "").splitlines()):
+        line = line.strip()
+        if not (line.startswith("{") and line.endswith("}")):
+            continue
+        try:
+            doc = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(doc, dict) and "workers" in doc:
+            return doc
+    return None
+
+
 class GFPGANRestore(BaseRestore):
     name = "gfpgan"
 
@@ -159,6 +182,12 @@ class GFPGANRestore(BaseRestore):
             cmd.append("--bg-upsample")
         if request.num_gpus:
             cmd += ["--gpus", ",".join(str(i) for i in range(request.num_gpus))]
+        if request.workers_per_gpu:
+            # Omitted, not defaulted: the script's own default is 1, and
+            # passing it explicitly would make every run look like a choice.
+            cmd += ["--workers-per-gpu", str(request.workers_per_gpu)]
+        if request.seek_shards:
+            cmd.append("--seek-shards")
 
         log.info("restore[gfpgan]: %s", " ".join(cmd))
         p = subprocess.run(cmd, cwd=str(ROOT), capture_output=True, text=True)
@@ -170,10 +199,21 @@ class GFPGANRestore(BaseRestore):
                                    "changed_frames": (mask_doc or {}).get(
                                        "changed_count"),
                                    "strength": request.strength})
-        m = _SUMMARY_RE.search(tail)
-        if m:
-            res.frames, res.restored, res.passed_through = (
-                int(m.group(1)), int(m.group(2)), int(m.group(3)))
+        doc = _parent_json(tail)
+        if doc is not None:
+            res.frames = int(doc.get("frames") or 0)
+            res.restored = int(doc.get("restored") or 0)
+            res.passed_through = int(doc.get("passed_through") or 0)
+            # The split that actually ran. The script collapses to fewer
+            # workers when a shard would fall below MIN_FRAMES_PER_SHARD, so
+            # the requested number is not evidence of what happened.
+            res.extra["workers"] = doc.get("workers")
+        else:
+            m = _SUMMARY_RE.search(tail)
+            if m:
+                res.frames, res.restored, res.passed_through = (
+                    int(m.group(1)), int(m.group(2)), int(m.group(3)))
+                res.extra["workers"] = 1
 
         # The FILE is the arbiter. rc=0 with no output is the shape CLAUDE.md
         # records for Wav2Lip, and a 32 MB file that decoded 370 of a claimed

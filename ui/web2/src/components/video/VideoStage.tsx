@@ -21,6 +21,8 @@ export function VideoStage() {
   const progress = useStore((s) => s.progress);
   const track = useStore((s) => s.videoTrack);
   const setTrack = useStore((s) => s.setVideoTrack);
+  const setVideoTime = useStore((s) => s.setVideoTime);
+  const videoSeek = useStore((s) => s.videoSeek);
 
   const lip = lipsyncToggleState(progress, media);
 
@@ -89,11 +91,20 @@ export function VideoStage() {
         </div>
       </div>
 
+      {media.video.lipsync_warning && active === 'lipsync' ? (
+        <div className="mx-auto max-w-4xl rounded-lg border border-amber-400/40 bg-amber-50 px-3 py-2
+                        text-[13px] text-amber-800 dark:border-amber-500/30 dark:bg-amber-950/40 dark:text-amber-300">
+          {media.video.lipsync_warning}
+        </div>
+      ) : null}
+
       <DualVideoPlayer
         original={media.video.original}
         lipsync={media.video.lipsync}
         active={active}
         poster={media.poster_url}
+        onTime={setVideoTime}
+        seekTo={videoSeek}
         className="mx-auto max-h-[56vh] max-w-4xl"
       />
 

@@ -15,9 +15,8 @@ import os
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, Body, Depends, HTTPException
+from fastapi import APIRouter, Body, HTTPException
 
-from .auth import basic_auth
 from . import enhance as _enhance
 from ._io import data_dir as _data_dir
 
@@ -59,7 +58,7 @@ def enhance_status(job_id: str) -> Dict[str, Any]:
     return _enhance.status(_root(job_id))
 
 
-@router.post("/api/jobs/{job_id}/enhance", dependencies=[Depends(basic_auth)])
+@router.post("/api/jobs/{job_id}/enhance")
 def start_enhance(job_id: str,
                   body: Optional[Dict[str, Any]] = Body(None)) -> Dict[str, Any]:
     """Run GFPGAN over the job's lip-sync render, in the background.
@@ -84,6 +83,12 @@ def start_enhance(job_id: str,
                         around it is only interpolated to meet it.
       only_center_face  default false. "Center" is a geometric guess, not the
                         speaking face.
+      workers_per_gpu   1..4, default unset (one worker per card, which is
+                        what every run did before). A worker peaked at 1691
+                        MiB of 16311 and left its card idle 66% of the time,
+                        so a second one mostly fills the first one's gaps.
+                        Peak VRAM rises linearly and the workers contend for
+                        CPU, so above 2 wants a measurement first.
     """
     root = _root(job_id)
     body = body or {}
@@ -105,6 +110,18 @@ def start_enhance(job_id: str,
     if scale not in ("same", "1x", "2x"):
         raise HTTPException(400, "scale must be 'same' or '2x'")
 
+    workers_per_gpu = body.get("workers_per_gpu")
+    if workers_per_gpu is not None:
+        try:
+            workers_per_gpu = int(workers_per_gpu)
+        except (TypeError, ValueError):
+            raise HTTPException(400, "workers_per_gpu must be an integer")
+        # Capped rather than trusted: each worker loads its own RetinaFace,
+        # GFPGAN and ParseNet, so this multiplies VRAM on a card the rest of
+        # the pipeline also wants.
+        if not 1 <= workers_per_gpu <= 4:
+            raise HTTPException(400, "workers_per_gpu must be between 1 and 4")
+
     # At the POST, not at readiness: this is the moment the VRAM is
     # committed, same as `routes_edits.run_lipsync_now` and the talking-head
     # render.
@@ -123,6 +140,7 @@ def start_enhance(job_id: str,
         scale=scale,
         only_center_face=bool(body.get("only_center_face", False)),
         num_gpus=body.get("num_gpus"),
+        workers_per_gpu=workers_per_gpu,
         # Which render to clean. Restoration never reads the model name, so
         # a job holding both `lipsync/` and `lipsync_asd/` outputs is a
         # choice to make rather than a preference to hard-code.

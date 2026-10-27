@@ -15,6 +15,8 @@ import { create } from 'zustand';
 import * as api from '../api';
 import type {
   AgentParams,
+  CastSelection,
+  EditHistory,
   EditPlan,
   JobRow,
   Media,
@@ -38,8 +40,10 @@ export interface Toast {
 export interface StagedChange {
   voice?: string | null;
   tone?: string | null;
+  gender?: string | null;
   fromVoice?: string | null;
   fromTone?: string | null;
+  fromGender?: string | null;
 }
 
 interface State {
@@ -64,6 +68,21 @@ interface State {
   railOpen: boolean;
   theme: 'dark' | 'light';
   toggleTheme: () => void;
+  /**
+   * How much of the machinery the screen admits to.
+   *
+   * `user` is the default and hides the parts that only mean something to
+   * someone who knows the pipeline — raw run config, tracebacks, job ids,
+   * model names. `admin` shows them.
+   *
+   * This is PRESENTATION ONLY. It is not a permission: there is no auth in
+   * this app (removed 2026-10-25), every route is open to anyone who can
+   * reach the port, and a user can flip this switch themselves. Nothing
+   * server-side reads it, and nothing here should start doing so — a check
+   * a client can turn off is not a check.
+   */
+  mode: 'user' | 'admin';
+  toggleMode: () => void;
   shortcutsOpen: boolean;
   /**
    * Which video the player shows. `null` means "nobody has chosen" — the
@@ -93,10 +112,41 @@ interface State {
   talkingHead: boolean;
   setTalkingHead: (v: boolean) => void;
   videoTrack: 'original' | 'lipsync' | null;
+  /**
+   * The active player's current time, in seconds. Pushed from the `<video>`'s
+   * `timeupdate` (~4×/sec) so the follow-along cue panel can light up the line
+   * being spoken. Shared through the store because the player and the cue
+   * panel are in different columns of the edit screen.
+   */
+  videoTime: number;
+  /**
+   * A one-shot seek request: a clicked cue asks the player to jump to its
+   * start. The `nonce` is what makes clicking the SAME cue twice fire the
+   * effect again — a bare number would compare equal and be ignored.
+   */
+  videoSeek: { t: number; nonce: number } | null;
+  /**
+   * What the edit workspace aims its actions at. A clicked cue or speaker row
+   * sets one of these; the quick actions then fold the selection into their
+   * phrasing ("cue 5: …", "SPEAKER_00: …") so no timestamp or id is typed.
+   *
+   * Mutually exclusive on purpose — one context at a time keeps "which actions
+   * are relevant" unambiguous. `setSelectedCue` clears the speaker and vice
+   * versa.
+   */
+  selectedCue: string | null;
+  selectedSpeaker: string | null;
   toasts: Toast[];
+
+  // -- edit history --------------------------------------------------------
+  editHistory: EditHistory | null;
 
   // -- staged voice/tone edits --------------------------------------------
   staged: Record<string, StagedChange>;
+  // Per-speaker cast mode for the post-MT gate. `select` pins the chosen
+  // gender/voice; `autodetect` (the default) lets the pipeline predict. Only
+  // read when `progress.milestones.awaiting_cast` is up.
+  castMode: Record<string, 'autodetect' | 'select'>;
   editPlan: EditPlan | null;
   applying: boolean;
 
@@ -116,10 +166,18 @@ interface State {
   renameSpeaker: (speakerId: string, label: string) => Promise<void>;
   /** A deliberate choice: it pins, and outranks the default from then on. */
   setVideoTrack: (t: 'original' | 'lipsync') => void;
+  setVideoTime: (t: number) => void;
+  requestSeek: (t: number) => void;
+  setSelectedCue: (id: string | null) => void;
+  setSelectedSpeaker: (id: string | null) => void;
   pushToast: (t: Omit<Toast, 'id'>) => void;
   dismissToast: (id: number) => void;
+  refreshEditHistory: () => Promise<void>;
   stageVoice: (speaker: string, voice: string) => void;
   stageTone: (speaker: string, tone: string) => void;
+  stageGender: (speaker: string, gender: string) => void;
+  setCastMode: (speaker: string, mode: 'autodetect' | 'select') => void;
+  cast: () => Promise<void>;
   revertSpeaker: (speaker: string) => void;
   discardStaged: () => Promise<void>;
   previewPlan: () => Promise<EditPlan | null>;
@@ -143,7 +201,8 @@ function readSpecOpen(): boolean {
  *
  * ONE entry per speaker carrying the fields that changed — not one entry per
  * field. `ui/routes_edits.py::_build_ops` reads `speaker_id` plus optional
- * `voice` / `tone` off each item and builds one `EditOp` per field present.
+ * `voice` / `tone` / `gender` off each item and builds one `EditOp` per
+ * field present.
  */
 export function toPendingEdits(staged: Record<string, StagedChange>): PendingEdit[] {
   const out: PendingEdit[] = [];
@@ -156,6 +215,10 @@ export function toPendingEdits(staged: Record<string, StagedChange>): PendingEdi
     }
     if (c.tone !== undefined && c.tone !== c.fromTone) {
       edit.tone = c.tone;
+      touched = true;
+    }
+    if (c.gender != null && c.gender !== c.fromGender) {
+      edit.gender = c.gender;
       touched = true;
     }
     if (touched) out.push(edit);
@@ -174,7 +237,7 @@ export function toPendingEdits(staged: Record<string, StagedChange>): PendingEdi
  */
 export interface StagedDiff {
   speaker: string;
-  field: 'voice' | 'tone';
+  field: 'voice' | 'tone' | 'gender';
   from: string | null;
   /** null only for a tone reset — a voice is never cleared. */
   to: string | null;
@@ -188,6 +251,9 @@ export function toStagedDiffs(staged: Record<string, StagedChange>): StagedDiff[
     }
     if (c.tone !== undefined && c.tone !== c.fromTone) {
       out.push({ speaker, field: 'tone', from: c.fromTone ?? null, to: c.tone });
+    }
+    if (c.gender != null && c.gender !== c.fromGender) {
+      out.push({ speaker, field: 'gender', from: c.fromGender ?? null, to: c.gender });
     }
   }
   return out;
@@ -224,6 +290,21 @@ export function applyTheme(theme: 'dark' | 'light'): void {
   }
 }
 
+const LS_MODE = 'ds.mode';
+
+/**
+ * The saved view mode. Defaults to `user`, so a fresh browser gets the
+ * uncluttered screen and the technical detail is opted into rather than
+ * out of. Same try/catch as `readTheme` and for the same reason.
+ */
+function readMode(): 'user' | 'admin' {
+  try {
+    return localStorage.getItem(LS_MODE) === 'admin' ? 'admin' : 'user';
+  } catch {
+    return 'user';
+  }
+}
+
 let toastSeq = 1;
 
 export const useStore = create<State>()((set, get) => ({
@@ -242,12 +323,19 @@ export const useStore = create<State>()((set, get) => ({
   // reference and remembers whatever the user last chose.
   railOpen: true,
   theme: readTheme(),
+  mode: readMode(),
   shortcutsOpen: false,
   agentParams: null,
   talkingHead: false,
   videoTrack: null,
+  videoTime: 0,
+  videoSeek: null,
+  selectedCue: null,
+  selectedSpeaker: null,
   toasts: [],
+  editHistory: null,
   staged: {},
+  castMode: {},
   editPlan: null,
   applying: false,
 
@@ -285,16 +373,22 @@ export const useStore = create<State>()((set, get) => ({
     set({
       selected: id,
       agentParams: null,
+      editHistory: null,
       progress: null,
       media: null,
       speakers: null,
       spec: null,
       jobError: null,
       staged: {},
+      castMode: {},
       editPlan: null,
       // Back to following the default — the next job gets its own
       // lip-synced-first treatment rather than inheriting this one's pin.
       videoTrack: null,
+      videoTime: 0,
+      videoSeek: null,
+      selectedCue: null,
+      selectedSpeaker: null,
       railOpen: true,
     });
     const target = id ? `#/job/${encodeURIComponent(id)}` : '#/';
@@ -415,6 +509,17 @@ export const useStore = create<State>()((set, get) => ({
     }
   },
 
+  async refreshEditHistory() {
+    const id = get().selected;
+    if (!id) return;
+    try {
+      const h = await api.getEditHistory(id);
+      if (get().selected === id) set({ editHistory: h });
+    } catch {
+      if (get().selected === id) set({ editHistory: null });
+    }
+  },
+
   setSearch: (s) => set({ search: s }),
 
   toggleSpec() {
@@ -434,6 +539,15 @@ export const useStore = create<State>()((set, get) => ({
     applyTheme(next);
     set({ theme: next });
   },
+  toggleMode: () => {
+    const next = get().mode === 'admin' ? 'user' : 'admin';
+    set({ mode: next });
+    try {
+      localStorage.setItem(LS_MODE, next);
+    } catch {
+      /* preference only */
+    }
+  },
   // The new-dub form lives ON the landing page now, not in a dialog, so
   // "open the new-job form" means "navigate home". Kept under the old
   // name so every caller — the brand bar, the job rail, the failure card,
@@ -451,6 +565,10 @@ export const useStore = create<State>()((set, get) => ({
   setShortcutsOpen: (v) => set({ shortcutsOpen: v }),
   setTalkingHead: (v) => set({ talkingHead: v }),
   setVideoTrack: (t) => set({ videoTrack: t }),
+  setVideoTime: (t) => set({ videoTime: t }),
+  requestSeek: (t) => set({ videoSeek: { t, nonce: Date.now() } }),
+  setSelectedCue: (id) => set({ selectedCue: id, selectedSpeaker: null }),
+  setSelectedSpeaker: (id) => set({ selectedSpeaker: id, selectedCue: null }),
 
   /**
    * Rename a speaker. Deliberately NOT part of the staged-edit machinery.
@@ -530,10 +648,75 @@ export const useStore = create<State>()((set, get) => ({
     set({ staged: next, editPlan: null });
   },
 
+  stageGender(speaker, gender) {
+    const row = get().speakers?.speakers.find((s) => s.id === speaker);
+    const prev = get().staged[speaker] ?? {};
+    const fromGender = prev.fromGender ?? row?.gender ?? null;
+    const next: Record<string, StagedChange> = { ...get().staged };
+    if (gender === fromGender && prev.voice === undefined && prev.tone === undefined) {
+      delete next[speaker];
+    } else {
+      next[speaker] = { ...prev, gender, fromGender };
+    }
+    set({ staged: next, editPlan: null });
+  },
+
   revertSpeaker(speaker) {
     const next = { ...get().staged };
     delete next[speaker];
     set({ staged: next, editPlan: null });
+  },
+
+  setCastMode(speaker, mode) {
+    set({ castMode: { ...get().castMode, [speaker]: mode } });
+  },
+
+  /**
+   * Submit the cast gate: for a job stopped after MT, run the post-MT stages
+   * with the chosen gender/voice. A speaker on `select` sends its staged (or
+   * current) gender and voice as an override; `autodetect` sends none, so the
+   * pipeline predicts it. Lip-sync stays a separate step.
+   */
+  async cast() {
+    const id = get().selected;
+    const table = get().speakers;
+    if (!id || !table) return;
+    const staged = get().staged;
+    const modes = get().castMode;
+    const payload: Record<string, CastSelection> = {};
+    for (const sp of table.speakers) {
+      const mode = modes[sp.id] ?? 'autodetect';
+      if (mode === 'select') {
+        const st = staged[sp.id];
+        payload[sp.id] = {
+          mode,
+          gender: st?.gender !== undefined ? st.gender : sp.gender,
+          voice: st?.voice !== undefined ? st.voice : sp.voice,
+        };
+      } else {
+        payload[sp.id] = { mode: 'autodetect' };
+      }
+    }
+    set({ applying: true });
+    try {
+      await api.castJob(id, payload);
+      set({ staged: {}, castMode: {}, editPlan: null });
+      get().pushToast({
+        kind: 'success',
+        title: 'Casting the voices',
+        body: 'Running the speech, mix and timing stages with the chosen cast. Lip-sync stays a separate step.',
+      });
+      await get().refreshProgress();
+      await get().refreshJobs();
+    } catch (e) {
+      get().pushToast({
+        kind: 'error',
+        title: 'Could not start casting',
+        body: (e as Error).message,
+      });
+    } finally {
+      set({ applying: false });
+    }
   },
 
   async discardStaged() {

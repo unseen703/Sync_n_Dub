@@ -254,6 +254,22 @@ def _probe_face(clip: Path) -> Dict[str, Any]:
 # main
 # ---------------------------------------------------------------------------
 
+def _record_producer_tag(job_root: Path) -> str:
+    """`edits/edit_004.json` → `edit_004`, for the mix snapshot's filename.
+
+    The newest record on disk IS the one `latest_edit_record` loaded; this
+    rereads the folder rather than threading the Path out of there, because
+    only the name matters here and the full record is already consumed.
+    """
+    d = Path(job_root) / "edits"
+    if d.is_dir():
+        records = sorted(d.glob("edit_*.json"))
+        if records:
+            newest = max(records, key=lambda p: (p.name, p.stat().st_mtime))
+            return newest.stem   # "edit_NNN"
+    return "edit"
+
+
 def latest_edit_record(job_root: Path) -> Dict[str, Any]:
     """The newest `<job>/edits/edit_NNN.json`.
 
@@ -286,6 +302,11 @@ def _run_rerun(job_id: str, job_root: Path, jobs_dir: Path) -> int:
     from backend import edit_agent, edits as _edits
 
     record = latest_edit_record(job_root)
+    # `edit_NNN.json` → `edit_NNN`, which lands in
+    # `mix/versions/<stem>.v<NNN>.edit_NNN.dubbed.*`. If the record was
+    # picked up some other way, `_record_producer_tag` falls back to a
+    # readable constant so the snapshot still names its origin.
+    mix_tag = _record_producer_tag(job_root)
 
     view = edit_agent.open_job(job_id, data_dir=DATA_DIR)
     ns = edit_agent.recover_args(view)
@@ -345,6 +366,7 @@ def _run_rerun(job_id: str, job_root: Path, jobs_dir: Path) -> int:
                                 result=res, ctx=ctx, ns=ns),
             speed_setup=setup,
             data_dir=DATA_DIR,
+            mix_producer_tag=mix_tag,
         )
     except Cancelled as e:
         state, error = "cancelled", str(e)
@@ -352,6 +374,99 @@ def _run_rerun(job_id: str, job_root: Path, jobs_dir: Path) -> int:
     except BaseException as e:                   # noqa: BLE001 - sealed below
         state, error = "failed", f"{type(e).__name__}: {e}"
         log.exception("re-render %s failed", job_id)
+    finally:
+        logging.getLogger().removeHandler(writer)
+        writer.finish(state, error)
+        writer.close()
+        _pump(jobs_dir)
+    return 0 if state == "done" else 1
+
+
+def _clear_awaiting_cast(job_root: Path) -> None:
+    """Flip `awaiting_cast` off in the manifest once the cast run finishes.
+
+    The milestone also gates on the mix not existing, so a crashed cast leaves
+    the gate up rather than a job that silently skipped its own casting.
+    """
+    import json as _json
+    mani = job_root / "manifest.json"
+    try:
+        doc = _json.loads(mani.read_text())
+    except (OSError, ValueError):
+        return
+    if doc.get("awaiting_cast"):
+        doc["awaiting_cast"] = False
+        try:
+            mani.write_text(_json.dumps(doc, indent=2))
+        except OSError:
+            pass
+
+
+def _run_cast(job_id: str, job_root: Path, jobs_dir: Path) -> int:
+    """Continue a job that stopped after MT: run the post-MT stages with the
+    operator's gender / voice choices.
+
+    Phase one ran nothing after MT, so this forces the WHOLE post-MT chain
+    (except lip-sync, still its own submission) through the same replay
+    machinery an edit uses -- which already reconstructs every stage's inputs
+    from the job on disk. The gender/voice selections ride in as overrides;
+    speakers left on 'autodetect' carry none, so stage 9d predicts them and
+    the gate ASD runs for the face vote. Reads `<job>/cast.json`, written by
+    `POST /api/jobs/{id}/cast`.
+    """
+    import json as _json
+    from backend import edit_agent, edits as _edits
+
+    cast_path = job_root / "cast.json"
+    try:
+        cast = _json.loads(cast_path.read_text()) if cast_path.is_file() else {}
+    except (OSError, ValueError):
+        cast = {}
+
+    view = edit_agent.open_job(job_id, data_dir=DATA_DIR)
+    ns = edit_agent.recover_args(view)
+    ctx = edit_agent.build_context(view, rewriter=None, ns=ns)
+    res = _edits.apply_edits(view.merged_json, [], ctx=ctx, nlq="(cast)",
+                             dry_run=True)
+    # The whole post-MT chain is "dirty" -- none of it has run. Lip-sync stays
+    # out; it is a separate submission with its own GPU pre-flight.
+    res.dirty_stages = [s for s in _edits.STAGE_ORDER if s != "lipsync"]
+    res.gender_overrides = cast.get("gender_overrides") or {}
+    res.speaker_voice_overrides = cast.get("speaker_voice_overrides") or {}
+
+    planned = [{"key": EDIT_STAGE_KEYS.get(s, s), "title": None,
+                "label": _label(EDIT_STAGE_KEYS.get(s, s)),
+                "state": "pending", "started_at": None, "wall_s": None}
+               for s in res.dirty_stages]
+    log.info("cast: running post-MT stages %s (gender=%d voice=%d forced)",
+             ", ".join(res.dirty_stages),
+             len(res.gender_overrides), len(res.speaker_voice_overrides))
+
+    setup = None
+    try:
+        pipeline_kwargs = (read_request(job_root) or {}).get("pipeline") or {}
+        setup = edit_agent.speed_setup_from_config(pipeline_kwargs)
+    except Exception as e:                           # noqa: BLE001
+        log.warning("cast: could not read pacing from request.json (%s); "
+                    "falling back to the manifest", e)
+
+    writer = ProgressWriter(job_root, job_id=job_id, planned=planned,
+                            kind="cast")
+    _attach(writer)
+    _install_sigterm()
+    state, error = "done", None
+    try:
+        edit_agent.rerun(
+            edit_agent.EditPlan(view=view, nlq="(cast)", ops=[], source="ui",
+                                result=res, ctx=ctx, ns=ns),
+            speed_setup=setup, data_dir=DATA_DIR, mix_producer_tag="cast")
+        _clear_awaiting_cast(job_root)
+    except Cancelled as e:
+        state, error = "cancelled", str(e)
+        log.warning("cast %s cancelled: %s", job_id, e)
+    except BaseException as e:                       # noqa: BLE001 - sealed below
+        state, error = "failed", f"{type(e).__name__}: {e}"
+        log.exception("cast %s failed", job_id)
     finally:
         logging.getLogger().removeHandler(writer)
         writer.finish(state, error)
@@ -393,8 +508,8 @@ def _pump(jobs_dir: Path) -> None:
         log.warning("could not start the next queued job: %s", e)
 
 
-def run(job_id: str, *, rerun: bool = False, jobs_dir: Optional[Path] = None
-        ) -> int:
+def run(job_id: str, *, rerun: bool = False, cast: bool = False,
+        jobs_dir: Optional[Path] = None) -> int:
     jobs_dir = Path(jobs_dir or JOBS_DIR)
     job_root = jobs_dir / job_id
     if not job_root.is_dir():
@@ -402,6 +517,8 @@ def run(job_id: str, *, rerun: bool = False, jobs_dir: Optional[Path] = None
 
     if rerun:
         return _run_rerun(job_id, job_root, jobs_dir)
+    if cast:
+        return _run_cast(job_id, job_root, jobs_dir)
 
     req = read_request(job_root)
     kwargs: Dict[str, Any] = dict(req.get("pipeline") or {})
@@ -446,6 +563,15 @@ def run(job_id: str, *, rerun: bool = False, jobs_dir: Optional[Path] = None
         _record_pick(job_root, _probe_face(clip))
 
         from backend.pipeline import run_pipeline
+        # The initial run's dub lands in `mix/versions/` as `v000.original`,
+        # so an edit replay's snapshot has a predecessor to A/B against. The
+        # kwarg is dropped if the submission already carried one.
+        kwargs.setdefault("mix_producer_tag", "original")
+        # Staged flow (2026-10-26): phase one stops after MT so the operator
+        # sets gender + voice per speaker before any audio is synthesised. The
+        # cast step (`POST /api/jobs/{id}/cast` → `ui.runner --cast`) runs the
+        # post-MT stages. A request can opt out by setting stop_after_mt False.
+        kwargs.setdefault("stop_after_mt", True)
         result = run_pipeline(str(clip), job_id=job_id, data_dir=DATA_DIR,
                               **kwargs)
 
@@ -509,6 +635,10 @@ def main(argv: Optional[list] = None) -> int:
     ap.add_argument("job_id")
     ap.add_argument("--rerun", action="store_true",
                     help="re-run a job folder that already has artifacts")
+    ap.add_argument("--cast", action="store_true",
+                    help="continue a job that stopped after MT: run the "
+                         "post-MT stages with the chosen gender/voice "
+                         "(reads <job>/cast.json)")
     args = ap.parse_args(argv)
 
     logging.basicConfig(
@@ -534,7 +664,7 @@ def main(argv: Optional[list] = None) -> int:
         log.warning("python-dotenv is not installed; .env was not loaded, so "
                     "HF_TOKEN and the Bodhan keys will be missing")
 
-    return run(args.job_id, rerun=args.rerun)
+    return run(args.job_id, rerun=args.rerun, cast=args.cast)
 
 
 if __name__ == "__main__":                                   # pragma: no cover

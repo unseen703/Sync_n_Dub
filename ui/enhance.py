@@ -230,6 +230,7 @@ def readiness(job_root: Path, render: Optional[str] = None) -> Dict[str, Any]:
 def start(job_root: Path, *, strength: float = 1.0, gated: bool = True,
           scale: str = "same", only_center_face: bool = False,
           num_gpus: Optional[int] = None,
+          workers_per_gpu: Optional[int] = None,
           render: Optional[str] = None) -> Dict[str, Any]:
     """Kick the pass off in a thread. Idempotent while one is running."""
     job_root = Path(job_root)
@@ -250,7 +251,8 @@ def start(job_root: Path, *, strength: float = 1.0, gated: bool = True,
                               else None,
                               gated=gated, strength=strength, scale=scale,
                               only_center_face=only_center_face,
-                              num_gpus=num_gpus)
+                              num_gpus=num_gpus,
+                              workers_per_gpu=workers_per_gpu)
             if res.get("ok"):
                 _write_status(job_root, state="done", started_at=t0,
                               expected_s=(est or [None])[-1], **res)

@@ -195,11 +195,83 @@ def synthesize_segments(
                      "segment(s) are sped up by the stretch instead",
                      tts_model, len(rate_overrides))
 
-    log.info("tts: synthesising %d segments with %s (lang=%s, speed_control=%s)",
-             len(requests), tts_model, language, speed_control)
-    result = tts.synthesize(
-        requests, out_dir=raw_dir, language=language, sample_rate=sample_rate,
-    )
+    # ---- incremental synthesis -------------------------------------------
+    # Only (re)speak a segment when something that affects its audio changed;
+    # reuse the previous clip otherwise. This is what stops a one-cue edit from
+    # re-speaking the whole dub.
+    #
+    # Two signatures per segment: a RAW one (text, voice, style, reference,
+    # language, sample rate, model, and — only if the engine honours it — the
+    # rate), and a STRETCH one (target duration, cap, apply_stretch). A pure
+    # speed edit changes only the stretch signature, so the cached raw clip is
+    # re-fitted with no engine call at all ("restretch").
+    #
+    # Scoped to speed_control="off" (the production and edit path). The oneshot
+    # and closed_loop experiment arms set per-run rates and are left to run in
+    # full, so their measurements stay bit-identical.
+    import hashlib
+
+    def _raw_sig(req, rate):
+        parts = [req.text or "", req.voice or "", req.style or "",
+                 str(req.reference_audio or ""), req.reference_text or "",
+                 language, str(sample_rate), tts_model]
+        if rate_supported:
+            parts.append(f"{float(rate):.4f}")
+        return hashlib.sha1("\x1f".join(parts).encode()).hexdigest()
+
+    def _stretch_sig(seg):
+        cap = seg.get("tts_max_stretch")
+        cap = float(cap) if cap is not None else max_stretch
+        return hashlib.sha1(
+            f"{apply_stretch}|{seg.get('target_duration_s')}|{cap}".encode()
+        ).hexdigest()
+
+    actions: Dict[str, str] = {}
+    reused = restretched = 0
+    incremental = speed_control == "off"
+    if incremental:
+        req_by_id = {r.id: r for r in requests}
+        keep: List[TTSRequest] = []
+        for seg in data.get("segments", []):
+            req = req_by_id.get(seg["id"])
+            if req is None:
+                continue
+            rsig = _raw_sig(req, float(getattr(req, "rate", 1.0) or 1.0))
+            ssig = _stretch_sig(seg)
+            # Stashed now, committed only once the (re)build below succeeds.
+            seg["_next_raw_sig"], seg["_next_stretch_sig"] = rsig, ssig
+            raw_ok = bool(seg.get("tts_raw_audio")) and Path(seg["tts_raw_audio"]).exists()
+            out_ok = bool(seg.get("tts_audio")) and Path(seg["tts_audio"]).exists()
+            need_raw = seg.get("tts_raw_sig") != rsig or not raw_ok
+            need_stretch = (need_raw or seg.get("tts_stretch_sig") != ssig
+                            or not out_ok)
+            if not need_stretch:
+                actions[seg["id"]] = "reuse"; reused += 1
+            elif not need_raw:
+                actions[seg["id"]] = "restretch"; restretched += 1
+            else:
+                actions[seg["id"]] = "resynth"; keep.append(req)
+        requests = keep
+    else:
+        actions = {seg["id"]: "resynth" for seg in data.get("segments", [])}
+        # The experiment arms overwrite the raw clips with per-run rates, so
+        # drop any cached signatures: a later production run must re-synthesise
+        # rather than trust a clip made under different settings.
+        for seg in data.get("segments", []):
+            seg.pop("tts_raw_sig", None)
+            seg.pop("tts_stretch_sig", None)
+
+    log.info("tts: %d to synthesise, %d reused, %d re-stretched "
+             "(%s, lang=%s, speed_control=%s)",
+             len(requests), reused, restretched, tts_model, language,
+             speed_control)
+    if requests:
+        result = tts.synthesize(
+            requests, out_dir=raw_dir, language=language, sample_rate=sample_rate,
+        )
+    else:
+        from types import SimpleNamespace
+        result = SimpleNamespace(segments=[], model_name=tts_model)
 
     rates = {r.id: float(r.rate) for r in requests}
     rounds = {r.id: 1 for r in requests}
@@ -215,60 +287,91 @@ def synthesize_segments(
     violations = 0
     errors = 0
     stretch_errors = 0
+    import soundfile as sf
     by_id = {s.id: s for s in result.segments}
     for seg in data.get("segments", []):
-        rec = by_id.get(seg["id"])
-        if rec is None:
+        sid = seg["id"]
+        action = actions.get(sid, "resynth")
+
+        if action == "reuse":
+            # Clip and every field it wrote carry over untouched; the stored
+            # signatures already match, so nothing to commit.
+            seg.pop("_next_raw_sig", None)
+            seg.pop("_next_stretch_sig", None)
             continue
-        if speed_control != "off" or seg["id"] in rate_overrides:
-            # Written even for failed segments: a sweep needs to see which rate
-            # was in flight when a clip went missing.
-            seg["tts_rate"] = rates.get(seg["id"], 1.0)
-            seg["tts_rounds"] = rounds.get(seg["id"], 1)
-        if rec.error:
-            errors += 1
-            seg["tts_audio"] = None
-            seg.setdefault("qc", {})["tts_error"] = rec.error
-            continue
+
+        if action == "restretch":
+            # No engine call: re-fit the CACHED raw clip to the new slot.
+            raw_path = Path(seg["tts_raw_audio"])
+        else:  # resynth
+            rec = by_id.get(sid)
+            if rec is None:
+                seg.pop("_next_raw_sig", None)
+                seg.pop("_next_stretch_sig", None)
+                continue
+            if speed_control != "off" or sid in rate_overrides:
+                # Written even for failed segments: a sweep needs to see which
+                # rate was in flight when a clip went missing.
+                seg["tts_rate"] = rates.get(sid, 1.0)
+                seg["tts_rounds"] = rounds.get(sid, 1)
+            if rec.error:
+                errors += 1
+                seg["tts_audio"] = None
+                seg.setdefault("qc", {})["tts_error"] = rec.error
+                seg.pop("_next_raw_sig", None)
+                seg.pop("_next_stretch_sig", None)
+                continue
+            raw_path = Path(rec.audio_path)
+            seg["tts_raw_audio"] = str(raw_path)
+
         target = float(seg.get("target_duration_s") or
                        (seg.get("end", 0.0) - seg.get("start", 0.0)))
-        import soundfile as sf
-        seg["tts_raw_audio"] = str(rec.audio_path)
         if not apply_stretch:
             # The timing plan will stretch; stretching here too would compound.
-            seg["tts_audio"] = str(rec.audio_path)
-            seg["tts_duration_s"] = float(sf.info(str(rec.audio_path)).duration)
+            seg["tts_audio"] = str(raw_path)
+            seg["tts_duration_s"] = float(sf.info(str(raw_path)).duration)
             seg.pop("stretch_factor", None)
-            continue
-        stretched_path = stretched_dir / f"{rec.id}.wav"
-        # A deliberate speed edit asks for more than the default +-10%; without
-        # its own cap the stretch clamps it back and the edit arrives as a
-        # budget_violation instead of as the speed-up that was requested.
-        seg_cap = seg.get("tts_max_stretch")
-        seg_cap = float(seg_cap) if seg_cap is not None else max_stretch
-        try:
-            factor, violated = wsola_stretch_cap(
-                rec.audio_path, stretched_path,
-                target_duration_s=target, max_stretch=seg_cap,
-                backend=stretch_backend,
-            )
-        except Exception as e:
-            # A clip shorter than the backend's analysis window used to yield a
-            # zero-length "success"; surface it instead of mixing in silence.
-            stretch_errors += 1
-            log.warning("tts: stretch failed for %s (%s); using raw clip",
-                        rec.id, e)
-            seg["tts_audio"] = str(rec.audio_path)
-            seg["tts_duration_s"] = float(sf.info(str(rec.audio_path)).duration)
-            seg.setdefault("qc", {})["stretch_error"] = str(e)
-            continue
-        final_dur = float(sf.info(str(stretched_path)).duration)
-        seg["tts_audio"] = str(stretched_path)
-        seg["tts_duration_s"] = final_dur
-        seg["stretch_factor"] = factor
-        if violated:
-            violations += 1
-            seg.setdefault("qc", {})["budget_violation"] = True
+        else:
+            stretched_path = stretched_dir / f"{sid}.wav"
+            # A deliberate speed edit asks for more than the default +-10%;
+            # without its own cap the stretch clamps it back and the edit
+            # arrives as a budget_violation instead of the speed-up requested.
+            seg_cap = seg.get("tts_max_stretch")
+            seg_cap = float(seg_cap) if seg_cap is not None else max_stretch
+            try:
+                factor, violated = wsola_stretch_cap(
+                    raw_path, stretched_path,
+                    target_duration_s=target, max_stretch=seg_cap,
+                    backend=stretch_backend,
+                )
+            except Exception as e:
+                # A clip shorter than the backend's analysis window used to
+                # yield a zero-length "success"; surface it instead of mixing
+                # in silence.
+                stretch_errors += 1
+                log.warning("tts: stretch failed for %s (%s); using raw clip",
+                            sid, e)
+                seg["tts_audio"] = str(raw_path)
+                seg["tts_duration_s"] = float(sf.info(str(raw_path)).duration)
+                seg.setdefault("qc", {})["stretch_error"] = str(e)
+                # Don't persist the signature on failure, so the next run retries.
+                seg.pop("_next_raw_sig", None)
+                seg.pop("_next_stretch_sig", None)
+                continue
+            final_dur = float(sf.info(str(stretched_path)).duration)
+            seg["tts_audio"] = str(stretched_path)
+            seg["tts_duration_s"] = final_dur
+            seg["stretch_factor"] = factor
+            if violated:
+                violations += 1
+                seg.setdefault("qc", {})["budget_violation"] = True
+
+        # Commit the signatures now the (re)build succeeded, so a later run can
+        # skip this segment.
+        if "_next_raw_sig" in seg:
+            seg["tts_raw_sig"] = seg.pop("_next_raw_sig")
+        if "_next_stretch_sig" in seg:
+            seg["tts_stretch_sig"] = seg.pop("_next_stretch_sig")
 
     applied = [rates.get(s.id, 1.0) for s in result.segments if not s.error]
     data.setdefault("extra", {})["tts"] = {
@@ -280,6 +383,8 @@ def synthesize_segments(
         "stretch_backend_requested": stretch_backend,
         "apply_stretch": apply_stretch,
         "segments": len(result.segments),
+        "reused": reused,
+        "restretched": restretched,
         "errors": errors,
         "stretch_errors": stretch_errors,
         "budget_violations": violations,

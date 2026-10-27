@@ -1,13 +1,11 @@
 import { AnimatePresence, m } from 'framer-motion';
 import { BrandBar } from './BrandBar';
 import { JobRail } from './JobRail';
-import { SpecPanel } from './SpecPanel';
 import { Stage } from './Stage';
 import { Toasts } from '../ui/Toasts';
 import { Tooltip } from '../ui/Tooltip';
 import { IconMenu } from '../ui/Icons';
 import { useStore } from '../../store/useStore';
-import { useIsWide } from '../../hooks/useMediaQuery';
 
 /**
  * Brand bar across the top, then three columns:
@@ -36,14 +34,8 @@ import { useIsWide } from '../../hooks/useMediaQuery';
  *               without squeezing the video below a useful 16:9.
  */
 export function AppShell() {
-  const specOpen = useStore((s) => s.specOpen);
   const railOpen = useStore((s) => s.railOpen);
   const setRailOpen = useStore((s) => s.setRailOpen);
-  const toggleSpec = useStore((s) => s.toggleSpec);
-  const wide = useIsWide();
-
-  const specInline = wide && specOpen;
-  const specDrawer = !wide && specOpen;
   // The job list is inline from 1024 px up and a drawer below it. `railOpen`
   // drives both, so the toggle in the brand bar means the same thing at
   // every width.
@@ -127,49 +119,6 @@ export function AppShell() {
           <Stage />
         </main>
 
-        {/* Details panel, inline (pushing) on the RIGHT at >=1536 px. */}
-        <AnimatePresence initial={false}>
-          {specInline ? (
-            <m.aside
-              key="spec-inline"
-              className="shrink-0 overflow-hidden border-l border-line bg-canvas/40"
-              initial={{ width: 0, opacity: 0 }}
-              animate={{ width: '20rem', opacity: 1 }}
-              exit={{ width: 0, opacity: 0 }}
-              transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
-            >
-              <div className="h-full w-[var(--spec)]">
-                <SpecPanel onClose={toggleSpec} />
-              </div>
-            </m.aside>
-          ) : null}
-        </AnimatePresence>
-
-        {/* Spec panel, scrimmed drawer below 1536 px. */}
-        <AnimatePresence>
-          {specDrawer ? (
-            <>
-              <m.div
-                className="fixed inset-0 z-40 bg-black/70"
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                exit={{ opacity: 0 }}
-                transition={{ duration: 0.15 }}
-                onClick={toggleSpec}
-              />
-              <m.aside
-                className="fixed inset-y-0 right-0 z-50 w-[var(--spec)] max-w-[85vw] border-l
-                           border-line bg-surface shadow-2xl shadow-black/70"
-                initial={{ x: '100%' }}
-                animate={{ x: 0 }}
-                exit={{ x: '100%' }}
-                transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
-              >
-                <SpecPanel onClose={toggleSpec} />
-              </m.aside>
-            </>
-          ) : null}
-        </AnimatePresence>
 
       </div>
 

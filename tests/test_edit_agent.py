@@ -309,6 +309,67 @@ def test_revert_is_idempotent(merged):
     assert E.revert(merged) == []
 
 
+# ---------------------------------------------------------------------------
+# set_target_language — rule parse, scope guard, dirty_from
+# ---------------------------------------------------------------------------
+#
+# The handler itself calls Bodhan MT and is covered end-to-end by an
+# integration pass with a live key. Here we only guard the pieces that cost
+# nothing to run: the regex parser's language extraction, the speaker-only
+# scope refusal that fires BEFORE any network call, and the drift
+# assertions against OP_SPECS / USER_ACTIONS / the system prompt — which
+# the existing drift tests already enforce by looping over `OPS`, so no new
+# scaffolding is needed.
+
+@pytest.mark.parametrize("phrase,iso,expect_all", [
+    ("translate the whole dub to Marathi", "mr", True),
+    ("change the target language to Bengali", "bn", True),
+    ("dub it in Tamil", "ta", True),
+    ("retranslate the whole dub into Punjabi", "pa", True),
+])
+def test_rule_parse_set_target_language(phrase, iso, expect_all):
+    ops = A._rule_parse(phrase)
+    lang_ops = [o for o in ops if o.op == "set_target_language"]
+    assert len(lang_ops) == 1, (
+        f"expected one set_target_language from {phrase!r}, got {ops!r}")
+    assert lang_ops[0].params.get("target_language") == iso
+    assert lang_ops[0].scope.all is expect_all
+
+
+def test_rule_parse_rejects_unknown_language():
+    # English is latn and the Indic-only table excludes it; a bare phrase
+    # like this must come back as nothing rather than a wrong op.
+    ops = A._rule_parse("translate the dub to Klingon")
+    assert not any(o.op == "set_target_language" for o in ops)
+
+
+def test_set_target_language_refuses_speaker_only_scope(merged):
+    # Bodhan is never touched: the scope guard fires first.
+    with pytest.raises(E.EditError, match="speaker"):
+        _apply(merged, E.EditOp(
+            op="set_target_language",
+            scope=E.Scope(speaker="SPEAKER_00"),
+            params={"target_language": "mr"}))
+
+
+def test_set_target_language_refuses_unknown_iso(merged):
+    with pytest.raises(E.EditError, match="unknown or non-Indic"):
+        _apply(merged, E.EditOp(
+            op="set_target_language",
+            scope=E.Scope(all=True),
+            params={"target_language": "xx"}))
+
+
+def test_set_target_language_opspec_registered():
+    spec = E.OPS.get("set_target_language")
+    assert spec is not None, "set_target_language is missing from OP_SPECS"
+    assert spec.dirty_from == "codemix", (
+        "declared dirty_from must be in STAGE_ORDER so rerun_stages can "
+        "replay from it; the handler itself may narrow to 'tts' for the "
+        "per-cue path")
+    assert "target_language" in spec.params
+
+
 def test_two_edits_to_one_field_keep_the_original_backup(merged):
     for text in ("first", "second"):
         _apply(merged, E.EditOp(op="set_text", scope=E.Scope(segments=["seg000"]),
@@ -841,6 +902,9 @@ def test_every_op_has_a_plain_language_description():
             assert row.get(key), f"{row['op']} has an empty {key}"
         assert row["op"] not in row["title"], (
             f"{row['op']}: the title leaks the internal name")
+        # The workspace groups actions by intent, so a new op with no category
+        # would land in no group and silently vanish from the UI.
+        assert row.get("category"), f"{row['op']} has no category"
 
 
 def test_replay_cost_is_derived_from_dirty_from_not_authored():
@@ -946,3 +1010,198 @@ def test_lipsync_replay_inherits_the_segment_default():
     fn = fn[:fn.index("\ndef ")]
     assert "max_segment_s" not in fn, (
         "the replay overrides max_segment_s; it should inherit the default")
+
+
+# ---------------------------------------------------------------------------
+# cue aliases: "cue 5" / "#5" / "cues 1-3" → the SEG ids `edits.py` understands
+#
+# The UI stamps each flashcard with a 1-based number. Users then say "edit
+# cue 5" to the agent. Without rewriting, the LLM sees a reference to a cue
+# the compact table does not list and (per Rule 8 of _SYSTEM) refuses.
+# ---------------------------------------------------------------------------
+
+def _data_for_aliases(merged: Path) -> dict:
+    return json.loads(merged.read_text())
+
+
+def test_cue_alias_single_number(merged):
+    data = _data_for_aliases(merged)
+    out = A.resolve_cue_aliases("rewrite cue 2 to be more formal", data)
+    # Fixture cue 2 (1-based, start-sorted) is seg001.
+    assert "seg001" in out
+    assert "cue 2" not in out
+
+
+def test_cue_alias_hash_form(merged):
+    data = _data_for_aliases(merged)
+    out = A.resolve_cue_aliases("speed up #4 by 1.2x", data)
+    assert "seg003" in out
+    assert "#4" not in out
+
+
+def test_cue_alias_range(merged):
+    data = _data_for_aliases(merged)
+    out = A.resolve_cue_aliases("retranslate cues 2 to 4 formally", data)
+    for sid in ("seg001", "seg002", "seg003"):
+        assert sid in out
+    assert "cues 2 to 4" not in out
+
+
+def test_cue_alias_list_with_and(merged):
+    data = _data_for_aliases(merged)
+    out = A.resolve_cue_aliases("replace term in cues 1 and 3", data)
+    assert "seg000" in out and "seg002" in out
+
+
+def test_cue_alias_out_of_range_left_literal(merged):
+    """A number outside the table stays as text so the LLM can refuse.
+
+    Silently redirecting "cue 999" to the last known cue would be the same
+    class of bug Rule 8 of `_SYSTEM` exists to prevent.
+    """
+    data = _data_for_aliases(merged)
+    out = A.resolve_cue_aliases("edit cue 999 to say hello", data)
+    assert "cue 999" in out
+
+
+def test_cue_alias_leaves_quoted_hashes_in_replacements_alone(merged):
+    """A `#` embedded inside a replacement word should not be eaten.
+
+    `_HASH_CUE_RE` requires a boundary before `#`, so markup like
+    `set text to "look at item#3"` stays literal.
+    """
+    data = _data_for_aliases(merged)
+    s = 'set cue 1 text to "see item#3 in the list"'
+    out = A.resolve_cue_aliases(s, data)
+    assert "item#3" in out
+    assert "seg000" in out
+
+
+def test_segment_digest_shows_number_column(merged):
+    data = _data_for_aliases(merged)
+    digest = A.segment_digest(data)
+    first_row = next(ln for ln in digest.splitlines()
+                     if ln.startswith("#1\t"))
+    # #N must agree with the SEG id so the LLM's answer and the user's
+    # phrasing both resolve to the same cue.
+    assert "seg000" in first_row
+
+
+def test_cue_number_map_is_start_sorted(merged):
+    data = _data_for_aliases(merged)
+    nmap = A._cue_number_map(data)
+    assert nmap == {1: "seg000", 2: "seg001", 3: "seg002", 4: "seg003", 5: "seg004"}
+
+
+# ---------------------------------------------------------------------------
+# substitution seams
+#
+# Reported as "this request is not being processed correctly": the model
+# answered `remove ठीक है? ... and add punctuation mark there` with
+# `replace_term(find="ठीक है", replace="।")` -- correct in shape, but `find`
+# left the question mark out, so the mark outlived the phrase it belonged to
+# and the cue rendered `... है ।? और ...`. The op is right; the seam was not
+# being cleaned. These pin the cleanup.
+# ---------------------------------------------------------------------------
+
+def _apply_replace_term(text, *, find, replace):
+    data = {"segments": [{"id": "SEG_0004", "start": 1.0, "end": 4.0,
+                          "mt_text": text}]}
+    op = E.EditOp.from_dict({"op": "replace_term",
+                             "scope": {"segments": ["SEG_0004"]},
+                             "params": {"find": find, "replace": replace}})
+    E._h_replace_term(
+        data, ["SEG_0004"], op,
+        E.AppliedOp(op="replace_term", scope="", params={},
+                    segments=["SEG_0004"], dirty_from="tts"),
+        E.EditContext(), E.EditResult(merged_json=None))
+    return E._seg_text(data["segments"][0])
+
+
+def test_replacement_punctuation_absorbs_the_mark_it_displaced():
+    """`।` landing next to a surviving `?` must not render as `।?`."""
+    out = _apply_replace_term("यह एक लाइन है ठीक है? और आगे",
+                              find="ठीक है", replace="।")
+    assert out == "यह एक लाइन है। और आगे"
+    assert "?" not in out
+
+
+def test_deleting_a_phrase_leaves_no_double_space():
+    """An empty `replace` is the documented way to remove a phrase."""
+    out = _apply_replace_term("यह एक लाइन है ठीक है? और आगे",
+                              find="ठीक है?", replace="")
+    assert out == "यह एक लाइन है और आगे"
+    assert "  " not in out
+
+
+def test_tidy_does_not_eat_an_ellipsis():
+    """`...` is three dots and one piece of punctuation, not a run of three."""
+    assert E._tidy_text("रुको... फिर चलो") == "रुको... फिर चलो"
+
+
+# ---------------------------------------------------------------------------
+# mute_cue: silence AND release the time
+#
+# There is deliberately no second "delete" op. Muting is the only way to
+# drop a cue, and it does both halves -- TTS skips the line, and the slot
+# leaves `_next_slot_start`'s lookahead so the seconds become borrowable.
+# ---------------------------------------------------------------------------
+
+def test_there_is_no_separate_delete_op():
+    """One op, not two. A delete_cue reappearing means the merge regressed."""
+    assert "delete_cue" not in E.OPS
+    assert "delete_cue" not in E._HANDLERS
+    assert "delete_cue" not in A._SYSTEM
+
+
+def test_muting_releases_its_slot_as_gap():
+    """The released seconds must read as gap, not as a slot nobody occupies.
+
+    Measured through `_next_slot_start` because that is what the gap
+    barrier and `--speed-borrow-gap` both read.
+    """
+    from backend.timing import _base_segment_plan, _next_slot_start
+    segs = [{"id": "SEG_0000", "start": 0.0, "end": 4.0},
+            {"id": "SEG_0001", "start": 5.0, "end": 9.0},
+            {"id": "SEG_0002", "start": 10.0, "end": 14.0}]
+    plans = [_base_segment_plan(s, pause_min_s=0.25) for s in segs]
+    assert _next_slot_start(plans, 0) == 5.0
+
+    segs[1]["muted"] = True
+    plans = [_base_segment_plan(s, pause_min_s=0.25) for s in segs]
+    assert _next_slot_start(plans, 0) == 10.0
+
+
+def test_mute_is_reversible_and_replays_from_tts():
+    """`tts` is earlier than `timing` in STAGE_ORDER, so it covers both.
+
+    Narrowing this to `timing` would re-fit the plan while leaving the
+    muted cue's clip in the mix.
+    """
+    data = {"segments": [{"id": "SEG_0001", "start": 5.0, "end": 9.0,
+                          "mt_text": "कुछ लाइन"}]}
+    applied = E.AppliedOp(op="mute_cue", scope="", params={},
+                          segments=["SEG_0001"], dirty_from="tts")
+    E._h_mute_cue(data, ["SEG_0001"],
+                  E.EditOp.from_dict({"op": "mute_cue",
+                                      "scope": {"segments": ["SEG_0001"]}}),
+                  applied, E.EditContext(), E.EditResult(merged_json=None))
+    seg = data["segments"][0]
+    assert seg["muted"] is True
+    assert applied.dirty_from == "tts"
+    assert E.STAGE_ORDER.index("tts") < E.STAGE_ORDER.index("timing")
+    assert "timing" in E.rerun_stages([applied.dirty_from])
+    # The text stays put so `revert` has something to restore.
+    assert seg["mt_text"] == "कुछ लाइन"
+    assert "muted" in seg["edit_backup"]
+    assert "4.00s released as pause" in applied.changes[0]
+
+
+def test_segment_n_resolves_to_its_own_id_not_the_cue_number():
+    """`segment 4` is SEG_0004 (0-based id); `cue 4` is the 4th row."""
+    data = {"segments": [{"id": f"SEG_{i:04d}", "start": i * 3.0,
+                          "end": i * 3.0 + 2.5} for i in range(8)]}
+    assert A.resolve_cue_aliases("mute segment 0004", data) == "mute SEG_0004"
+    assert A.resolve_cue_aliases("mute cue 5", data) == "mute SEG_0004"
+    # An id this job does not have stays literal so the model can refuse.
+    assert A.resolve_cue_aliases("mute segment 99", data) == "mute segment 99"

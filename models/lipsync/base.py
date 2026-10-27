@@ -156,6 +156,65 @@ class BaseLipSync(ABC):
     def sync(self, request: LipSyncRequest) -> LipSyncResult:
         """Render a lip-synced video. Returns metadata about the output."""
 
+    def sync_many(self, requests: "list[LipSyncRequest]") -> "list[LipSyncResult]":
+        """Render several (video, audio) pairs reusing ONE loaded model.
+
+        The warm-model path. `backend.lipsync` splits a long clip into pieces
+        to bound host RAM (see `_run_lipsync_segmented`); the old loop paid a
+        fresh process start and a full model load per piece, which the docstring
+        there measured as the dominant cost at this clip length. Handing a GPU's
+        whole run of pieces to one call lets an adapter load the model once and
+        cycle only the per-piece frame buffers in and out -- the memory bound
+        stays a function of one piece, the load cost stops scaling with the
+        piece count.
+
+        Default: one `sync()` per request (a fresh load each time), so an
+        adapter that has no warm path still works. Adapters that load the model
+        in a subprocess override this to load once and loop. The returned list
+        matches `requests` in order and length; a request that failed carries
+        its error in its own `LipSyncResult.error` rather than aborting the
+        rest, because `backend.lipsync` decides per piece what a failure means.
+        """
+        return [self.sync(r) for r in requests]
+
+
+def run_streaming(cmd, *, cwd=None, env=None, log=None, tag="",
+                  progress_prefixes=("[worker]",), tail_lines=500):
+    """Run `cmd`, forward its progress lines to `log` LIVE, return a
+    CompletedProcess whose `stdout` holds the last `tail_lines` of combined
+    output (stderr merged in) for error reporting. `stderr` is "".
+
+    Live streaming is the point. `subprocess.run(capture_output=True)` buffers
+    all child output until the process exits, so a warm worker rendering N
+    pieces in one call showed NOTHING in the log until every piece was done --
+    the per-segment progress that the old one-process-per-segment path printed
+    for free disappeared the moment the pieces were batched. Reading the pipe
+    line by line and forwarding the lines that start with a `progress_prefixes`
+    entry (the drivers' `[worker] ...` lines, MuseTalk's `Results saved to`)
+    puts each piece back in run.log as it happens.
+
+    stderr is merged into stdout so a failing child's traceback is captured in
+    the returned tail; tqdm bars use `\\r` without `\\n`, so they do not stream
+    as spam -- only newline-terminated status lines do.
+    """
+    import collections
+    import subprocess
+
+    proc = subprocess.Popen(
+        cmd, cwd=cwd, env=env, text=True, bufsize=1, errors="replace",
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    buf: "collections.deque" = collections.deque(maxlen=tail_lines)
+    if proc.stdout is not None:
+        for raw in proc.stdout:
+            line = raw.rstrip("\n")
+            buf.append(line)
+            if log is not None and tag and \
+                    any(line.startswith(p) for p in progress_prefixes):
+                log.info("%s: %s", tag, line)
+        proc.stdout.close()
+    rc = proc.wait()
+    return subprocess.CompletedProcess(cmd, rc, "\n".join(buf), "")
+
 
 # `VENDOR_ROOT` / `resolve_vendor_repo` moved to `models/_vendor.py` on
 # 2026-10-23: TalkNet (models/asd/) needs the same resolution, and importing

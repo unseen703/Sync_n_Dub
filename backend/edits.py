@@ -278,6 +278,45 @@ class EditOp:
         return f"{self.op}({_fmt_params(self.params)}) on {self.scope.describe()}"
 
 
+#: Sentence-final punctuation in the languages this pipeline dubs into.
+#: `।`/`॥` are the Devanagari danda and double danda; the ASCII set covers a
+#: code-mixed line that ends on a Latin clause.
+_SENT_END = "।॥.?!"
+
+#: Stands in for an ellipsis while the run-collapse below is applied, so
+#: `...` is not mistaken for three sentence-enders and flattened to one.
+_ELLIPSIS_SENTINEL = "\x00ELL\x00"
+
+
+def _tidy_text(s: str) -> str:
+    """Repair the seams a substitution leaves behind.
+
+    `_h_replace_term` edits a line with `re.sub`, which is exact and knows
+    nothing about the text either side of the cut. Three artefacts come out
+    of that, all of them invisible in a diff and audible in the dub:
+
+      * a DOUBLE SPACE where a deleted phrase used to be;
+      * a space STRANDED before the punctuation that replaced it, so the
+        danda floats off its word (`है ।` rather than `है।`);
+      * a RUN of sentence-enders, when the replacement lands next to one
+        that was already in the line.
+
+    The third is the one that sent us here. `replace "ठीक है" with "।"` over
+    `... है ठीक है? और ...` leaves `... है ।? और ...`: the request named the
+    phrase without its question mark, so the mark outlived the phrase it
+    belonged to. Bodhan reads what it is handed, so this is repaired at the
+    edit rather than left for the engine to interpret.
+
+    A run keeps its FIRST member: the replacement is what was asked for, and
+    the survivor is the mark it displaced.
+    """
+    s = s.replace("…", "...").replace("...", _ELLIPSIS_SENTINEL)
+    s = re.sub(rf"([{_SENT_END}])(?:[ \t]*[{_SENT_END}])+", r"\1", s)
+    s = re.sub(rf"[ \t]+([{_SENT_END},;:])", r"\1", s)
+    s = re.sub(r"[ \t]{2,}", " ", s)
+    return s.replace(_ELLIPSIS_SENTINEL, "...").strip()
+
+
 def _fmt_params(p: Dict[str, Any]) -> str:
     out = []
     for k, v in p.items():
@@ -308,9 +347,11 @@ OP_SPECS: List[OpSpec] = [
     ),
     OpSpec(
         name="replace_term", dirty_from="tts",
-        params={"find": "the word or phrase exactly as it appears now",
-                "replace": "the exact replacement; omit it to have `find` "
-                           "translated into the target language"},
+        params={"find": "the word or phrase exactly as it appears now, "
+                        "including any punctuation that belongs to it",
+                "replace": 'the exact replacement; "" deletes `find`; omit '
+                           "it to have `find` translated into the target "
+                           "language"},
         summary="Replace one word or phrase inside the line and leave every "
                 "other character identical.",
         examples=['translate the word "conditional" into Hindi',
@@ -394,6 +435,39 @@ OP_SPECS: List[OpSpec] = [
                   "run musetalk on the last 20 seconds",
                   "redo the lip-sync with wav2lip"],
     ),
+    OpSpec(
+        name="mute_cue", dirty_from="tts",
+        params={},
+        summary="Silence the scoped segment(s) — TTS skips them, the mix "
+                "leaves the M&E bed playing through, and their time is "
+                "released as a pause the neighbouring cues may borrow.",
+        examples=["mute the line at 0:15",
+                  "delete the garbage cue SEG_0009"],
+    ),
+    OpSpec(
+        # Re-translates the scoped cues through Bodhan MT -- NOT the LLM.
+        # Scope policy is enforced in the handler: `all` sweeps the whole
+        # dub (dirty_from=codemix, voices re-cast from the new pool); a
+        # cue list or time window re-translates only those cues and pins
+        # a per-cue voice from the new language's catalog (dirty_from=tts).
+        # Speaker-only scope is refused -- a bare speaker is not a time
+        # bound and the mixed-language result would be unpredictable.
+        name="set_target_language", dirty_from="codemix",
+        params={"target_language": "ISO code of the new target language, "
+                                   "e.g. hi, mr, ta — one of the 22 Indic "
+                                   "languages the home-page picker lists",
+                "target_script": "script override (deva | taml | …); "
+                                 "omit to use Bodhan's default"},
+        summary="Re-translate the scoped cues (or the whole dub) into a "
+                "different Indic language via Bodhan MT. Scope=all swaps "
+                "the dub globally and re-casts every voice from that "
+                "language's pool; a cue or time scope re-translates only "
+                "those cues and pins a voice per cue, leaving the rest of "
+                "the dub in its original language.",
+        examples=["translate the whole dub to Marathi",
+                  "retranslate 0:30 to 0:45 into Tamil",
+                  "change the target language to Bengali"],
+    ),
 ]
 
 OPS: Dict[str, OpSpec] = {s.name: s for s in OP_SPECS}
@@ -429,11 +503,29 @@ STAGE_PLAIN: Dict[str, str] = {
 #:
 #: `tests/test_edit_agent.py` fails if an op has no entry, which is what
 #: stops a newly added op from surfacing in the UI as a bare identifier.
-USER_ACTIONS: Dict[str, Dict[str, str]] = {
+#: Four extra keys drive the UI "edit workspace":
+#:
+#:   category  the intent group it belongs under — one of six, in the order
+#:             `OP_SPECS` already lists them, so the group order is derived
+#:             from the registry rather than written down a second time.
+#:   scopes    which kinds of on-screen selection this op can be aimed at:
+#:             "segment" (a cue/time), "speaker", or "all" (the whole dub).
+#:             The UI reads it to decide which actions a clicked cue or
+#:             speaker makes relevant, and whether a selection can be folded
+#:             into the phrasing automatically.
+#:   quick     one of the handful shown before "See all actions".
+#:   fill      a scope-AGNOSTIC phrasing. The UI prefixes it with whatever is
+#:             selected ("cue 5: …", "SPEAKER_00: …") so the user never types
+#:             a timestamp or a speaker id. Deliberately not the same string
+#:             as `examples`: those carry their own baked-in scope and are
+#:             used as-is when nothing is selected.
+USER_ACTIONS: Dict[str, Dict[str, Any]] = {
     "set_text": {
         "title": "Rewrite a line",
         "takes": "a moment in the video, and the exact wording you want",
         "changes": "that line is spoken with your wording, word for word",
+        "category": "Translation", "scopes": ["segment"], "quick": True,
+        "fill": 'change the wording to "…"',
     },
     "replace_term": {
         "title": "Change one word everywhere",
@@ -441,52 +533,91 @@ USER_ACTIONS: Dict[str, Dict[str, str]] = {
                  "nothing (it will be translated for you)",
         "changes": "only that word changes; the rest of the line stays "
                    "exactly as it was",
+        "category": "Translation", "scopes": ["segment", "all"], "quick": False,
+        "fill": 'replace "…" with "…"',
     },
     "retranslate": {
         "title": "Translate a passage again",
         "takes": "a time range, and what to change about it "
                  "(\"too literal\", \"simpler\")",
         "changes": "the translation of those lines is rewritten, then spoken",
+        "category": "Translation", "scopes": ["segment"], "quick": True,
+        "fill": "translate this again — it is too literal",
     },
     "set_tone": {
         "title": "Change how a line is delivered",
         "takes": "a time range or a speaker, and a tone such as formal, "
                  "warm or urgent",
         "changes": "the same words are spoken in a different manner",
+        "category": "Voice", "scopes": ["segment", "speaker"], "quick": False,
+        "fill": "deliver this more formally",
     },
     "code_mix": {
         "title": "Keep English words in English",
         "takes": "optionally the terms to protect, e.g. gradient, weight",
         "changes": "technical terms stay English inside the translated "
                    "sentence instead of being translated",
+        "category": "Translation", "scopes": ["segment", "all"], "quick": False,
+        "fill": "keep the English technical terms in English",
     },
     "set_gender": {
         "title": "Change a voice's gender",
         "takes": "a speaker or a moment, and male or female",
         "changes": "that speaker is re-cast from the other gender's voices",
+        "category": "Voice", "scopes": ["speaker", "segment"], "quick": True,
+        "fill": "make this sound female",
     },
     "set_speaker": {
         "title": "Reassign who is talking",
         "takes": "a time range, and which speaker it really is",
         "changes": "those lines move to that speaker and are read in THEIR "
                    "voice; who speaks when is not recomputed",
+        "category": "Speakers", "scopes": ["segment"], "quick": False,
+        "fill": "this is actually SPEAKER_01",
     },
     "set_voice": {
         "title": "Pick a specific voice",
         "takes": "a speaker, and a voice from the catalogue",
         "changes": "that speaker is read by the voice you named",
+        "category": "Voice", "scopes": ["speaker"], "quick": True,
+        "fill": "use <voice> here",
     },
     "set_speed": {
         "title": "Speed up or slow down",
         "takes": "a time range, and how much faster or slower",
         "changes": "the dubbed speech is re-fitted into a shorter or "
                    "longer slot; the picture is untouched",
+        "category": "Timing & audio", "scopes": ["segment"], "quick": True,
+        "fill": "speed this up by 1.2x",
     },
     "lipsync_window": {
         "title": "Lip-sync only part of the video",
         "takes": "a time range, and optionally which lip-sync model",
         "changes": "only that stretch has its mouth re-animated and is "
                    "spliced back into the full timeline",
+        "category": "Lip-sync & video", "scopes": ["segment"], "quick": False,
+        "fill": "lip-sync just this part",
+    },
+    "mute_cue": {
+        "title": "Mute a cue",
+        "takes": "a time range or segment id",
+        "changes": "silences those lines — TTS skips them and the "
+                   "music-and-effects bed plays through; their time becomes "
+                   "a pause the lines either side may borrow instead of "
+                   "speeding up",
+        "category": "Cleanup", "scopes": ["segment"], "quick": True,
+        "fill": "mute this",
+    },
+    "set_target_language": {
+        "title": "Change the target language",
+        "takes": "an Indic language, and optionally a cue or time range "
+                 "(defaults to the whole dub)",
+        "changes": "the scoped lines are re-translated into the new "
+                   "language via Bodhan MT; a whole-dub change re-casts "
+                   "every voice from that language's pool, a scoped change "
+                   "pins a native voice per cue and leaves the rest alone",
+        "category": "Translation", "scopes": ["dub", "segment"], "quick": True,
+        "fill": "translate the whole dub to this language",
     },
 }
 
@@ -512,6 +643,11 @@ def action_catalogue() -> List[Dict[str, Any]]:
             # Derived, never authored -- see the note above.
             "replays": STAGE_PLAIN.get(spec.dirty_from, spec.dirty_from),
             "examples": list(spec.examples or [])[:2],
+            # The workspace metadata. See the USER_ACTIONS note for each.
+            "category": meta["category"],
+            "scopes": list(meta.get("scopes", [])),
+            "quick": bool(meta.get("quick", False)),
+            "fill": meta.get("fill", ""),
         })
     return out
 
@@ -614,7 +750,13 @@ class EditResult:
     lipsync_window: Optional[Tuple[float, float]] = None
     lipsync_model: Optional[str] = None
     translit_model: Optional[str] = None
+    asd_model: Optional[str] = None
     termbase_path: Optional[Path] = None
+    #: Set by `_h_set_target_language` on a whole-dub change. `rerun()`
+    #: prefers it over `cfg.get("target_language")` so the post-MT chain
+    #: replays against the new language, and `commit()` persists it.
+    target_language_override: Optional[str] = None
+    target_script_override: Optional[str] = None
     warnings: List[str] = field(default_factory=list)
 
     @property
@@ -637,6 +779,8 @@ class EditResult:
             "lipsync_model": self.lipsync_model,
             "translit_model": self.translit_model,
             "termbase_path": str(self.termbase_path) if self.termbase_path else None,
+            "target_language_override": self.target_language_override,
+            "target_script_override": self.target_script_override,
             "warnings": list(self.warnings),
         }
 
@@ -902,7 +1046,7 @@ def _h_replace_term(data, seg_ids, op, applied, ctx, res):
             # the old behaviour rewrote those cues anyway.
             applied.warnings.append(f"{sid}: {find!r} not in this line; left alone")
             continue
-        new_text = pattern.sub(repl.replace("\\", "\\\\"), cur)
+        new_text = _tidy_text(pattern.sub(repl.replace("\\", "\\\\"), cur))
         if new_text == cur:
             continue
         _set_segment_text(seg, new_text)
@@ -1258,12 +1402,15 @@ def _h_set_voice(data, seg_ids, op, applied, ctx, res):
         raise EditError("set_voice needs a `voice`")
     engine = op.params.get("engine") or ctx.tts_engine or ctx.voice_engine
     by_id = {str(s.get("id")): s for s in data.get("segments", [])}
-    known, why = _known_voice(voice, engine=engine, language=ctx.target_language,
-                              catalog_json=ctx.voice_catalog_json)
-    if not known:
+    canonical, why = _known_voice(voice, engine=engine,
+                                  language=ctx.target_language,
+                                  catalog_json=ctx.voice_catalog_json)
+    if canonical is None:
         applied.warnings.append(
             f"{voice!r} is not in the {engine!r} catalog ({why}); passing it "
             f"through anyway — the engine will reject it if it is wrong")
+    else:
+        voice = canonical
 
     if op.scope.speaker or op.scope.all:
         speakers = {by_id[s].get("speaker") for s in seg_ids if by_id.get(s)}
@@ -1284,16 +1431,21 @@ def _h_set_voice(data, seg_ids, op, applied, ctx, res):
 
 def _known_voice(voice: str, *, engine: Optional[str],
                  language: Optional[str],
-                 catalog_json: Optional[Path]) -> Tuple[bool, str]:
+                 catalog_json: Optional[Path]) -> Tuple[Optional[str], str]:
+    """Case-insensitive catalog lookup.  Returns ``(canonical_name, why)``
+    where *canonical_name* is the catalog spelling when found, else ``None``.
+    """
     eng = (engine or "").lower()
     try:
         from .voices import load_voice_catalog
         cat = load_voice_catalog(
             "indic-speak" if eng in ("", "bodhan", "indic-speak") else eng,
             language=language, catalog_json=catalog_json)
-        return any(v.voice == voice for v in cat), f"{len(cat)} voices known"
+        match = next((v.voice for v in cat
+                      if v.voice.lower() == voice.lower()), None)
+        return match, f"{len(cat)} voices known"
     except Exception as e:                       # catalog is advisory only
-        return True, f"catalog unreadable: {e}"
+        return voice, f"catalog unreadable: {e}"
 
 
 def _h_set_speed(data, seg_ids, op, applied, ctx, res):
@@ -1375,6 +1527,199 @@ def _h_lipsync_window(data, seg_ids, op, applied, ctx, res):
         + "; the rest of the video is passed through untouched")
 
 
+def _h_mute_cue(data, seg_ids, op, applied, ctx, res):
+    """Silence cues and hand their time back to the timeline.
+
+    Muting is the only way to drop a cue, and it does both halves of that.
+    Mix skips the segment, so nothing is spoken; and `timing` takes the
+    slot out of `_next_slot_start`'s lookahead, so the freed seconds merge
+    into the gap after the preceding cue instead of sitting behind a
+    boundary nobody may cross.
+
+    That second half is what makes the silence USABLE rather than merely
+    silent. Whether it is actually spent is the timing layer's decision and
+    stays there: `--speed-borrow-gap` is 0.0 by default, so by default a
+    muted cue reads as clean M&E bed exactly as it always did. Turn borrow
+    on and the same seconds become budget for a neighbouring line that
+    would otherwise have been sped up. Nothing here forces that trade.
+
+    `dirty_from` is `timing`, not `tts`: TTS still synthesises muted cues,
+    so the clip is there for a revert and a mute costs no Bodhan calls.
+    `timing` rather than `mix` because the freed slot has to be re-planned
+    before mix drops the clip.
+
+    The text is left in the document rather than blanked: `revert` needs
+    it, and a cue the operator wants back is a `--revert`, not a
+    re-translation.
+    """
+    by_id = {str(s.get("id")): s for s in data.get("segments", [])}
+    for sid in seg_ids:
+        seg = by_id.get(sid)
+        if seg is None:
+            continue
+        _backup(seg, "muted")
+        seg["muted"] = True
+        freed = max(0.0, _seg_end(seg) - _seg_start(seg))
+        applied.changes.append(
+            f"{sid}: muted, {freed:.2f}s released as pause")
+    applied.dirty_from = "timing"
+
+
+def _h_set_target_language(data, seg_ids, op, applied, ctx, res):
+    """Swap the target language on scoped cues via Bodhan MT.
+
+    Two paths, chosen by scope:
+
+    - **Whole dub** (`scope.all`): re-translate every cue, swap
+      `data["target_language"]`, clear every voice pin, and let the post-MT
+      replay re-cast voices and re-speak from scratch. `dirty_from="codemix"`
+      — codemix → duration → voices → tts → vc → timing → mix → lipsync.
+    - **Cue list or time window**: re-translate only those cues, pin a
+      per-cue voice from the new language's catalog, and leave the global
+      target language and the other cues untouched. `dirty_from="tts"` — the
+      voices stage is skipped because the voice is already chosen.
+
+    **Speaker-only scope is refused.** A bare speaker has no time bound; a
+    mixed-language result keyed by diarizer labels is unpredictable, and the
+    operator usually means "the speaker, in this window" or "the whole dub".
+    Say so rather than guess.
+
+    MT itself is `models.mt.get_mt("bodhan")`, called once with the full
+    request list — the Bodhan adapter paces its own loop. `BODHAN_MT_KEY` is
+    required; without it the adapter raises on the first call and we surface
+    that as a clean `EditError` rather than a backtrace. The LLM is not
+    touched: this op reaches the pipeline's native translator, not a rewrite.
+    """
+    iso = str(op.params.get("target_language") or "").strip().lower()
+    if not iso:
+        raise EditError(
+            "set_target_language needs a 'target_language' ISO code, e.g. "
+            "hi, mr, ta")
+
+    # One source of truth for the catalogue: the same table the home-page
+    # dropdown reads from. Avoids a second list drifting the first time an
+    # adapter gains or loses support for a language.
+    from ui.langs import LANGUAGES
+    meta = LANGUAGES.get(iso)
+    indic = sorted(k for k, v in LANGUAGES.items() if v["script"] != "latn")
+    if meta is None or meta["script"] == "latn":
+        raise EditError(
+            f"unknown or non-Indic target language {iso!r}. "
+            f"Supported: {', '.join(indic)}")
+
+    # Scope guard: a bare speaker is refused. `scope.all` is the whole-dub
+    # path; segments / time windows / speaker+time all have cue bounds and
+    # are honoured as the per-cue path.
+    sc = op.scope
+    speaker_only = (sc.speaker and not sc.all
+                    and not sc.segments
+                    and sc.start_s is None and sc.end_s is None)
+    if speaker_only:
+        raise EditError(
+            "set_target_language cannot scope to a speaker alone — add a "
+            "time range (e.g. 'SPK_01 from 0:30 to 0:45'), or use the whole "
+            "dub.")
+
+    script = op.params.get("target_script") or None
+
+    try:
+        from models.mt import get_mt
+        from models.mt.base import MTRequest
+        bodhan = get_mt("bodhan")
+    except Exception as e:
+        raise EditError(f"Bodhan MT adapter is not available: {e}") from e
+
+    by_id = {str(s.get("id")): s for s in data.get("segments", [])}
+    requests: List = []
+    for sid in seg_ids:
+        seg = by_id.get(sid)
+        if seg is None:
+            continue
+        src = (seg.get("text") or "").strip()
+        if not src:
+            applied.warnings.append(f"{sid}: no source text, left alone")
+            continue
+        requests.append(MTRequest(
+            id=sid, text=src,
+            source_language=ctx.source_language,
+            target_script=script,
+        ))
+
+    if not requests:
+        raise EditError(
+            "set_target_language: none of the scoped cues carry source text "
+            "to translate")
+
+    try:
+        result = bodhan.translate(
+            requests,
+            target_language=iso,
+            target_script=script,
+            source_language=ctx.source_language,
+        )
+    except Exception as e:
+        raise EditError(f"Bodhan MT refused the translation: {e}") from e
+
+    for mt_seg in result.segments:
+        seg = by_id.get(mt_seg.id)
+        if seg is None:
+            continue
+        _set_segment_text(seg, mt_seg.text or "")
+        _backup(seg, "edit_target_language")
+        seg["edit_target_language"] = iso
+
+    whole = bool(sc.all)
+    if whole:
+        data["target_language"] = iso
+        if script:
+            data["target_script"] = script
+        for seg in data.get("segments") or []:
+            if seg.get("tts_voice"):
+                _backup(seg, "tts_voice")
+                seg["tts_voice"] = None
+        res.target_language_override = iso
+        if script:
+            res.target_script_override = script
+        applied.dirty_from = "codemix"
+        applied.changes.append(
+            f"target language -> {iso} ({meta['english']} / {meta['native']}); "
+            f"{len(requests)} cue(s) re-translated, voices cleared for re-cast")
+    else:
+        engine = ctx.tts_engine or ctx.voice_engine
+        pinned = 0
+        for mt_seg in result.segments:
+            seg = by_id.get(mt_seg.id)
+            if seg is None:
+                continue
+            raw_gender = (seg.get("gender") or seg.get("edit_gender")
+                          or "female")
+            gender = str(raw_gender).lower()
+            if gender not in ("male", "female"):
+                gender = "female"
+            try:
+                voice, why = voice_for_gender(
+                    gender, engine=engine, language=iso,
+                    catalog_json=ctx.voice_catalog_json)
+            except EditError as e:
+                applied.warnings.append(f"{mt_seg.id}: {e}")
+                continue
+            if voice is None:
+                applied.warnings.append(
+                    f"{mt_seg.id}: {why}; left on the original voice")
+                continue
+            _backup(seg, "tts_voice")
+            seg["tts_voice"] = voice
+            pinned += 1
+            applied.changes.append(
+                f"{mt_seg.id}: -> {iso}, voice={voice}")
+        applied.dirty_from = "tts"
+        applied.changes.insert(
+            0,
+            f"{len(requests)} cue(s) re-translated to {iso} "
+            f"({meta['english']} / {meta['native']}); "
+            f"pinned {pinned} native voice(s)")
+
+
 _HANDLERS: Dict[str, Callable] = {
     "set_text": _h_set_text,
     "retranslate": _h_retranslate,
@@ -1386,6 +1731,8 @@ _HANDLERS: Dict[str, Callable] = {
     "replace_term": _h_replace_term,
     "set_speed": _h_set_speed,
     "lipsync_window": _h_lipsync_window,
+    "mute_cue": _h_mute_cue,
+    "set_target_language": _h_set_target_language,
 }
 
 assert set(_HANDLERS) == set(OPS), "handler/spec drift"

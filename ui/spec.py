@@ -127,7 +127,7 @@ def build(job_root: Path, *, manifest: Dict[str, Any],
         part = f"Whole video ({_clock(dur)})"
     else:
         part = "Whole video"
-    lines.append(_line("part", "Part dubbed", part))
+    lines.append(_line("part", "Clip dubbed", part))
 
     lang = cfg.get("target_language") or cfg.get("language")
     lines.append(_line("language", "Dubbing into", describe_lang(lang)))

@@ -153,6 +153,7 @@ def run_restore(
     scale: Optional[str] = None,
     only_center_face: bool = False,
     num_gpus: Optional[int] = None,
+    workers_per_gpu: Optional[int] = None,
     out_dir: Optional[Path] = None,
 ) -> Dict[str, Any]:
     """Restore a job's render. Returns a JSON-able summary, never raises.
@@ -161,6 +162,11 @@ def run_restore(
     turns on `--bg-upsample`, because at `upscale > 1` GFPGAN gives the face
     real detail while the background is only LANCZOS-interpolated to meet it
     -- invisible at a same-size target, obvious on a 512p source doubled.
+
+    `workers_per_gpu` splits each card further. None is the script's default
+    of one worker per card, which is what every run did before this existed;
+    the measured idle (33.9% mean utilisation, 1691 MiB of 16311) is the
+    argument for raising it, and CPU contention is the thing that caps it.
     """
     from models.restore import get_restore
     from models.restore.base import RestoreRequest
@@ -194,7 +200,7 @@ def run_restore(
         video=render, out_path=silent, source=source, gated=gated,
         strength=strength, scale_to=scale_to,
         only_center_face=only_center_face, bg_upsample=bg_upsample,
-        num_gpus=num_gpus))
+        num_gpus=num_gpus, workers_per_gpu=workers_per_gpu))
 
     if res.error or not res.produced:
         return {"ok": False, "stage": "9i", "model": model,
@@ -226,6 +232,12 @@ def run_restore(
             "changed_frames": res.extra.get("changed_frames"),
             "gated": bool(res.extra.get("mask")),
             "strength": strength,
+            # What actually ran, not what was asked for: the script collapses
+            # to fewer workers when a shard would fall under
+            # MIN_FRAMES_PER_SHARD, and a wall time is only comparable
+            # against the split that produced it.
+            "workers": res.extra.get("workers"),
+            "workers_per_gpu": workers_per_gpu,
             "scale_to": list(scale_to) if scale_to else None,
             "wall_s": round(dt, 1),
             "s_per_frame": round(dt / max(1, res.frames or 1), 4)}

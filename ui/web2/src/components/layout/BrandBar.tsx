@@ -1,6 +1,6 @@
 import { useStore } from '../../store/useStore';
 import { Button, DemoChip } from '../ui/Button';
-import { IconKeyboard, IconMoon, IconPanel, IconPlus, IconSun } from '../ui/Icons';
+import { IconKeyboard, IconMoon, IconPlus, IconSun } from '../ui/Icons';
 import { Tooltip } from '../ui/Tooltip';
 import { cn } from '../../lib/cn';
 import { MOCKED } from '../../api';
@@ -16,12 +16,11 @@ import { MOCKED } from '../../api';
  */
 export function BrandBar() {
   const setNewJobOpen = useStore((s) => s.setNewJobOpen);
-  const toggleSpec = useStore((s) => s.toggleSpec);
-  const specOpen = useStore((s) => s.specOpen);
   const theme = useStore((s) => s.theme);
   const toggleTheme = useStore((s) => s.toggleTheme);
-  const selected = useStore((s) => s.selected);
   const setShortcutsOpen = useStore((s) => s.setShortcutsOpen);
+  const mode = useStore((s) => s.mode);
+  const toggleMode = useStore((s) => s.toggleMode);
 
   return (
     <header
@@ -53,27 +52,46 @@ export function BrandBar() {
         ·
       </span>
       <span className="hidden truncate text-[12.5px] text-ink3 sm:inline">
-        Voice translation &amp; video editing
+        Indic video dubbing
       </span>
 
       <div className="ml-auto flex items-center gap-1.5">
-        <Tooltip label={specOpen ? 'Hide how this job was set up' : 'Show how this job was set up'}>
-          <button
-            type="button"
-            onClick={toggleSpec}
-            aria-pressed={specOpen}
-            disabled={!selected}
-            aria-label="Toggle the job settings panel"
-            className={cn(
-              'rounded-lg p-2 transition-colors disabled:opacity-40',
-              specOpen
-                ? 'bg-brand/20 text-brand-ink'
-                : 'text-ink3 hover:bg-ink/[0.07] hover:text-ink',
-            )}
+        {/*
+          A view switch, not a permission. It only changes how much of the
+          pipeline the screen admits to; every control stays reachable in
+          both modes. See `mode` in the store for why it is not a check.
+        */}
+        <Tooltip
+          label={
+            mode === 'admin'
+              ? 'Showing technical detail — switch to the simple view'
+              : 'Show technical detail: run config, model names, job ids, errors'
+          }
+        >
+          <div
+            role="group"
+            aria-label="View mode"
+            className="hidden rounded-lg border border-line bg-canvas/60 p-0.5 sm:flex"
           >
-            <IconPanel />
-          </button>
+            {(['user', 'admin'] as const).map((m) => (
+              <button
+                key={m}
+                type="button"
+                onClick={() => { if (mode !== m) toggleMode(); }}
+                aria-pressed={mode === m}
+                className={cn(
+                  'rounded-[6px] px-2 py-1 text-[11.5px] font-medium capitalize transition-colors',
+                  mode === m
+                    ? 'bg-brand/20 text-brand-ink'
+                    : 'text-ink3 hover:text-ink',
+                )}
+              >
+                {m}
+              </button>
+            ))}
+          </div>
         </Tooltip>
+
 
         <Tooltip label="Keyboard shortcuts (?)">
           <button

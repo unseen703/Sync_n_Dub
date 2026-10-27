@@ -55,6 +55,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from . import jobs as _jobs
 from . import tracing as _tracing
 from .edits import (STAGE_ORDER, sample_prompts_text, EditContext, EditError, EditOp, EditResult,
+                    _lipsync_model_ids,
                     OP_SPECS, OPS, Scope, apply_edits, rerun_stages, revert,
                     _hhmmss, _seg_end, _seg_start, _seg_text)
 
@@ -257,6 +258,112 @@ def op_catalogue() -> str:
     return "\n".join(lines)
 
 
+def _cue_number_map(data: Dict[str, Any]) -> Dict[int, str]:
+    """`{1: "SEG_0000", 2: "SEG_0001", ...}` — N is 1-based in start order.
+
+    The number is **what the UI shows** on each flashcard, so a user who says
+    "cue 5" to the edit agent means the 5th row in the Clips panel. Having
+    one function own that mapping is why the UI and the agent stay in sync.
+    """
+    segs = sorted(data.get("segments") or [], key=_seg_start)
+    return {i + 1: s.get("id") for i, s in enumerate(segs) if s.get("id")}
+
+
+# `cue 5`, `cues 1 and 3`, `cue #4`, `cues 1 to 3`, `cue 2, 4, 6`
+# The leading boundary tolerates sentence-start, whitespace, or punctuation.
+_CUE_PHRASE_RE = re.compile(
+    r"(?P<lead>\bcues?)\s+#?\s*(?P<nums>\d+(?:\s*(?:[-–—]|,|\band\b|\bto\b)\s*\d+)*)",
+    re.I,
+)
+
+# Bare `#5` outside a `cue …` phrase. Word boundary before, digit after.
+# Only matches when preceded by start-of-string or whitespace/punctuation so
+# a stray `#` inside a quoted replacement reads as literal text.
+_HASH_CUE_RE = re.compile(r"(?:^|(?<=[\s(.,;:!?]))#\s*(?P<num>\d+)\b")
+
+# `segment 4`, `segment 0004`, `seg 12`, `segments 2 and 5`.
+#
+# DELIBERATELY NOT THE SAME MAPPING AS `cue N`, and the difference is the
+# whole reason this is a second pattern rather than another alternative in
+# `_CUE_PHRASE_RE`. "cue N" is the 1-based row number on the UI flashcard,
+# so cue 5 is `SEG_0004`. "segment N" is the JSON's own word, and the number
+# a person reads there is the one inside the id, which is 0-based: segment 4
+# is `SEG_0004`. Folding the two together would silently shift every
+# `segment N` request by one cue.
+#
+# The underscore in `SEG_0004` is not whitespace, so an id that is already
+# canonical does not match this and is left alone.
+_SEGMENT_REF_RE = re.compile(
+    r"\b(?:segments?|segs?)\s+#?\s*(?P<nums>\d+(?:\s*(?:[-–—]|,|\band\b|\bto\b)\s*\d+)*)",
+    re.I,
+)
+
+
+def _expand_number_list(raw: str) -> List[int]:
+    """`"1-3"` → `[1,2,3]`,  `"1 and 4"` → `[1,4]`,  `"2, 3 to 5"` → `[2,3,4,5]`."""
+    tokens = re.split(r"\s*(?:,|\band\b)\s*", raw, flags=re.I)
+    out: List[int] = []
+    for tok in tokens:
+        m = re.match(r"\s*(\d+)\s*(?:[-–—]|to)\s*(\d+)\s*$", tok, re.I)
+        if m:
+            a, b = int(m.group(1)), int(m.group(2))
+            lo, hi = (a, b) if a <= b else (b, a)
+            out.extend(range(lo, hi + 1))
+            continue
+        m = re.match(r"\s*(\d+)\s*$", tok)
+        if m:
+            out.append(int(m.group(1)))
+    # Preserve order but drop dups so "cues 1, 2, 1" stays "SEG_0000, SEG_0001".
+    seen = set()
+    return [n for n in out if not (n in seen or seen.add(n))]
+
+
+def resolve_cue_aliases(nlq: str, data: Dict[str, Any]) -> str:
+    """Rewrite `cue N` and `#N` inside an edit request into their SEG ids.
+
+    Downstream parsing (LLM and rule) already understands SEG ids, so the
+    simplest way to add short-number support is to translate before parsing.
+    An out-of-range number is left as literal text so the LLM can see it and
+    refuse rather than silently redirecting to a different cue.
+    """
+    nums = _cue_number_map(data)
+    if not nums:
+        return nlq
+
+    def _replace_phrase(m: re.Match) -> str:
+        wanted = _expand_number_list(m.group("nums"))
+        resolved = [nums[n] for n in wanted if n in nums]
+        if not resolved or len(resolved) != len(wanted):
+            # At least one out-of-range number — leave the whole phrase alone.
+            return m.group(0)
+        if len(resolved) == 1:
+            return resolved[0]
+        return ", ".join(resolved)
+
+    def _replace_hash(m: re.Match) -> str:
+        n = int(m.group("num"))
+        return nums[n] if n in nums else m.group(0)
+
+    # `segment N` carries its own id number, so it is checked against the
+    # ids that exist rather than against the 1-based cue map above.
+    known_ids = {str(s.get("id")) for s in data.get("segments") or []}
+
+    def _replace_segment(m: re.Match) -> str:
+        wanted = _expand_number_list(m.group("nums"))
+        resolved = [f"SEG_{n:04d}" for n in wanted]
+        if not resolved or any(sid not in known_ids for sid in resolved):
+            # An id this job does not have is left as literal text, so the
+            # model sees it and refuses rather than being handed a
+            # plausible neighbour.
+            return m.group(0)
+        return ", ".join(resolved)
+
+    out = _CUE_PHRASE_RE.sub(_replace_phrase, nlq)
+    out = _SEGMENT_REF_RE.sub(_replace_segment, out)
+    out = _HASH_CUE_RE.sub(_replace_hash, out)
+    return out
+
+
 def segment_digest(data: Dict[str, Any], *, limit: int = _MAX_PROMPT_SEGMENTS,
                    around: Optional[List[float]] = None) -> str:
     """A compact cue table for the prompt, centred on any times mentioned."""
@@ -276,16 +383,21 @@ def segment_digest(data: Dict[str, Any], *, limit: int = _MAX_PROMPT_SEGMENTS,
         else:
             step = max(1, len(segs) // limit)
             chosen = segs[::step][:limit]
+    # Row number is global (over `segs`), not local to `chosen` — a windowed
+    # view still shows the same `#N` the UI shows, so "cue 42" lines up even
+    # when 42 isn't in the window.
+    idx_of = {id(s): i + 1 for i, s in enumerate(segs)}
     rows = []
     for s in chosen:
         text = _seg_text(s).replace("\n", " ")
         if len(text) > 90:
             text = text[:87] + "…"
-        rows.append(f'{s.get("id")}\t{_hhmmss(_seg_start(s))}-'
-                    f'{_hhmmss(_seg_end(s))}\t{s.get("speaker") or "?"}\t{text}')
+        rows.append(f'#{idx_of[id(s)]}\t{s.get("id")}\t'
+                    f'{_hhmmss(_seg_start(s))}-{_hhmmss(_seg_end(s))}\t'
+                    f'{s.get("speaker") or "?"}\t{text}')
     head = (f"{len(segs)} cue(s) total"
             + (f", showing {len(chosen)}" if len(chosen) < len(segs) else ""))
-    return head + "\nid\tstart-end\tspeaker\ttext\n" + "\n".join(rows)
+    return head + "\n#\tid\tstart-end\tspeaker\ttext\n" + "\n".join(rows)
 
 
 #: The operation catalogue lives HERE, in the system prompt, not in the user
@@ -309,7 +421,7 @@ def segment_digest(data: Dict[str, Any], *, limit: int = _MAX_PROMPT_SEGMENTS,
 #: It already caught one: `set_speaker` is registered in `backend/edits.py`
 #: but `op_catalogue()` never advertised it, so the model could not emit an
 #: op the pipeline has supported all along. This prompt lists all nine.
-_SYSTEM = """You are an edit-planning agent for a dubbing and lip-syncing pipeline.
+_SYSTEM_TEMPLATE = """You are an edit-planning agent for a dubbing and lip-syncing pipeline.
 
 Your task is to convert a user's natural-language editing request into a minimal list of valid JSON operations. You do not execute edits. You only specify the edits the pipeline should perform.
 
@@ -380,12 +492,31 @@ Use only the following operation names and parameters.
 
 9. lipsync_window
    Run lip-sync only on the specified time window.
-   Optional params: model ("wav2lip", "musetalk", or "latentsync"; include only when requested or needed to change the configured model)
+   Optional params: model ({{lipsync_models}}; include only when requested or needed to change the configured model)
 
 10. replace_term
    Replace one word or phrase inside the line, leaving every other character identical.
-   Required params: find (the word or phrase exactly as it appears now)
-   Optional params: replace (the exact replacement; omit it to have `find` translated into the target language)
+   Required params: find
+     Copy the phrase CHARACTER FOR CHARACTER as it appears in the cue text, including any punctuation that is part of it. If the user quotes a phrase that ends in "?", "!", "।" or "." and that mark is present in the cue, it belongs in `find`. Leaving it out strands the mark in the line after the phrase around it is gone.
+   Optional params: replace
+     - A string: the exact replacement.
+     - "" (an empty string): DELETE `find` from the line. This is how "remove", "drop", "take out", "get rid of" and "delete this phrase" are expressed. Spacing around the cut is repaired for you.
+     - Omitted entirely: translate `find` into the target language. Use this ONLY when the user asks for a translation. Never omit `replace` for a removal request -- omitting it substitutes a translation where a deletion was asked for.
+   To remove a phrase and leave punctuation standing in its place, pass that punctuation as `replace`. That is one operation, not two.
+
+11. mute_cue
+   Remove the scoped cue(s) from the dub: TTS skips them, the music-and-effects bed plays through, and their time is released as a pause the neighbouring lines may borrow. This is the operation for "mute", "silence", "delete", "remove" and "cut" when the user means a WHOLE cue. There is no separate delete operation.
+   Required params: none
+
+12. set_target_language
+   Re-translate the scoped cues (or the whole dub) into a different Indic language via Bodhan MT, then re-cast voices and re-speak. Use this when the user asks to change the dub's language ("translate to Marathi", "dub it in Tamil", "change the target language to Bengali"). This is a distinct operation from retranslate: retranslate rewrites the SAME language with a hint, while set_target_language switches the output language entirely.
+   Required params: target_language (ISO code of a supported Indic language)
+   Optional params: target_script (script override, only when the request names one)
+   Scope rules:
+     - Whole dub: use {"all": true}. This is the default when no narrower scope is explicit.
+     - Cue list or time window: honour it, so a mixed-language result is produced.
+     - Speaker-only scope is REFUSED by the pipeline. If the user names a speaker alone, pair it with a time range the user supplied; otherwise return {"ops": []}.
+   Do not invent an ISO code the user did not name. If the language is not one of the supported Indic languages, return {"ops": []}.
 
 Do not invent operations, parameters, speaker IDs, cue IDs, or configuration values.
 
@@ -401,7 +532,7 @@ Scope may contain only these keys:
 Use the smallest scope that accurately represents the request.
 
 1. Explicit cue or segment IDs:
-   Use "segments" with the exact cue IDs provided.
+   Use "segments" with the exact cue IDs provided. The user may refer to a cue by its short number ("cue 5", "#5", "cues 1 and 3", "cues 2-4"); these are rewritten into their SEG ids before you see this prompt, so you always receive canonical ids. If a number falls outside the table, it is left in the request literally — treat it as an unknown cue reference.
 
 2. Explicit speaker:
    Use "speaker" with the exact speaker ID.
@@ -440,6 +571,9 @@ Choose the operation that most directly matches the requested change.
 - Assign a particular TTS voice: set_voice.
 - Change speech speed: set_speed.
 - Restrict lip-sync processing to a time window or request a specific lip-sync model: lipsync_window.
+- Remove a word or phrase from inside a line, leaving the rest of the line standing: replace_term with replace set to "". Do not use mute_cue for this -- it discards the whole cue, not the phrase.
+- Silence, delete, remove or cut a WHOLE cue: mute_cue. The distinction that matters is phrase versus cue, not "mute" versus "delete": a request naming text inside the line is replace_term, a request naming the cue itself is mute_cue.
+- Change the dub's output language ("translate the dub to Marathi", "dub it in Tamil", "change the target language"): set_target_language. Never use retranslate for a language switch — retranslate rewrites the SAME target language.
 
 Do not substitute one operation for another merely because they can produce similar results.
 
@@ -485,6 +619,15 @@ Before responding, silently verify:
 
 Return the JSON object only."""
 
+#: The prompt the model actually sees. The lip-sync model list is filled in
+#: from the REGISTRY rather than typed into the template, for the reason
+#: `edits._lipsync_model_ids` exists at all: the hand-written list read
+#: "wav2lip, musetalk, latentsync" while five adapters were registered, so
+#: two of them were unreachable through the agent. Substituting at import
+#: keeps `_SYSTEM` a plain string, which is what the drift guards in
+#: `tests/test_edit_agent.py` grep.
+_SYSTEM = _SYSTEM_TEMPLATE.replace("{{lipsync_models}}", _lipsync_model_ids())
+
 
 def parse_request(nlq: str, *, data: Dict[str, Any],
                   client=None) -> Tuple[List[EditOp], str]:
@@ -506,6 +649,10 @@ def parse_request(nlq: str, *, data: Dict[str, Any],
     than the internal op names, which are the agent's vocabulary and not
     anything the user typed.
     """
+    # `cue 5` / `#5` → `SEG_0004` before either parser runs, so both see the
+    # same canonical cue ids the rest of the agent and `edits.py` understand.
+    nlq = resolve_cue_aliases(nlq, data)
+
     llm_abstained = False
     if client is not None and client.available():
         try:
@@ -750,14 +897,68 @@ def _rule_parse(nlq: str) -> List[EditOp]:
                           params={"tone": m.group(1)},
                           note=f"shift the register to {m.group(1)}"))
 
+    # target-language switch -- `translate ... to <lang>`, `change (the)
+    # (target) language to <lang>`, `dub (it) in <lang>`, `retranslate ...
+    # into <lang>`. Ordered BEFORE retranslate so that a request naming a
+    # target language is a language SWITCH, not a same-language rewrite.
+    # Replace_term's `translate the word "X" to Y` has already fired above
+    # and consumed the word. We additionally require a known Indic language
+    # on the right -- `translate to English` is latn and comes back as
+    # nothing rather than a wrong op.
+    iso = _resolve_target_language(t)
+    if iso:
+        # No scope hint -> whole dub. A scope term the user included is
+        # honoured verbatim (segments / time window). Speaker-only is left
+        # for the handler to refuse.
+        lang_scope = scope if not scope.is_empty() else Scope(all=True)
+        ops.append(EditOp(op="set_target_language",
+                          scope=lang_scope,
+                          params={"target_language": iso},
+                          note=f"switch target language to {iso}"))
+
     # retranslate
     if re.search(r"re[\s-]?translate|better translation|wrong translation|"
                  r"fix the translation|translation is", low) and not any(
-                     o.op in ("set_text",) for o in ops):
+                     o.op in ("set_text", "set_target_language") for o in ops):
         ops.append(EditOp(op="retranslate", scope=scope,
                           params={"instruction": t},
                           note="re-translate the scoped cues"))
     return ops
+
+
+def _resolve_target_language(text: str) -> Optional[str]:
+    """Pull an Indic ISO code out of a free-text request, or None.
+
+    Only fires when the request names a language-switch verb -- `translate`,
+    `retranslate`, `dub`, or `(change the) target language` -- followed by
+    `to`/`in`/`into` and a token the shared `ui.langs.LANGUAGES` table
+    recognises (ISO code, English name, or native-script name).
+    """
+    if not re.search(r"\b(?:translate|retranslate|dub|language)\b",
+                     text, re.I):
+        return None
+    try:
+        from ui.langs import LANGUAGES
+    except Exception:
+        return None
+    name_to_iso: Dict[str, str] = {}
+    for iso, meta in LANGUAGES.items():
+        if meta.get("script") == "latn":
+            continue
+        name_to_iso[iso.lower()] = iso
+        name_to_iso[(meta.get("english") or "").strip().lower()] = iso
+        native = (meta.get("native") or "").strip()
+        if native:
+            name_to_iso[native] = iso
+    # `to Marathi`, `into Tamil`, `in मराठी`. English/native tokens may
+    # include spaces (none do in the current table but keep the group
+    # permissive).
+    m = re.search(r"\b(?:to|into|in)\s+([A-Za-zऀ-᱿]+)\b", text)
+    if not m:
+        return None
+    key = m.group(1).strip().lower()
+    iso = name_to_iso.get(key) or name_to_iso.get(m.group(1).strip())
+    return iso
 
 
 # ---------------------------------------------------------------------------
@@ -1001,7 +1202,8 @@ def speed_setup_from_config(cfg: Dict[str, Any]):
 def rerun(plan: EditPlan, *, device: Optional[str] = None,
           num_gpus: Optional[int] = None,
           speed_setup=None,
-          data_dir: Optional[Path] = None) -> Dict[str, Any]:
+          data_dir: Optional[Path] = None,
+          mix_producer_tag: Optional[str] = None) -> Dict[str, Any]:
     """Replay the stages the edit invalidated, and nothing else.
 
     `data_dir` is the caller's, not the original run's: a job folder that has
@@ -1033,8 +1235,10 @@ def rerun(plan: EditPlan, *, device: Optional[str] = None,
         skip_stems=bool(cfg.get("skip_stems")),
         asr_language=cfg.get("asr_language"),
         mt_model=cfg.get("mt"),
-        mt_target_language=cfg.get("target_language"),
-        mt_target_script=cfg.get("target_script"),
+        mt_target_language=(res.target_language_override
+                            or cfg.get("target_language")),
+        mt_target_script=(res.target_script_override
+                          or cfg.get("target_script")),
         videos_dir=view.root / "videos",
     )
     _result, video, dia_input, me_stem, turns = boot
@@ -1075,11 +1279,24 @@ def rerun(plan: EditPlan, *, device: Optional[str] = None,
         me_stem=me_stem,
         reference_audio_src=dia_input,
         out_root=view.root,
-        target_language=cfg.get("target_language"),
-        target_script=cfg.get("target_script"),
+        # `set_target_language` writes the new language onto `res` so the
+        # replay uses it even though `cfg` (read off the manifest) still
+        # names the old one. The handler also mutates `data["target_language"]`
+        # in the merged JSON for the per-cue consumers.
+        target_language=(res.target_language_override
+                         or cfg.get("target_language")),
+        target_script=(res.target_script_override
+                       or cfg.get("target_script")),
         source_language=cfg.get("asr_language"),
         turns=turns,
         device=device or nsget("device"),
+        # 6 (relocated). ASD scores faces at the gate (for gender) and at the
+        # lip-sync replay (for face selection). Pass the configured model when
+        # either stage is replayed; `_run_asd_stage` is idempotent and reuses
+        # scores already on disk, so this never double-scores.
+        asd_model=((res.asd_model or cfg.get("asd_model") or cfg.get("asd"))
+                   if ("lipsync" in stages or "voices" in stages) else None),
+        asd_on_screen_threshold=cfg.get("asd_on_screen_threshold", 0.3),
         # 9b
         translit_model=(res.translit_model if "codemix" in stages else None),
         termbase_path=res.termbase_path or nsget("termbase"),
@@ -1119,6 +1336,10 @@ def rerun(plan: EditPlan, *, device: Optional[str] = None,
         mix_clip_source=(setup.mix_clip_source if setup is not None
                          else nsget("mix_clip_source", "auto")),
         mux_video=not bool(nsget("no_mux")),
+        # Caller-supplied tag -- `ui/runner.py` derives it from the edit
+        # record filename, so `mix/versions/` grows one dubbed.wav/mp4 pair
+        # per edit replay. None skips the snapshot.
+        mix_producer_tag=mix_producer_tag,
         # 9h
         lipsync_model=((res.lipsync_model or cfg.get("lipsync"))
                        if "lipsync" in stages else None),
@@ -1135,6 +1356,39 @@ def rerun(plan: EditPlan, *, device: Optional[str] = None,
         "lipsync_mp4": str(post.lipsync_mp4) if post.lipsync_mp4 else None,
         "lipsync_error": post.lipsync_error,
     }
+
+
+def _latentsync_targets_npz(root: Path, video: Path, *, device: str = "cuda"):
+    """Build the per-frame face targets LatentSync reads, from the ASD scores.
+
+    LatentSync ignores `coord_list` (it needs 106 landmarks per frame), so the
+    speaking-face choice reaches it only through this npz. Built from whatever
+    `asd/*.scores.npz` is on disk (loconet, after `_run_asd_stage`). Best
+    effort: on any failure the adapter falls back to its own largest-face
+    choice, which is the pre-ASD behaviour rather than a hard error.
+    """
+    try:
+        from .asd import find_scores_npz, load_scores_npz
+        from .lipsync_targets import build_targets, save_targets
+        from models.faces.base import FaceTracks
+
+        npz = find_scores_npz(root / "asd", video.stem)
+        faces = sorted((root / "faces").glob("*.npz"))
+        if not npz or not faces:
+            log.warning("latentsync targets: no ASD scores/faces under %s; the "
+                        "adapter will pick a face itself", root)
+            return None
+        tracks = FaceTracks.load_npz(faces[0])
+        asd = load_scores_npz(npz)
+        payload, _ = build_targets(video, tracks, asd, device=device)
+        out = root / "targets" / f"{video.stem}.targets.npz"
+        save_targets(payload, out)
+        log.info("latentsync targets -> %s", out)
+        return out
+    except Exception as e:                               # noqa: BLE001
+        log.warning("latentsync targets build failed (%s); the adapter will "
+                    "pick a face itself", e)
+        return None
 
 
 def _rerun_lipsync_only(plan: EditPlan, *, num_gpus: Optional[int]) -> Dict[str, Any]:
@@ -1171,6 +1425,29 @@ def _rerun_lipsync_only(plan: EditPlan, *, num_gpus: Optional[int]) -> Dict[str,
     ls_kwargs: Dict[str, Any] = {}
     if cfg.get("lipsync_batch_size"):
         ls_kwargs["batch_size"] = cfg["lipsync_batch_size"]
+    # LatentSync 1.5 UI defaults for the render button. `memory_efficient`
+    # composites straight into the encoder so only one copy of the clip is
+    # resident instead of three -- measured ~12 GiB -> ~4.7 GiB per shard,
+    # and the pixels are identical. `inference_steps=10` + `enable_deepcache`
+    # roughly halve the UNet cost; this is the fast combo, and it DOES soften
+    # the mouth (DeepCache leaves ~4 full passes at 10 steps -- see
+    # `latentsync_adapter.py`), which is the trade being taken on purpose.
+    #
+    # latentsync15 ONLY: the registry drops kwargs an adapter does not accept,
+    # but gating keeps the other models on their own defaults and makes the
+    # log honest about what was set. `cfg` still overrides inference_steps and
+    # deepcache -- but NOT memory_efficient (see below).
+    if str(model).strip() == "latentsync15":
+        # memory_efficient is FORCED on for every UI latentsync1.5 render, not
+        # merely defaulted. It only changes WHEN frames are freed -- one copy of
+        # the clip resident instead of three -- so the pixels are identical, and
+        # it roughly thirds peak host RAM: a 90s-segment run measured ~60 GB with
+        # it off. There is no quality reason to turn it off, so cfg cannot.
+        ls_kwargs["memory_efficient"] = True
+        ls_kwargs.setdefault(
+            "inference_steps", int(cfg.get("lipsync_inference_steps", 10)))
+        ls_kwargs.setdefault(
+            "enable_deepcache", bool(cfg.get("lipsync_deepcache", True)))
     log.info("edit rerun: lip-sync kwargs from manifest: %s",
              ls_kwargs or "(none recorded; adapter defaults apply)")
     # WHICH face to animate, same as stage 9h in the full chain.
@@ -1181,11 +1458,37 @@ def _rerun_lipsync_only(plan: EditPlan, *, num_gpus: Optional[int]) -> Dict[str,
     # is the path that matters most: it is how the UI finishes a draft, so
     # leaving it out would have fixed the pipeline while the button everyone
     # actually presses carried on animating whoever was found first.
-    from .pipeline import _asd_coord_list
+    from .pipeline import _asd_coord_list, _run_asd_stage, _turns_from_merged
 
+    # Run ASD (loconet) just before lip-sync if it has not been scored yet.
+    # This path bypasses `run_post_mt_stages`, so without this it only READ
+    # existing scores -- and since ASD was relocated out of the main pipeline,
+    # a fresh job reaches here with none and lip-syncs UNGATED. `_run_asd_stage`
+    # is idempotent: it scores loconet the first time and reuses after (and
+    # reuses the cast gate's scores when present).
+    asd_model = cfg.get("asd_model") or cfg.get("asd") or "loconet"
+    try:
+        _turns = _turns_from_merged(
+            json.loads(Path(view.merged_json).read_text()))
+    except Exception:                                    # noqa: BLE001
+        _turns = []
+    _audio_dir = view.root / "audio"
+    _ref_audio = _audio_dir / f"{video.stem}.dialogue.16k.mono.wav"
+    if not _ref_audio.exists():
+        _ref_audio = _audio_dir / f"{video.stem}.16k.mono.wav"
+    _run_asd_stage(
+        view.root, video, asd_model=asd_model, turns=_turns,
+        reference_audio=_ref_audio,
+        asd_on_screen_threshold=float(cfg.get("asd_on_screen_threshold", 0.3)))
+
+    # MuseTalk reads `coord_list`; LatentSync ignores it and reads a targets
+    # npz. Build whichever the chosen model consumes -- both off the loconet
+    # scores just written -- so the speaking face reaches either adapter.
     _targets = _asd_coord_list(
         view.root, video, model,
         bbox_shift=int(cfg.get("bbox_shift") or 0))
+    _targets_npz = (_latentsync_targets_npz(view.root, video)
+                    if str(model).strip().startswith("latentsync") else None)
     out = run_lipsync(
         view.merged_json, model=model, source_video=video,
         driving_audio=wavs[-1], out_dir=view.root / "lipsync",
@@ -1193,6 +1496,7 @@ def _rerun_lipsync_only(plan: EditPlan, *, num_gpus: Optional[int]) -> Dict[str,
         num_gpus=num_gpus, window=res.lipsync_window,
         lipsync_kwargs=ls_kwargs,
         coord_list=(_targets[0] if _targets else None),
+        targets_npz=_targets_npz,
     )
     return {"status": "ok", "stages": ["lipsync"],
             "lipsync_mp4": str(out.out_video), "lipsync_error": out.error}

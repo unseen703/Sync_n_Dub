@@ -20,6 +20,7 @@ export function SpecPanel({ onClose }: { onClose: () => void }) {
   const spec = useStore((s) => s.spec);
   const selected = useStore((s) => s.selected);
   const language = useStore((s) => s.speakers?.language ?? null);
+  const admin = useStore((s) => s.mode === 'admin');
 
   return (
     <div className="flex h-full flex-col">
@@ -96,7 +97,10 @@ export function SpecPanel({ onClose }: { onClose: () => void }) {
               ))}
             </dl>
 
-            {/* The 2 a.m. view: kept, one click deep. */}
+            {/* The 2 a.m. view: kept, one click deep — and only in admin
+                mode, where a wall of JSON is what was asked for rather than
+                the first thing a new user trips over. */}
+            {admin ? (
             <Collapsible.Root className="mt-5 border-t border-line pt-3">
               <Collapsible.Trigger
                 className="group flex w-full items-center gap-1.5 text-[12px] text-ink3
@@ -118,6 +122,7 @@ export function SpecPanel({ onClose }: { onClose: () => void }) {
                 </pre>
               </Collapsible.Content>
             </Collapsible.Root>
+            ) : null}
           </>
         )}
       </div>

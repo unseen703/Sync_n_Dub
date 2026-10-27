@@ -69,7 +69,7 @@ export function VoicePicker({
         disabled={disabled || options.length === 0}
         aria-label={`Voice for ${speaker.label ?? speaker.id}`}
         className={cn(
-          'inline-flex h-9 min-w-[9.5rem] items-center justify-between gap-2 rounded-lg border px-2.5',
+          'inline-flex h-8 min-w-[9.5rem] items-center justify-between gap-2 rounded-lg border px-2.5',
           'text-[13px] transition-colors disabled:cursor-not-allowed disabled:opacity-50',
           'border-edge/70 bg-surface/70 text-ink hover:border-edge',
         )}

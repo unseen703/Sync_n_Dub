@@ -49,7 +49,8 @@ from . import jobs as _jobs
 from .align import (align_asr, align_tts_segments, apply_alignment_to_asr,
                     attach_visemes)
 from .asd import (SCORES_SUFFIX as ASD_SCORES_SUFFIX, assign_faces_to_turns,
-                  assignments_to_jsonable, save_scores_npz, score_asd)
+                  assignments_to_jsonable, find_scores_npz, save_scores_npz,
+                  score_asd)
 from .asr import transcribe as asr_transcribe
 from .codemix import codemix_segments
 from .diarize import diarize as diarize_stage
@@ -174,6 +175,11 @@ class PipelineResult:
     lipsync_model: Optional[str] = None
     lipsync_mp4: Optional[Path] = None
     lipsync_error: Optional[str] = None
+
+    # True when phase one stopped after MT (stop_after_mt) and the post-MT
+    # cast stages have not run yet -- the UI reads this to show the gender/
+    # voice gate and offer "Cast & continue".
+    awaiting_cast: bool = False
 
     # Ground-truth transcripts fetched alongside the video (lang → metadata).
     # `source` is "manual" (human-authored on YouTube), "auto" (YouTube ASR),
@@ -339,11 +345,14 @@ def _speaker_face_tracks(out_root: Path, video: Path) -> Dict[str, tuple]:
         return {}
 
 
-#: Lip-sync models that honour a supplied per-frame target list. MuseTalk
-#: takes it through its own `--use_saved_coord` pickle; Wav2Lip and
-#: LatentSync ignore it rather than half-honouring it, so building one for
-#: them would spend a landmark pass per frame to produce nothing.
+#: Lip-sync models that honour a supplied per-frame coord list (box per
+#: frame). MuseTalk takes it through its own `--use_saved_coord` pickle.
 COORD_LIST_MODELS = ("musetalk",)
+
+#: Lip-sync models that honour a per-frame targets .npz (106 landmarks per
+#: frame). LatentSync's `lipsync_pipeline` reads the file and skips its own
+#: InsightFace pass for every frame that carries landmarks.
+TARGETS_NPZ_MODELS = ("latentsync", "latentsync15")
 
 
 def _asd_coord_list(out_root: Path, video: Path, model: str, *,
@@ -371,10 +380,11 @@ def _asd_coord_list(out_root: Path, video: Path, model: str, *,
     try:
         npz = (sorted((out_root / "faces").glob(f"{video.stem}.*.npz"))
                or sorted((out_root / "faces").glob("*.npz")))
-        scores = (sorted((out_root / "asd").glob(
-                      f"{video.stem}.*{ASD_SCORES_SUFFIX}"))
-                  or sorted((out_root / "asd").glob(f"*{ASD_SCORES_SUFFIX}")))
-        if not npz or not scores:
+        # Pick the scores by MODEL (loconet first), not by filename sort: a
+        # job can hold several models' `*.scores.npz`, and a bare glob picks
+        # whatever sorts first (light_asd before loconet). See find_scores_npz.
+        scores_pick = find_scores_npz(out_root / "asd", video.stem)
+        if not npz or scores_pick is None:
             log.warning(
                 "lipsync: no face tracks + per-frame ASD scores in %s, so %s "
                 "will choose a face by itself — on a multi-face shot that is "
@@ -390,7 +400,7 @@ def _asd_coord_list(out_root: Path, video: Path, model: str, *,
         from .lipsync_targets import build_coord_list
 
         tracks = FaceTracks.load_npz(npz[0])
-        asd = load_scores_npz(scores[0])
+        asd = load_scores_npz(scores_pick)
         coords, stats = build_coord_list(
             video, tracks, asd, bbox_shift=bbox_shift, device=device or "cpu")
         animated = stats.get("landmarked", 0) + stats.get("fallback_box", 0)
@@ -417,6 +427,161 @@ def _asd_coord_list(out_root: Path, video: Path, model: str, *,
         return None
 
 
+def _asd_targets_npz(out_root: Path, video: Path, model: str, *,
+                     device: Optional[str] = None):
+    """Per-frame 106-landmark targets for LatentSync, gated on ASD.
+
+    The LatentSync equivalent of `_asd_coord_list`: same ASD scores, same
+    speaking-track logic, but the artifact carries 106 landmarks per frame
+    instead of a box, because that is what LatentSync's warp consumes.
+    Returns `(targets_npz_path, stats)` or None.
+    """
+    if model not in TARGETS_NPZ_MODELS:
+        return None
+    try:
+        npz = (sorted((out_root / "faces").glob(f"{video.stem}.*.npz"))
+               or sorted((out_root / "faces").glob("*.npz")))
+        scores_pick = find_scores_npz(out_root / "asd", video.stem)
+        if not npz or scores_pick is None:
+            log.warning(
+                "lipsync: no face tracks + per-frame ASD scores in %s, so %s "
+                "will choose a face by itself — on a multi-face shot that is "
+                "whoever InsightFace finds first, not whoever is speaking.",
+                out_root.name, model)
+            return None
+
+        from models.faces.base import FaceTracks
+        from .asd import load_scores_npz
+        from .lipsync_targets import build_targets, save_targets
+
+        tracks = FaceTracks.load_npz(npz[0])
+        asd = load_scores_npz(scores_pick)
+        payload, stats = build_targets(
+            video, tracks, asd, device=device or "cpu")
+        targeted = stats.get("landmarked", 0)
+        if not targeted:
+            log.error("lipsync: no frame has a confirmed speaking face with "
+                      "landmarks, so every frame would fall back to stock "
+                      "detection. Check the ASD scores.")
+            return None
+        dest = out_root / "lipsync" / f"{video.stem}.targets.npz"
+        save_targets(payload, dest)
+        log.info("lipsync: ASD-gated LatentSync targets — %d frame(s), "
+                 "%d targeted, %d left alone, tracks=%s -> %s",
+                 stats.get("frames", 0), targeted,
+                 stats.get("no_speaker", 0),
+                 ",".join(stats.get("track_ids") or []) or "-",
+                 dest.name)
+        return dest, stats
+    except Exception as exc:                                  # noqa: BLE001
+        log.warning("lipsync: could not build ASD-gated targets (%s: %s); "
+                    "%s will use its own face detection",
+                    type(exc).__name__, exc, model)
+        return None
+
+
+def _run_asd_stage(
+    out_root: Path,
+    video: Path,
+    *,
+    asd_model: str,
+    turns,
+    reference_audio: Optional[Path],
+    asd_on_screen_threshold: float = 0.3,
+    device: Optional[str] = None,
+    adapter_kwargs: Optional[dict] = None,
+    result=None,
+    force: bool = False,
+):
+    """Score ASD + assign faces to turns, persisting scores + assignments.
+
+    Relocated OUT of the pre-MT pipeline (2026-10-26). ASD now runs at the
+    post-MT cast gate -- so stage 9d's face-gender vote has a face-to-speaker
+    attribution to read -- and again, as a fallback, at the lip-sync job, so
+    the adapter animates the speaking face. It no longer runs mid-pipeline
+    where nothing downstream could consume it until much later.
+
+    Idempotent: if this model's `*.scores.npz` and `*.assignments.json` are
+    already on disk and `force` is false, nothing is re-scored and the
+    assignments on disk are returned -- so the lip-sync job reuses whatever
+    the cast gate produced instead of paying a second ASD pass.
+
+    Returns the jsonable assignments list (seg_id, speaker, face_track,
+    asd_score, on_screen, ...), or None when it could not run.
+    """
+    adapter_kwargs = adapter_kwargs or {}
+    out_root = Path(out_root)
+    video = Path(video)
+    asd_dir = out_root / "asd"
+    faces = (sorted((out_root / "faces").glob(f"{video.stem}.*.npz"))
+             or sorted((out_root / "faces").glob("*.npz")))
+    if not faces:
+        log.warning("asd: no face tracks under %s; skipping ASD", out_root / "faces")
+        return None
+    if reference_audio is None or not Path(reference_audio).exists():
+        log.warning("asd: no driving audio for %s; skipping ASD", video.name)
+        return None
+
+    scores_path = asd_dir / f"{video.stem}.{asd_model}{ASD_SCORES_SUFFIX}"
+    assignments_json = asd_dir / f"{video.stem}.{asd_model}.assignments.json"
+
+    # Reuse only THIS model's (loconet's) own output. An old job scored on
+    # talknet/light_asd is re-scored on loconet the FIRST time through, and its
+    # stale scores are replaced below -- everything standardises on loconet.
+    # Once loconet's scores are on disk (a prior lip-sync, or the cast gate),
+    # they are reused rather than scored a second time.
+    if not force and scores_path.exists() and assignments_json.exists():
+        log.info("asd: reusing %s", scores_path.name)
+        if result is not None:
+            result.asd_model = asd_model
+            result.assignments_json = assignments_json
+        try:
+            return json.loads(assignments_json.read_text())
+        except (OSError, ValueError):
+            return None
+
+    from models.faces.base import FaceTracks
+    tracks = FaceTracks.load_npz(faces[0])
+    log.info("=== ASD (%s) + Hungarian assignment ===", asd_model)
+    asd_result = score_asd(
+        video, reference_audio, tracks,
+        model=asd_model, device=device,
+        **_pick(adapter_kwargs, ("repo_path", "checkpoint",
+                                 "speaker_encoder_checkpoint",
+                                 "crop_size", "target_fps")),
+    )
+    assignments = assign_faces_to_turns(
+        turns or [], tracks, asd_result,
+        on_screen_threshold=asd_on_screen_threshold,
+    )
+    asd_dir.mkdir(parents=True, exist_ok=True)
+    jsonable = assignments_to_jsonable(assignments)
+    assignments_json.write_text(json.dumps(jsonable, indent=2))
+    try:
+        save_scores_npz(asd_result, scores_path)
+    except Exception as e:                        # noqa: BLE001
+        # Never fatal: the per-segment assignments are what gender reads, and
+        # the lip-sync job degrades to its own face choice with a warning.
+        log.warning("asd: could not persist per-frame scores (%s); the "
+                    "lip-sync stage will fall back to its own face choice", e)
+    # Replace any OLDER model's ASD output for this stem: loconet is now the
+    # scored answer, and nothing downstream should still see the stale
+    # talknet/light_asd scores or assignments next to it.
+    for stale in (list(asd_dir.glob(f"{video.stem}.*{ASD_SCORES_SUFFIX}"))
+                  + list(asd_dir.glob(f"{video.stem}.*.assignments.json"))):
+        if stale not in (scores_path, assignments_json):
+            try:
+                stale.unlink()
+                log.info("asd: replaced stale %s", stale.name)
+            except OSError:
+                pass
+    if result is not None:
+        result.asd_model = asd_model
+        result.assignments_json = assignments_json
+        result.num_on_screen = sum(1 for a in assignments if a.on_screen)
+    return jsonable
+
+
 def run_post_mt_stages(
     mt_json: Optional[Path],
     *,
@@ -430,6 +595,15 @@ def run_post_mt_stages(
     source_language: Optional[str] = None,
     turns: Optional[List] = None,
     manifest: Optional[Path] = None,
+    # 6 (relocated). ASD moved out of the pre-MT pipeline (2026-10-26): it runs
+    # HERE, at the cast gate, so stage 9d's face-gender vote has a face<->
+    # speaker attribution, and it runs lazily -- only when a speaker still
+    # needs gender autodetected, or when lip-sync runs in this same call.
+    # All-manual gender + a separate lip-sync job means ASD runs at the
+    # lip-sync job instead (see `_run_asd_stage`). None = ASD off.
+    asd_model: Optional[str] = None,
+    asd_on_screen_threshold: float = 0.3,
+    asd_adapter_kwargs: Optional[dict] = None,
     # 9b code-mix / script normalisation
     translit_model: Optional[str] = None,
     termbase_path: Optional[Path] = None,
@@ -511,6 +685,12 @@ def run_post_mt_stages(
     mix_tempo_cap: float = 1.5,
     mix_clip_source: str = "auto",
     mux_video: bool = True,
+    # The tag that goes into `mix/versions/<stem>.v<NNN>.<producer>.dubbed.*`.
+    # `None` means "no snapshot" -- the live `<stem>.dubbed.*` is still
+    # written, just not copied aside. Callers that want history (the UI's
+    # initial run and every edit replay) pass something readable:
+    # `"original"` on the first mix, `"edit_NNN"` on a replay.
+    mix_producer_tag: Optional[str] = None,
     # 9h lip sync
     lipsync_model: Optional[str] = None,
     lipsync_num_gpus: Optional[int] = None,
@@ -720,6 +900,24 @@ def run_post_mt_stages(
         )
         out.speaker_references_dir = ref_dir
 
+        # ASD at the cast gate (relocated stage 6). Run it only when a face
+        # vote would actually help -- i.e. a speaker here still needs gender
+        # autodetected (not every one is a manual override) -- or when
+        # lip-sync runs in THIS call and needs the scores. All-manual gender
+        # with a separate lip-sync job skips it here; the lip-sync job runs
+        # ASD itself. Idempotent, so a second call reuses the scores.
+        _all_speakers = {s["id"] for s in speakers}
+        _need_gender_asd = bool(_all_speakers - set(gender_overrides or {}))
+        if asd_model and _need_gender_asd:
+            _run_asd_stage(
+                out_root, video,
+                asd_model=asd_model, turns=turns,
+                reference_audio=reference_audio_src,
+                asd_on_screen_threshold=asd_on_screen_threshold,
+                device=device, adapter_kwargs=asd_adapter_kwargs,
+                result=out,
+            )
+
         # Gender prediction. THREE methods vote -- wav2vec2 over the
         # reference clip, F0 median pitch over the same clip, and
         # insightface's genderage over the face track ASD attributed to this
@@ -727,7 +925,7 @@ def run_post_mt_stages(
         # measurements; the short version is that one lecturer in the test
         # set defeats both audio methods at once and only the face gets him
         # right, so no single method is safe here. The face vote is optional
-        # by construction: without stage 5 + 6 it abstains.
+        # by construction: without face tracks + ASD it abstains.
         face_tracks_by_speaker = _speaker_face_tracks(out_root, video)
         gender_votes: Dict[str, dict] = {}
         gender_map = predict_genders(
@@ -1051,8 +1249,17 @@ def run_post_mt_stages(
 
     # 9g. Final audio mix + optional video mux (plan §8).
     if mix:
-        if not out.tts_model:
-            log.warning("mix requested but TTS was skipped; nothing to mix")
+        if not mt_json:
+            log.warning("mix requested but there is no merged JSON to drive it")
+        elif not out.tts_model and not _merged_has_any_clip(mt_json):
+            # TTS did not run in THIS invocation (e.g. an edit replay that is
+            # dirty from `timing`, not `tts`), but the clips from the previous
+            # TTS pass are still on disk and recorded in the merged JSON, so
+            # the mix is still well-defined. Only skip when there really is
+            # nothing to place.
+            log.warning(
+                "mix requested but TTS was skipped and %s carries no clips",
+                mt_json.name)
         else:
             log.info("=== stage 9g: audio mix (ffmpeg) ===")
             mr = mix_dubbed_audio(
@@ -1071,6 +1278,14 @@ def run_post_mt_stages(
             )
             out.mix_wav = mr.audio_wav
             out.mix_mp4 = mr.video_mp4
+            # Snapshot the newly written dub into `mix/versions/` so a later
+            # edit's replay cannot erase the one that just rendered. Both the
+            # wav and the mp4 are copied; neither is a dependency, so a
+            # failure here is logged and the pipeline keeps going.
+            if mix_producer_tag:
+                from . import mix_versions as _mix_versions
+                _mix_versions.snapshot(
+                    mr.audio_wav, mr.video_mp4, mix_producer_tag)
 
     # 9h. Lip sync (plan §8). Needs the dubbed audio from the mix stage.
     if lipsync_model:
@@ -1079,6 +1294,18 @@ def run_post_mt_stages(
         else:
             log.info("=== stage 9h: lip sync (%s) ===", lipsync_model)
             try:
+                # ASD runs HERE, just before lip-sync (relocated stage 6):
+                # score who is speaking if the cast gate did not already.
+                # Idempotent, so a full run that scored at the gate reuses it
+                # and a lip-sync-only replay scores it now. Inside the try so
+                # a failure is a lip-sync error, not a silent wrong-face dub.
+                if asd_model:
+                    _run_asd_stage(
+                        out_root, video, asd_model=asd_model, turns=turns,
+                        reference_audio=reference_audio_src,
+                        asd_on_screen_threshold=asd_on_screen_threshold,
+                        device=device, adapter_kwargs=asd_adapter_kwargs,
+                        result=out)
                 # WHICH face to animate. Without this the adapter picks one
                 # itself — the first detection — so on a two-person shot the
                 # listener's mouth moves and the speaker's does not, at exit
@@ -1094,6 +1321,11 @@ def run_post_mt_stages(
                 _coords = _targets[0] if _targets else None
                 if _targets:
                     out.extra["lipsync_targets"] = _targets[1]
+                _ls_targets = _asd_targets_npz(
+                    out_root, video, lipsync_model, device=device)
+                _targets_npz = _ls_targets[0] if _ls_targets else None
+                if _ls_targets:
+                    out.extra["lipsync_targets"] = _ls_targets[1]
                 ls = run_lipsync(
                     lipsync_merged_json,
                     model=lipsync_model,
@@ -1104,6 +1336,7 @@ def run_post_mt_stages(
                     num_gpus=lipsync_num_gpus,
                     window=lipsync_window,
                     coord_list=_coords,
+                    targets_npz=_targets_npz,
                     lipsync_kwargs={
                         **_pick(adapter_kwargs,
                                 ("repo_path", "checkpoint", "python_bin",
@@ -1416,6 +1649,10 @@ def _run_pipeline(
     # ASD + assignment
     asd_model: Optional[str] = None,              # None → skip ASD/assignment
     asd_on_screen_threshold: float = 0.3,
+    # Stop phase one after MT, before any audio is synthesised, so the UI can
+    # collect per-speaker gender + voice first; the cast route then runs
+    # `run_post_mt_stages`. Default False: a CLI run goes end to end.
+    stop_after_mt: bool = False,
     # ASR
     asr_model: Optional[str] = None,              # None → skip ASR
     #: What is SPOKEN in the source. Defaults to English, which is what
@@ -1521,6 +1758,9 @@ def _run_pipeline(
     mix_tempo_cap: float = 1.5,
     mix_clip_source: str = "auto",
     mux_video: bool = True,
+    # Snapshot the dub into `mix/versions/` under this tag -- see
+    # `run_post_mt_stages`. None skips the snapshot.
+    mix_producer_tag: Optional[str] = None,
     # Lip sync (requires mix).
     lipsync_model: Optional[str] = None,           # wav2lip | musetalk | latentsync
     restore_model: Optional[str] = None,          # 9i: gfpgan | None. Never
@@ -1813,48 +2053,13 @@ def _run_pipeline(
             result.face_detector = face_detector
             result.face_tracker = face_tracker
 
-        # 6. ASD + Hungarian speaker↔face assignment (optional, needs tracks).
+        # 6. ASD + Hungarian speaker↔face assignment -- RELOCATED 2026-10-26.
+        # ASD no longer runs mid-pipeline. It runs at the post-MT cast gate
+        # (so stage 9d's face-gender vote has an attribution) and at the
+        # lip-sync job (so the adapter animates the speaking face), via
+        # `_run_asd_stage`. `assignments` stays None here; the per-segment
+        # face fold below is therefore empty until the gate re-folds it.
         assignments: Optional[List] = None
-        if asd_model:
-            if tracks is None:
-                log.warning("asd requested but no face tracks produced; skipping")
-            else:
-                log.info("=== stage 6: ASD (%s) + Hungarian assignment ===", asd_model)
-                asd_result = score_asd(
-                    video, dia_input, tracks,
-                    model=asd_model, device=device,
-                    **_pick(adapter_kwargs, ("repo_path", "checkpoint",
-                                              "speaker_encoder_checkpoint",
-                                              "crop_size", "target_fps")),
-                )
-                assignments = assign_faces_to_turns(
-                    diar_result.turns, tracks, asd_result,
-                    on_screen_threshold=asd_on_screen_threshold,
-                )
-                assignments_json = asd_dir / f"{video.stem}.{asd_model}.assignments.json"
-                assignments_json.write_text(
-                    json.dumps(assignments_to_jsonable(assignments), indent=2)
-                )
-                # The PER-FRAME scores, which this stage used to compute and
-                # discard. Stage 9h needs them to work out which face to
-                # animate (`backend/lipsync_targets.py`), and it runs in a
-                # different call on an edit replay — where stage 6 does not
-                # re-run — so in-memory is not enough. Re-deriving them there
-                # would mean a second TalkNet pass over the whole video.
-                try:
-                    save_scores_npz(
-                        asd_result,
-                        asd_dir / f"{video.stem}.{asd_model}{ASD_SCORES_SUFFIX}")
-                except Exception as e:                    # noqa: BLE001
-                    # Never fatal: the per-segment assignments are what the
-                    # rest of the pipeline reads, and 9h degrades to its own
-                    # face choice with a warning.
-                    log.warning("asd: could not persist per-frame scores "
-                                "(%s); stage 9h will fall back to the "
-                                "model's own face choice", e)
-                result.asd_model = asd_model
-                result.assignments_json = assignments_json
-                result.num_on_screen = sum(1 for a in assignments if a.on_screen)
 
         # 7. ASR (optional) -- or the uploader's own transcript, when there is
         #    a human-authored one. A published manual caption track is free
@@ -2066,7 +2271,10 @@ def _run_pipeline(
         result.content_register_tier = tier
 
     # 9b..9h — code-mix → duration → voices → TTS → VC → mix → lip-sync.
-    post = run_post_mt_stages(
+    # The UI's staged flow stops phase one HERE, at MT, so the operator sets
+    # gender + voice per speaker before any audio is made; the cast route then
+    # calls run_post_mt_stages. A CLI run never stops (stop_after_mt False).
+    post = None if stop_after_mt else run_post_mt_stages(
         result.mt_json,
         source_video=video,
         me_stem=me_stem,
@@ -2079,6 +2287,9 @@ def _run_pipeline(
         device=device,
         turns=turns,
         manifest=result.manifest,
+        asd_model=asd_model,
+        asd_on_screen_threshold=asd_on_screen_threshold,
+        asd_adapter_kwargs=adapter_kwargs,
         translit_model=translit_model,
         termbase_path=termbase_path,
         duration_adjust=duration_adjust,
@@ -2123,35 +2334,47 @@ def _run_pipeline(
         mix_tempo_cap=mix_tempo_cap,
         mix_clip_source=mix_clip_source,
         mux_video=mux_video,
+        mix_producer_tag=mix_producer_tag,
         lipsync_model=lipsync_model,
         lipsync_num_gpus=lipsync_num_gpus,
         lipsync_batch_size=lipsync_batch_size,
         **adapter_kwargs,
     )
-    result.mt_json = post.mt_json
-    result.translit_model = post.translit_model
-    result.codemix_retained_terms = post.codemix_retained_terms
-    result.duration_model_language = post.duration_model_language
-    result.duration_model_voice = post.duration_model_voice
-    result.duration_estimated_violations = post.duration_estimated_violations
-    result.voice_engine = post.voice_engine
-    result.voice_assignments_json = post.voice_assignments_json
-    result.speaker_references_dir = post.speaker_references_dir
-    result.tts_model = post.tts_model
-    result.tts_out_dir = post.tts_out_dir
-    result.tts_budget_violations = post.tts_budget_violations
-    result.tts_errors = post.tts_errors
-    result.vc_model = post.vc_model
-    result.vc_out_dir = post.vc_out_dir
-    result.vc_errors = post.vc_errors
-    result.timing_producer = post.timing_producer
-    result.timing_plan_json = post.timing_plan_json
-    result.timing_summary = post.timing_summary
-    result.mix_wav = post.mix_wav
-    result.mix_mp4 = post.mix_mp4
-    result.lipsync_model = post.lipsync_model
-    result.lipsync_mp4 = post.lipsync_mp4
-    result.lipsync_error = post.lipsync_error
+    if post is None:
+        # Phase one stopped at MT (stop_after_mt). The cast route runs the
+        # rest; mark the job so the UI shows the gender/voice gate.
+        result.awaiting_cast = True
+    else:
+        result.mt_json = post.mt_json
+        result.translit_model = post.translit_model
+        result.codemix_retained_terms = post.codemix_retained_terms
+        result.duration_model_language = post.duration_model_language
+        result.duration_model_voice = post.duration_model_voice
+        result.duration_estimated_violations = post.duration_estimated_violations
+        result.voice_engine = post.voice_engine
+        result.voice_assignments_json = post.voice_assignments_json
+        result.speaker_references_dir = post.speaker_references_dir
+        result.tts_model = post.tts_model
+        result.tts_out_dir = post.tts_out_dir
+        result.tts_budget_violations = post.tts_budget_violations
+        result.tts_errors = post.tts_errors
+        result.vc_model = post.vc_model
+        result.vc_out_dir = post.vc_out_dir
+        result.vc_errors = post.vc_errors
+        result.timing_producer = post.timing_producer
+        result.timing_plan_json = post.timing_plan_json
+        result.timing_summary = post.timing_summary
+        result.mix_wav = post.mix_wav
+        result.mix_mp4 = post.mix_mp4
+        result.lipsync_model = post.lipsync_model
+        result.lipsync_mp4 = post.lipsync_mp4
+        result.lipsync_error = post.lipsync_error
+        # ASD now runs inside the post-MT stages (relocated stage 6), so its
+        # outputs come back on `post` -- carry them onto the sealed result so
+        # the manifest and the edit-replay both see which model scored.
+        result.asd_model = post.asd_model or result.asd_model
+        result.assignments_json = post.assignments_json or result.assignments_json
+        result.num_on_screen = post.num_on_screen or result.num_on_screen
 
     # 10. Evaluate ASR against the source-language subtitle (if we have one).
     #     Produces WER / CER so a user can see at a glance how far the ASR

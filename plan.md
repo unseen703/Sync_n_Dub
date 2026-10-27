@@ -386,44 +386,217 @@ Annotate: speaker turns with timestamps; verbatim transcript; word boundaries on
 
 ## 11. Repository structure
 
-```
-dubbing/
-├── manifest.py              # schema + validate_references()
-├── pipeline.py              # stage runner, caching, resume, ablate()
-├── registry.py              # adapter registration with licence metadata
-├── stages/
-│   ├── base.py
-│   ├── media.py             # ffmpeg / pyav demux, mux
-│   ├── separate.py          # htdemucs
-│   ├── diarize/            {pyannote.py, whisperx.py, diarizen.py, sortformer.py, oracle.py}
-│   ├── faces/
-│   │   ├── detect/         {retinaface.py, scrfd.py, mediapipe.py}
-│   │   ├── track/          {bytetrack.py, deepsort.py}
-│   │   └── asd/            {talknet.py, ts_talknet.py}
-│   ├── assign_faces.py      # hungarian over ASD scores
-│   ├── embed/              {ecapa.py, pyannote_emb.py}
-│   ├── asr/                {bodhan.py, whisperx.py, indicconformer.py}
-│   ├── align/              {ctc_mms.py, whisperx.py}
-│   ├── terms/              {termbase.py, ner.py, llm_tagger.py}
-│   ├── translate/          {bodhan.py, indictrans2.py, nllb.py}
-│   ├── translit/           {bodhan.py, indicxlit.py}
-│   ├── duration.py
-│   ├── voices.py            # voice assignment
-│   ├── tts/                {bodhan.py, indicf5.py, cosyvoice.py, openvoice.py}
-│   ├── vc/                 {seedvc.py, openvoice.py, none.py}
-│   ├── mix.py
-│   ├── lipsync/            {musetalk.py, latentsync.py, wav2lip.py, noop.py}
-│   └── qc.py
-├── clients/
-│   ├── bodhan.py            # per-service config, shared transport, cost accounting
-│   └── ratelimit.py
-├── baselines/              {elevenlabs.py, heygen.py}   # reference comparisons
-├── termbase/               {ml_lecture.tsv, general.tsv}
-├── eval/                   {metrics.py, harness.py, report.py}
-├── fixtures/                # frozen manifests at every stage boundary
-├── configs/                {default.yaml, hindi.yaml, tamil.yaml, ablations/}
-└── tests/
-```
+*As built, 2026-10-27. Descriptions come from each file's own docstring. The original planned layout (a `dubbing/` package with `stages/`, `clients/`, `baselines/`) was not built that way: the stages live in `backend/`, the model adapters in `models/`, and the contract is the merged JSON inside a job folder, not a `Manifest` class.*
+
+**Scope:** `backend/`, `models/`, `ui/` (Python side) and `tests/` (docstring headers only). Not covered: `scripts/` and the web frontends. The `backend/speed.py` and `backend/restore.py` rows come from CLAUDE.md and the README, not from reading those files.
+
+### Top level
+
+| Path | What it is |
+| --- | --- |
+| `README.md` | Quickstart, defaults, UI and edit-agent usage. Has a generated structure block owned by `scripts/repo_checkup.py` |
+| `CLAUDE.md` | Host setup (interpreters, GPUs, ffmpeg builds), conventions, working rules for Claude Code |
+| `plan.md` | This file: design intent, experiment matrix, and the current structure |
+| `docs/` | Long-form docs: `HOST.md`, `STAGES.md`, `ROUGH_EDGES.md`, `EDIT_AGENT.md`, `PROMPTS.md`, `UI_RUN.md` |
+| `backend/` | The pipeline: one module per stage or concern (below) |
+| `models/` | Model adapters, one folder per stage, each with a registry |
+| `ui/` | FastAPI operator UI and its job runner |
+| `tests/` | pytest suite, no models or network |
+| `scripts/` | Operator and batch scripts: setup, corpus fetch, clip runs, sweeps, repo checkup |
+| `data/` | Job folders (`data/jobs/<job_id>/`), voice reference clips, layout doc `DATA_LAYOUT.md` |
+| `experiments/` | Sweep suite definitions (`experiments/suites/*.json`) |
+| `third_party/` | Legacy clones of upstream repos (LatentSync, LipGAN, MuseTalk, TalkNet-ASD, Wav2Lip, Wav2Lip-HD, langfuse); lip-sync and ASD upstreams are moving into `models/*/vendor/` |
+| `setup.sh`, `requirements.txt` | Doctor, model fetch and 60 s dry run; Python dependencies |
+| `comparison-results.md`, `lipsync-history.md` | Results notes: timing/stretch comparison and lip-sync history |
+
+### `backend/` — pipeline modules
+
+Entry points and orchestration
+
+| File | Features |
+| --- | --- |
+| `cli.py` | `python -m backend.cli`: argparse front end (79 flags) for a whole run |
+| `pipeline.py` | End-to-end orchestrator, 26 logged stages from download to the 10b MT check; `run_post_mt_stages` (9b to 9h) is what edit replays re-run |
+| `jobs.py` | Job-folder layout and `manifest.json` (status, config, stage inventory); `python -m backend.jobs list/show` |
+| `experiment.py` | Runs one clip through several dubbing variants with the upstream prefix (download to MT) cached once and TTS reused where only placement changes |
+| `gpu.py` | GPU discovery, free-card check, and ffmpeg sharding helpers for multi-GPU lip-sync |
+| `tracing.py` | Langfuse tracing around the LLM client; never raises, flushes at exit |
+
+Input and audio prep (stages 1 to 3)
+
+| File | Features |
+| --- | --- |
+| `downloader.py` | yt-dlp download of video, captions and uploader metadata (`<stem>.meta.json`) |
+| `media_io.py` | ffmpeg/ffprobe wrapper: demux, 16 kHz mono extraction, duration and fps probes |
+| `stem_separation.py` | HTDemucs split into dialogue and music-and-effects stems |
+
+Speakers and faces (stages 4 to 6)
+
+| File | Features |
+| --- | --- |
+| `diarize.py` | Entry point over the diarization registry (pyannote, DiariZen, Nemotron) |
+| `segment.py` | Stage 4b: splits long turns at VAD gaps, merges short ones, caps length at energy valleys |
+| `speaker_id.py` | Stage 4c: ECAPA check that one label holds one person; splits impure labels |
+| `faces.py` | Face detection and tracking entry point; preloads insightface before other libs claim shared C libraries |
+| `asd.py` | Active speaker detection entry point (`score_asd`) |
+| `assign_faces.py` | Hungarian matching of diarized turns to face tracks; `speaker_face_tracks` picks each speaker's face |
+| `lipsync_targets.py` | Per-frame speaking-face boxes from ASD scores, handed to MuseTalk as a saved-coordinate pickle |
+
+Transcript and translation (stages 7 to 9b2)
+
+| File | Features |
+| --- | --- |
+| `asr.py` | ASR entry point (Bodhan, WhisperX, IndicConformer, Indic-Transcribe) |
+| `caption_asr.py` | Uses human-authored YouTube captions as the transcript, reshaped onto diarization turns |
+| `align.py` | CTC forced alignment, fills word timestamps per segment |
+| `translate.py` | MT entry point (Bodhan, NLLB), writes the merged ASR+MT JSON |
+| `sanitize.py` | Text clean-up at the ASR to MT, MT output and TTS boundaries |
+| `codemix.py` | Stage 9b: keeps English terms, transliterates them into the target script, normalises Latin leftovers |
+| `classify.py` | Stage 9b1: picks the whole-video TTS register from YouTube categories, channel, description, then LLM |
+| `emotion.py` | Stage 9b2: per-segment delivery style from source-speaker emotion, with confidence and run-length guards |
+| `transcripts.py` | Parses ground-truth `.vtt`/`.srt` and scores ASR and MT (WER, CER, BLEU, chrF, ROUGE, METEOR) |
+| `llm.py` | OpenRouter chat client, the only LLM caller; falls back to deterministic paths with no key |
+
+Duration, voices and synthesis (stages 9c to 9f)
+
+| File | Features |
+| --- | --- |
+| `duration.py` | Stage 9c: fitted duration model, candidate ranking, WSOLA stretch with the ±10% cap |
+| `gender.py` | Speaker gender by majority vote of wav2vec2, F0 pitch and face genderage |
+| `voices.py` | Stage 9d: per-speaker voice casting (gender filter, screen time, ECAPA timbre rank) |
+| `tts.py` | Stage 9e: per-segment Bodhan synthesis with per-segment overrides, writes `tts_audio` and stretch data |
+| `voice_convert.py` | Stage 9f: optional voice conversion toward the speaker's reference clip |
+
+Timing, mix and lip-sync (stages 9f2 to 9h)
+
+| File | Features |
+| --- | --- |
+| `timing.py` | Timing-plan contract: `Piece`, `TimingPlan`, and the `naive_slot` and `pause_aware` producers |
+| `timing_advanced.py` | `word_anchored` (M4) and `dp` (M7) timing producers, registered onto `timing` |
+| `stretch.py` | Named time-stretch backends (rubberband, atempo, linear control) chosen by filter availability |
+| `mix.py` | Overlays dub clips on the M&E stem; strategies `global_tempo`, `no_tempo`, `timing_plan`; backs `--speed-mode` |
+| `speed.py` | `--speed-mode segment` knobs (cap, floor), dependency-free |
+| `lipsync.py` | Stage 9h entry point: mux, shard over free GPUs, run the chosen adapter, concat; refuses to report success on a missing render |
+| `restore.py` | Face restoration pass (GFPGAN) over a finished render |
+
+Editing
+
+| File | Features |
+| --- | --- |
+| `edits.py` | Typed `EditOp`s over the merged JSON and the stages each one invalidates; deterministic, no LLM |
+| `edit_agent.py` | Plain-language edit CLI: parses a sentence into ops (LLM or regex), prints the plan, `--apply`, `--run`, `--revert` |
+
+### `models/` — adapters
+
+Each stage folder holds a `base.py`, one adapter per model, and an `__init__.py` with a `_REGISTRY_SPEC` dict.
+
+Shared files
+
+| File | Features |
+| --- | --- |
+| `_registry.py` | `make_registry`: lazy adapter import, lister, kwarg filtering, `get_*` |
+| `_bodhan.py` | Shared Bodhan client parts: env resolution, auth session, pacing floor, `Retry-After` backoff (retry loops stay in each adapter) |
+| `_vendor.py` | `resolve_vendor_repo`: finds a vendored upstream under `models/*/vendor/` or the legacy `third_party/` |
+
+Stages and adapters (registered names in bold)
+
+| Stage | Adapter file | Features |
+| --- | --- | --- |
+| `align/` | `mms_fa_adapter.py` (**mms_fa**) | torchaudio MMS forced aligner, char-level CTC; romanizes Indic text with `uroman`, skips non-Latin segments if it's missing |
+| | `whisperx_adapter.py` (**whisperx**) | WhisperX wav2vec2 CTC aligner, usable after any ASR; empty words if the language has no head |
+| `asd/` | TalkNet adapter (**talknet**), Light-ASD (**light_asd**), LR-ASD (**lr_asd**) | Per-face speaking scores from 112x112 crops plus MFCC; none picks one face among several. `_mfcc_av.py` is the shared crop and int16 MFCC code |
+| `asr/` | `bodhan_adapter.py` (**bodhan**) | Hosted Indic-Transcribe over REST; `render_mode` native, mixed or roman; adapts concurrency from rate-limit headers |
+| | `whisperx_adapter.py` (**whisperx**) | Whisper (CTranslate2) with wav2vec2 alignment; large-v3 for Indic |
+| | `indicconformer_adapter.py` (**indicconformer**) | AI4Bharat IndicConformer 600M, per-language ONNX heads; language code required |
+| | `indic_transcribe_adapter.py` (**indictranscribe_core**, **indictranscribe_flex**) | Local Canary 1.2B from Hugging Face; long-form helper for segments over 30 s |
+| `diarization/` | `pyannote_adapter.py` (**pyannote**) | pyannote community-1; needs an HF token and the gate accepted |
+| | `diarizen_adapter.py` (**diarizen**) | DiariZen WavLM; CC-BY-NC weights |
+| | `nemotron_adapter.py` (**nemotron**) | NeMo Sortformer, 4-speaker cap |
+| `emotion/` | `emotion2vec_adapter.py` (**emotion2vec**) | emotion2vec+ large via FunASR; utterance-level emotion labels |
+| `faces/` | `detect/` (**retinaface**, **mediapipe**), `track/` (**bytetrack**) | Per-frame detection, then ByteTrack identities; `base.py` holds `FaceBox`, `FaceDetections`, `FaceTracks` |
+| `lipsync/` | `base.py`, `wav2lip_adapter.py` (**wav2lip**), `musetalk_adapter.py` (**musetalk**), `latentsync_adapter.py` (**latentsync**, **latentsync15**) | Each shells into its own conda env and returns a rendered video; LatentSync 1.6 is 512 px (~18 GB), 1.5 is 256 px (~8 GB) |
+| `mt/` | `bodhan_adapter.py` (**bodhan**) | Hosted Indic-Translate, one call per segment; target script native, roman or codemix |
+| | `nllb_adapter.py` (**nllb**) | Local NLLB-200 (distilled 600M default), FLORES codes |
+| `restore/` | `gfpgan_adapter.py` (**gfpgan**) | GFPGAN v1.4 plus Real-ESRGAN over a finished render via `scripts/face_enhance.py`; stage 9i |
+| `translit/` | `bodhan_adapter.py` (**bodhan**) | Hosted Indic-Transliterate; falls back to the MT endpoint |
+| | `indicxlit_adapter.py` (**indicxlit**) | Local AI4Bharat IndicXlit, 21 languages |
+| `tts/` | `bodhan_adapter.py` (**bodhan**) | Hosted Indic-Speak, returns WAV bytes; re-speaks at a different rate; the only stock-voice engine |
+| | `indicf5_adapter.py` (**indicf5**) | Local zero-shot cloning TTS; needs reference audio and text per request |
+| `vc/` | none | Registry is empty since 2026-10-23; the package stays so `--vc` still parses |
+
+Removed registry entries, so the README block is out of date on them: `wav2lip_hd` and `lipgan` (2026-10-23; restoration is now `--restore gfpgan`), `openvoice` and `vevo`, and `ts_talknet`. Adapter files for `asd/`, `faces/` and the `bodhan` base classes were not opened; their rows come from the registry docstrings.
+
+### `ui/` — operator UI (Python side)
+
+| File | Features |
+| --- | --- |
+| `server.py` | FastAPI app on loopback port 7861; serves `ui/web-dist/` and the job APIs |
+| `runner.py` | Detached process that runs one job from `request.json`; fetch, cut, probe, then the pipeline; `--rerun` for edit replays |
+| `progress.py` | Logging handler that turns the pipeline's `=== stage N ===` markers into `progress.json` for the 8-pill bar |
+| `presets.py` | Three run presets (`draft`, `standard`, `best`), pipeline kwargs, runtime estimates |
+| `routes_create.py` | Job creation: URL host allowlist, probe, window and 20-minute lip-sync cap checks, launch |
+| `routes_edits.py` | Stage, price, apply and revert voice and tone edits |
+| `routes_enhance.py`, `enhance.py` | Stage 9i "Enhance resolution" on a finished render, run on a background thread with a poll endpoint |
+| `routes_talkinghead.py` | Talking Head page: photo face check, dialogue catalogue, render queue |
+| `_io.py` | Best-effort `read_json`, `env_int`, `env_float`, `data_dir` |
+| `media.py` | Picks the files the player gets (original and lip-synced video, original and dubbed audio) from the manifest first, then a ranked glob; returns `/files/...` URLs |
+| `speakers.py` | Rebuilds the speaker table (who speaks, which voice) from voices JSON, merged JSON, per-segment overrides, or a replay of stage 9d |
+| `jobqueue.py` | Serial job queue whose state is read from `progress.json` on disk, so a UI restart can't launch a second job onto a busy GPU (`DUBBING_UI_MAX_CONCURRENT`, default 1) |
+| `ytmeta.py` | Probes a URL before the job starts: title, duration, live-stream refusal, host re-check; caches the thumbnail |
+| `clip.py` | Cuts the chosen window with ffmpeg (re-encode, `-ss` before `-i`) so the pipeline gets a local clip |
+| `uploads.py` | Local video upload: extension and size limits, server-chosen filename, ffprobe check |
+| `langs.py` | Language list built from the adapters, so only languages the TTS engine can speak are offered |
+| `talking_head.py` | Talking Head logic: face check on the photo, downscale of large stills, dialogue catalogue from `data/talking_head/dialogues.json` |
+| `lipsync_models.py` | One table of per-model facts (runtime factors, cost rates, labels) the other UI modules read; retired models stay as display-only rows |
+| `spec.py` | The job's settings as plain label, value and hint lines, plus the raw config for an "Advanced" view |
+| `cost.py` | Turns an edit's dirty stages into what re-runs, what doesn't, and an estimated time |
+
+`ui/auth.py` is deleted in the working tree. The frontends (`ui/web/`, `ui/web2/`, `ui/web-dist/`) were not read, and there may be other `ui/` modules I haven't seen.
+
+### `tests/`
+
+| File | Covers |
+| --- | --- |
+| `conftest.py` | Shared fixtures: tiny generated WAVs, a mini merged JSON |
+| `test_caption_asr.py` | Caption transcripts keep speaker labels and `SEG_NNNN` ids |
+| `test_coord_cache.py` | Face-box cache keyed by content, not filename |
+| `test_edit_agent.py` | Edits reach the stage that must act on them |
+| `test_experiment_isolation.py` | Sweep variants never write into each other or into `data/` |
+| `test_face_import_order.py` | insightface loads before pyannote's libjpeg |
+| `test_gender.py` | Three-way gender vote |
+| `test_gpu_pick.py` | Free-GPU selection policy |
+| `test_lipsync_env_python.py` | MuseTalk and LatentSync find their own interpreter |
+| `test_lipsync_failure_honesty.py` | A lip-sync that produced nothing is not reported as success |
+| `test_lipsync_targets.py` | ASD-gated speaking-face boxes |
+| `test_memguard.py`, `test_mt_versions.py` | Memory guard; MT version snapshots never become the live document (not opened, named from git status) |
+| `test_musetalk_frame_parity.py` | Faceless frames are copied through, not dropped |
+| `test_register_to_tts.py` | Stage 9b1 register reaches the Bodhan payload |
+| `test_speaker_face_tracks.py` | Speaker to face track by on-screen seconds |
+| `test_speaker_id.py` | Stage 4c clustering decisions |
+| `test_speed_mode.py` | `segment` fills slots; `global` stays put |
+| `test_staged_review.py` | Cast review, cue review, then lip-sync |
+| `test_stretch.py` | Stretch backends change time, not pitch |
+| `test_talking_head.py` | Talking Head page gating |
+| `test_timing_plan.py` | Timing contract and the DP's degenerate cases |
+| `test_tracing.py` | Tracing never breaks a run |
+| `test_ui_backend_sync.py` | UI kwargs, manifest config and progress stay in step with the pipeline |
+| `test_ui_create.py` | Job creation refusals and allowlist |
+| `test_ui_edits.py` | Voice and tone edit pricing |
+| `test_ui_errors.py` | Actionable failure messages |
+| `test_ui_media.py` | Player gets the right video and audio file |
+| `test_ui_progress.py` | Stage markers still match `pipeline.py` |
+| `test_ui_queue.py` | One job at a time at `max_concurrent=1` |
+| `test_ui_register_row.py` | Chosen register is persisted and shown |
+| `test_ui_server.py` | Routing, file serving, bind guard |
+| `test_ui_speakers.py` | Speaker table shows who got which voice |
+
+### `scripts/`
+
+The per-file table is in [README.md](README.md#scripts) and is kept there to avoid a third copy to maintain.
+
+### Original interface sketch
+
+This section is the original design and is not implemented as written (there is no `dubbing` package or `Manifest` class).
 
 ### Interfaces
 

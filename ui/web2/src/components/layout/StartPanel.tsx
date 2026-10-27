@@ -53,13 +53,15 @@ export function StartPanel() {
   const [start, setStart] = useState(0);
   const [end, setEnd] = useState(60);
   // Preselected from the server, so the picker and the pipeline agree.
-  const [spoken, setSpoken] = useState('en');
+  const [spoken, setSpoken] = useState('auto');
+  const [detectedLang, setDetectedLang] = useState<{ code: string; language?: string; method?: string } | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     void api.getOptions().then((o) => {
       setOptions(o);
       setSpoken(o.default_source_language ?? 'auto');
+      setDetectedLang(null);
       if (!o.languages.some((l) => l.code === language)) {
         setLanguage(o.languages[0]?.code ?? 'hi');
       }
@@ -86,6 +88,12 @@ export function StartPanel() {
       const p = await api.probeYouTube(url.trim());
       setSrc({ kind: 'url', probe: p });
       setStart(0); setEnd(Math.min(60, p.duration_s ?? 60)); setWhole(false);
+      if (p.detected_source_language) {
+        setDetectedLang(p.detected_source_language);
+        if (spoken === 'auto') setSpoken(p.detected_source_language.code);
+      } else {
+        setDetectedLang(null);
+      }
     } catch (e) {
       setSrc(null); setError((e as Error).message);
     } finally { setBusy(null); }
@@ -97,6 +105,12 @@ export function StartPanel() {
       const u = await api.uploadVideo(file);
       setSrc({ kind: 'upload', upload: u });
       setStart(0); setEnd(Math.min(60, u.duration_s ?? 60)); setWhole(false);
+      if (u.detected_source_language) {
+        setDetectedLang(u.detected_source_language);
+        if (spoken === 'auto') setSpoken(u.detected_source_language.code);
+      } else {
+        setDetectedLang(null);
+      }
     } catch (e) {
       setSrc(null); setError((e as Error).message);
     } finally { setBusy(null); }
@@ -125,7 +139,7 @@ export function StartPanel() {
 
   return (
     <section className="card p-4 sm:p-5">
-      <div className="text-[13.5px] font-semibold text-ink">Start a dub</div>
+      <div className="text-[13.5px] font-semibold text-ink">Add your source video</div>
 
       <div className="mt-3 flex flex-col gap-2 sm:flex-row">
         <input
@@ -133,8 +147,8 @@ export function StartPanel() {
           value={url}
           onChange={(e) => setUrl(e.target.value)}
           onKeyDown={(e) => { if (e.key === 'Enter') void check(); }}
-          placeholder="Paste a YouTube link"
-          aria-label="YouTube link"
+          placeholder="Paste a YouTube or video link"
+          aria-label="Video link"
           className="min-w-0 flex-1 rounded-lg border border-edge/70 bg-canvas/60 px-3 py-2
                      text-[13px] text-ink placeholder:text-ink4"
         />
@@ -160,9 +174,13 @@ export function StartPanel() {
           onClick={() => fileRef.current?.click()}
           disabled={busy !== null}
         >
-          {busy === 'upload' ? <IconSpinner /> : null} Upload video
+          {busy === 'upload' ? <IconSpinner /> : null} Upload a file
         </Button>
       </div>
+
+      <p className="mt-1.5 text-[11.5px] text-ink4">
+        Accepts MP4, MOV, MKV, WebM, M4V or AVI up to 4 GB.
+      </p>
 
       {error ? (
         <p className="mt-2 flex items-start gap-1.5 text-[12.5px] text-warn">
@@ -184,14 +202,18 @@ export function StartPanel() {
                   came back in four different Indic scripts. The adapter
                   now pins one detection for the whole file, but a wrong
                   pin is then consistently wrong. */}
-              <Eyebrow className="mb-2">Spoken</Eyebrow>
+              <Eyebrow className="mb-2">Original language</Eyebrow>
               <Select
-                ariaLabel="Spoken language in the source"
+                ariaLabel="Original language"
                 value={spoken}
                 onValueChange={setSpoken}
                 items={[
-                  { value: 'auto', label: 'Detect it',
-                    hint: 'Detected once from the longest turn, then pinned' },
+                  { value: 'auto', label: detectedLang
+                    ? `Automatic detection — ${detectedLang.language || detectedLang.code}`
+                    : 'Automatic detection',
+                    hint: detectedLang
+                      ? `Detected via ${detectedLang.method === 'yt_metadata' ? 'video metadata' : 'audio analysis'}`
+                      : 'Detected from video metadata or a short audio sample' },
                   { value: 'en', label: 'English' },
                   ...(options?.languages ?? []).map((l) => ({
                     value: l.code,
@@ -201,7 +223,7 @@ export function StartPanel() {
               />
             </div>
             <div>
-              <Eyebrow className="mb-2">Dub into</Eyebrow>
+              <Eyebrow className="mb-2">Indian language to dub into</Eyebrow>
               <Select
                 ariaLabel="Target language"
                 value={language}
@@ -220,14 +242,14 @@ export function StartPanel() {
               />
             </div>
             <div>
-              <Eyebrow className="mb-2">Type</Eyebrow>
+              <Eyebrow className="mb-2">Delivery style</Eyebrow>
               <Select
-                ariaLabel="Delivery type"
+                ariaLabel="Delivery style"
                 value={style}
                 onValueChange={setStyle}
                 items={[
                   { value: 'auto', label: 'Work it out from the video',
-                    hint: 'Stage 9b1 reads the register off the video’s metadata' },
+                    hint: 'Automatically detected from the video' },
                   ...(options?.styles ?? []).map((s) => ({ value: s.value, label: s.label })),
                 ]}
               />
@@ -236,9 +258,8 @@ export function StartPanel() {
 
       <p className="mt-3 rounded-lg border border-line bg-surface/60 px-3 py-2
                     text-[12px] text-ink3">
-        This dubs the audio and stops. You review the cast, the script and the
-        measured face size, then choose a lip-sync model and start it from the
-        job page — so no GPU time is committed before you have heard the dub.
+        Audio dubbing runs first. You review the result, adjust voices and — when
+        you're ready — add lip-sync from the job page.
       </p>
 
       {src ? (
@@ -281,7 +302,7 @@ export function StartPanel() {
           <div className="mt-3 flex flex-wrap items-center gap-3">
             <Button variant="primary" onClick={() => void create()}
                     disabled={busy !== null}>
-              {busy === 'create' ? <IconSpinner /> : null} Start the dub
+              {busy === 'create' ? <IconSpinner /> : null} Create dubbed video
             </Button>
             <span className="text-[12px] text-ink3">
               {/* By VALUE, not by preset name. This read `estimates.standard`

@@ -1,38 +1,20 @@
-import { m } from 'framer-motion';
+import { useState } from 'react';
+import { m, AnimatePresence } from 'framer-motion';
 import { useStore } from '../../store/useStore';
 import { cn } from '../../lib/cn';
 import { fmtDuration } from '../../lib/format';
-import { IconAlert, IconCheck } from '../ui/Icons';
+import { IconAlert, IconCheck, IconChevron } from '../ui/Icons';
 import { Skeleton } from '../ui/Card';
-import type { Phase } from '../../api/types';
+import type { Phase, Stage } from '../../api/types';
 
-/**
- * The pipeline as a numbered step bar.
- *
- *   (✓)━━━━(✓)━━━━(3)────(4)────(5)────(6)────(7)
- *  Download Speaker Transcribe Translate Speech Mix  Lip sync
- *
- * Seven nodes on one line, the connector between two nodes painted once the
- * stage behind it finishes. A connector is owned by the stage to its LEFT,
- * so the line and the circles can never disagree about how far along the run
- * is — there is one source of truth (`phase.state`) and two renderings of it.
- *
- * `ui/progress.py` folds the pipeline's 24 internal markers into these seven,
- * so a clip-runner job (STATUS.json, different phase names) and a pipeline
- * job read identically here. Deliberately not a tree: the sub-stages are real
- * and still travel in the payload, but `9f1b: viseme extraction (mms_char)`
- * answers a question nobody watching a dub is asking.
- *
- * The current node pulses instead of showing a percentage, because there is
- * no honest percentage to show: stage 9h is most of the wall time and shells
- * into another conda env, so its internal progress reaches no logger of ours.
- */
-
-function isDone(p: Phase): boolean {
+function isDone(p: Phase | Stage): boolean {
   return p.state === 'done' || p.state === 'skipped';
 }
 
-/** A connector is painted when the stage on its left has finished. */
+function hasDetail(p: Phase): boolean {
+  return p.substages.length > 0 && p.state !== 'skipped';
+}
+
 function Connector({ side, lit, failed }: {
   side: 'left' | 'right';
   lit: boolean;
@@ -59,8 +41,38 @@ function Connector({ side, lit, failed }: {
   );
 }
 
+function stateIcon(state: string) {
+  if (state === 'done') return <IconCheck width={10} height={10} className="text-brand" />;
+  if (state === 'failed') return <IconAlert width={10} height={10} className="text-danger" />;
+  if (state === 'running') return <span className="inline-block h-1.5 w-1.5 rounded-full bg-aqua animate-pulse" />;
+  if (state === 'skipped') return <span className="text-[10px] text-ink4">skip</span>;
+  return null;
+}
+
+function SubstageRow({ stage }: { stage: Stage }) {
+  return (
+    <div className="flex items-center gap-2 py-0.5">
+      <span className="flex w-4 shrink-0 items-center justify-center">
+        {stateIcon(stage.state)}
+      </span>
+      <span className={cn(
+        'text-[12px] leading-tight',
+        stage.state === 'done' ? 'text-ink3' : stage.state === 'running' ? 'text-ink font-medium' : 'text-ink4',
+      )}>
+        {stage.label}
+      </span>
+      {stage.wall_s ? (
+        <span className="ml-auto font-mono text-[11px] tabular-nums text-ink4">
+          {fmtDuration(stage.wall_s)}
+        </span>
+      ) : null}
+    </div>
+  );
+}
+
 export function StageRibbon() {
   const progress = useStore((s) => s.progress);
+  const [expanded, setExpanded] = useState<string | null>(null);
 
   if (!progress) {
     return (
@@ -87,27 +99,16 @@ export function StageRibbon() {
   const doneCount = phases.filter(isDone).length;
   const runningIdx = phases.findIndex((p) => p.state === 'running');
   const failedIdx = phases.findIndex((p) => p.state === 'failed');
-  // The PHASES decide this, not `progress.state`.
-  //
-  // A draft submission dubs the audio and stops, leaving stage 9h planned
-  // and pending (`ui/progress.py::plan_stages`). The run genuinely finished,
-  // so `state === 'done'` — but the pipeline did not, and reading "Finished"
-  // over a bar with an unlit Lip sync node is the screen contradicting
-  // itself. Counting the nodes is the one answer that cannot do that.
   const allDone = n > 0 && doneCount === n;
   const current = failedIdx >= 0 ? phases[failedIdx] : (phases[runningIdx] ?? null);
-  // Nothing running, nothing failed, not all done: the run is over and a
-  // stage is still owed. Name it rather than leaving the heading on
-  // "Starting", which is what the fallback below would otherwise say about a
-  // dub that is complete apart from lip-sync.
-  // The trailing `Finished` pill is excluded: it is pending BY DEFINITION
-  // whenever the run is not complete, so without this the heading reads
-  // "Finished not started", which is both absurd and the opposite of what
-  // the operator needs — the name of the step actually still owed.
   const pending = !current && !allDone
     ? phases.find((p) => p.state === 'pending' && p.id !== 'finished') ?? null
     : null;
   const elapsed = phases.reduce((a, p) => a + (p.wall_s ?? 0), 0);
+
+  const toggle = (id: string) => {
+    setExpanded((prev) => prev === id ? null : id);
+  };
 
   return (
     <section className="card px-5 pb-4 pt-4" aria-label="Pipeline progress">
@@ -151,6 +152,8 @@ export function StageRibbon() {
           const running = i === runningIdx && failedIdx < 0;
           const failed = i === failedIdx;
           const prevDone = i > 0 && isDone(phases[i - 1]);
+          const expandable = hasDetail(p);
+          const isExpanded = expanded === p.id;
           return (
             <div
               key={p.id}
@@ -164,8 +167,13 @@ export function StageRibbon() {
                 <Connector side="right" lit={done} failed={false} />
               ) : null}
 
-              {/* the node */}
-              <div className="relative z-10">
+              <button
+                type="button"
+                className={cn('relative z-10', expandable ? 'cursor-pointer' : 'cursor-default')}
+                onClick={() => expandable && toggle(p.id)}
+                aria-expanded={expandable ? isExpanded : undefined}
+                tabIndex={expandable ? 0 : -1}
+              >
                 {running ? (
                   <m.span
                     className="absolute inset-0 rounded-full bg-aqua/45"
@@ -194,11 +202,11 @@ export function StageRibbon() {
                     i + 1
                   )}
                 </span>
-              </div>
+              </button>
 
               <span
                 className={cn(
-                  'mt-2 block w-full truncate px-0.5 text-center',
+                  'mt-2 flex w-full items-center justify-center gap-0.5 truncate px-0.5 text-center',
                   'text-[11.5px] leading-tight',
                   failed
                     ? 'font-semibold text-danger'
@@ -210,11 +218,47 @@ export function StageRibbon() {
                 )}
               >
                 {p.label}
+                {expandable ? (
+                  <IconChevron
+                    width={10}
+                    height={10}
+                    className={cn(
+                      'shrink-0 transition-transform duration-200',
+                      isExpanded && 'rotate-180',
+                    )}
+                  />
+                ) : null}
               </span>
             </div>
           );
         })}
       </div>
+
+      <AnimatePresence initial={false}>
+        {expanded && (() => {
+          const phase = phases.find((p) => p.id === expanded);
+          if (!phase || !hasDetail(phase)) return null;
+          return (
+            <m.div
+              key={expanded}
+              initial={{ height: 0, opacity: 0 }}
+              animate={{ height: 'auto', opacity: 1 }}
+              exit={{ height: 0, opacity: 0 }}
+              transition={{ duration: 0.2, ease: 'easeOut' }}
+              className="overflow-hidden"
+            >
+              <div className="mt-3 rounded-lg border border-edge/50 bg-ink/[0.02] px-3 py-2">
+                <p className="mb-1.5 text-[11px] font-medium uppercase tracking-wide text-ink4">
+                  {phase.label} — detail
+                </p>
+                {phase.substages.map((s) => (
+                  <SubstageRow key={s.key} stage={s} />
+                ))}
+              </div>
+            </m.div>
+          );
+        })()}
+      </AnimatePresence>
     </section>
   );
 }

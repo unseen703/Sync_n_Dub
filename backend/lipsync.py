@@ -25,7 +25,36 @@ from .gpu import (concat_videos, gpu_busy_pids, gpu_free_memory, gpu_load,
                   pick_devices, split_video_audio, visible_cuda_devices)
 from .media_io import _ffmpeg_bin, probe_duration
 
+# Patterns that identify lipsync render outputs (not intermediates like shards).
+_RENDER_GLOBS = ("*.lipsync.mp4", "*.lipsync.remux.mp4",
+                 "*.lipsync.windowed.mp4")
+
 log = logging.getLogger(__name__)
+
+
+def _archive_previous_renders(out_dir: Path, model: str) -> Optional[Path]:
+    """Move this model's existing renders into ``prev/<timestamp>/``.
+
+    Called at the top of `run_lipsync` so a rerun never overwrites the
+    previous render. On failure the old file is still reachable in prev/
+    and `ui/media.py` falls back to it.
+    """
+    hits = []
+    for pat in _RENDER_GLOBS:
+        hits.extend(p for p in out_dir.glob(pat)
+                    if model in p.name and p.is_file())
+    if not hits:
+        return None
+    from datetime import datetime
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    dest = out_dir / "prev" / stamp
+    dest.mkdir(parents=True, exist_ok=True)
+    for p in hits:
+        target = dest / p.name
+        shutil.move(str(p), str(target))
+        log.info("lipsync: archived %s -> prev/%s/%s", p.name, stamp, p.name)
+    return dest
+
 
 # How far a target list may fall short of the clip it covers before the
 # shortfall stops being rounding and starts being a real disagreement.
@@ -68,6 +97,7 @@ def run_lipsync(
     window: Optional[tuple] = None,
     coord_list: Optional[list] = None,
     max_segment_s: float = 60.0,
+    targets_npz: Optional[Path] = None,
 ) -> LipSyncOutput:
     """Lip-sync `source_video` (or `pre_muxed_video`) to `driving_audio`.
 
@@ -153,6 +183,15 @@ def run_lipsync(
     Like `coord_list` with sharding, a supplied `coord_list` disables
     segmentation: the boxes are indexed against the whole video and each
     segment renumbers frames from zero.
+
+    `targets_npz` is LatentSync's answer to the same question `coord_list`
+    answers for MuseTalk -- WHICH face to animate -- but it carries 106
+    landmarks per frame rather than a box, because that is the only thing
+    LatentSync's detector contributes. Unlike `coord_list` it does NOT
+    disable sharding or segmenting: `_split_targets` cuts it the way the
+    video is cut and writes one file per piece, so each adapter gets an
+    array whose length matches the clip it was handed. Adapters that do not
+    understand it ignore it.
     """
     if model not in available_models():
         raise ValueError(
@@ -160,6 +199,7 @@ def run_lipsync(
             f"Available: {', '.join(available_models())}"
         )
     out_dir = Path(out_dir); out_dir.mkdir(parents=True, exist_ok=True)
+    _archive_previous_renders(out_dir, model)
     source_video = Path(source_video)
     driving_audio = Path(driving_audio)
 
@@ -282,12 +322,14 @@ def run_lipsync(
             out_video=out_video, out_dir=out_dir, gpus=gpus,
             lipsync_kwargs=lipsync_kwargs or {},
             seg_s=seg_s, duration_s=seg_dur, coord_list=coord_list,
+            targets_npz=targets_npz,
         )
     else:
         result = _render_one(
             model=model, face_video=face_video, driving_audio=driving_audio,
             out_video=out_video, out_dir=out_dir, gpus=gpus,
             lipsync_kwargs=lipsync_kwargs or {}, coord_list=coord_list,
+            targets_npz=targets_npz,
         )
 
     # Some adapters (notably Wav2Lip) output video-only or re-encode audio
@@ -612,6 +654,84 @@ def _split_coords(coord_list: Optional[list], pairs: list,
     return out
 
 
+def _split_targets(targets_npz: Optional[Path], pairs: list, out_dir: Path,
+                   *, model: str, what: str) -> list:
+    """One targets .npz per (video, audio) pair, sliced and renumbered.
+
+    The targets twin of `_split_coords`, and the same contract: walk the
+    pieces' MEASURED frame counts with a cursor, and return None for any
+    piece whose slice cannot be trusted. A piece that renders without
+    targeting falls back to LatentSync's own detector -- worse, but correct --
+    whereas a misaligned slice animates the wrong face at exit code 0.
+
+    Per piece rather than one file for all of them because the consumer
+    checks length: `lipsync_pipeline` compares the targets against the clip
+    it was handed and drops a mismatch. Handing every shard the whole-video
+    array would therefore disable targeting on all of them.
+    """
+    if not targets_npz:
+        return [None] * len(pairs)
+
+    from .lipsync_targets import load_targets_payload, save_targets, slice_targets
+
+    payload = load_targets_payload(Path(targets_npz))
+    if payload is None:
+        log.warning("lipsync[%s]: targets %s unreadable; every %s renders "
+                    "with stock detection", model, targets_npz, what)
+        return [None] * len(pairs)
+
+    import numpy as np
+    total = int(np.asarray(payload["frame_track"]).shape[0])
+    out: list = []
+    cursor = 0
+    for i, (v, _a) in enumerate(pairs):
+        n = _probe_frames(Path(v))
+        if n <= 0:
+            log.warning("lipsync[%s]: cannot read the frame count of %s %d; "
+                        "it renders without targeting", model, what, i + 1)
+            out.append(None)
+            cursor = -1 if cursor < 0 else cursor
+            continue
+        short = (cursor + n) - total
+        if cursor < 0 or short > _COORD_PAD_FRAMES:
+            log.warning("lipsync[%s]: targets cover %d frame(s) but %s %d "
+                        "needs frames %d-%d; it renders without targeting",
+                        model, total, what, i + 1, cursor, cursor + n)
+            out.append(None)
+            cursor = -1
+            continue
+        stop = min(cursor + n, total)
+        try:
+            piece = slice_targets(payload, cursor, stop)
+        except ValueError as e:                          # noqa: BLE001
+            log.warning("lipsync[%s]: %s %d targets slice refused (%s); "
+                        "it renders without targeting", model, what, i + 1, e)
+            out.append(None)
+            cursor += n
+            continue
+        got = int(np.asarray(piece["frame_track"]).shape[0])
+        if got != n:
+            # A rounding-sized shortfall on the last piece is the clip and
+            # the list disagreeing by a frame, which the consumer's own
+            # length check would reject anyway. Say so here, where the piece
+            # is named, rather than letting it fail silently downstream.
+            log.warning("lipsync[%s]: %s %d is %d frame(s) but its targets "
+                        "slice is %d; it renders without targeting",
+                        model, what, i + 1, n, got)
+            out.append(None)
+            cursor += n
+            continue
+        dest = Path(out_dir) / f"{Path(v).stem}.targets.npz"
+        save_targets(piece, dest)
+        log.info("lipsync[%s]: %s %d targets -> %s (%d frame(s), "
+                 "%d targeted, %d run(s))", model, what, i + 1, dest.name,
+                 got, int((piece["frame_track"] >= 0).sum()),
+                 int(piece["run_start"].sum()))
+        out.append(dest)
+        cursor += n
+    return out
+
+
 def _cut_video(src: Path, start: float, end: float, out: Path) -> Path:
     """Re-encoded cut, so the slice starts on a keyframe.
 
@@ -768,6 +888,23 @@ def _conform_to_source(rendered: Path, source: Path, driving_audio: Path, *,
         # the audio outlasting the picture, so the soundtrack is the thing
         # that has to give.
         _remux_audio(trimmed, driving_audio, rendered, shortest=True)
+        # ...except `-shortest` cuts to whichever stream is shorter, and it
+        # cannot tell which one we meant. `trimmed` is already exactly src_n
+        # frames, so when the shard's dub comes back a hair SHORTER than its
+        # picture the mux silently takes the video back BELOW src_n and the
+        # parity check fails a render that was correct. Measured 2026-10-24
+        # on job 20261020-043027: shard 2 rendered 576, trimmed cleanly to
+        # 575, then remuxed to 573 against a 575-frame source.
+        #
+        # Redo it keeping the picture whole. A soundtrack that ends early is
+        # recoverable -- the caller trims an overhang, and silence at the tail
+        # is survivable -- whereas frames deleted here are simply gone.
+        if _frame_count(rendered) < src_n:
+            log.info("lipsync[%s]: the dub is shorter than its picture, so "
+                     "-shortest cut %d frame(s) back off the conform; "
+                     "re-muxing with the picture kept whole",
+                     model, src_n - _frame_count(rendered))
+            _remux_audio(trimmed, driving_audio, rendered, shortest=False)
         log.info("lipsync[%s]: trimmed %d frame(s) of audio-driven overshoot "
                  "(render ran %d past a %d-frame source)",
                  model, surplus, out_n, src_n)
@@ -841,8 +978,9 @@ def _conform_to_source(rendered: Path, source: Path, driving_audio: Path, *,
     return missing
 
 
-def _concat_shards_verified(parts: list, out: Path, *, expected: int) -> Path:
-    """Join shards, then CHECK the join actually kept every frame.
+def _concat_shards_verified(parts: list, out: Path, *, expected: int,
+                            audio: Optional[Path] = None) -> Path:
+    """Join shards/pieces, then CHECK the join actually kept every frame.
 
     `concat_videos` uses ffmpeg's concat demuxer, and its docstring assumes
     every input shares codec parameters because each adapter re-encodes with
@@ -860,33 +998,84 @@ def _concat_shards_verified(parts: list, out: Path, *, expected: int) -> Path:
     redone through the concat FILTER, which decodes both inputs into one
     graph and normalises the timebases instead of demanding they match --
     the same reason `_conform_to_source` uses the filter internally.
+
+    `audio` lays a known-good track over the join instead of carrying the
+    pieces' own audio. A per-piece audio stream is not always re-decodable
+    where it was NOT written: LatentSync muxes each piece with its own conda
+    env's ffmpeg (`-c:a aac -q:a 0`, vendor .../lipsync_pipeline.py), and that
+    native VBR AAC is rejected by the dubbing env's ffmpeg 7.1 decoder at
+    concat time ("Reserved bit set / Prediction is not allowed in AAC-LC",
+    rc=234) -- the failure surfaced once warm rendering left more pieces
+    frame-exact, so `_conform_to_source` no-oped and stopped normalising the
+    audio as a side effect. The per-piece audio is throwaway anyway (the dub
+    covers the whole span), so when `audio` is supplied the pieces are joined
+    VIDEO-ONLY -- no upstream audio stream is ever decoded -- and the dub is
+    remuxed on. Without it the audio-carrying join is kept unchanged.
     """
     parts = [Path(p) for p in parts]
-    concat_videos([str(p) for p in parts], str(out))
-    got = _frame_count(out)
-    if not expected or not got or got >= expected:
+    ff = _ffmpeg_bin()
+
+    if audio is None:
+        concat_videos([str(p) for p in parts], str(out))
+        got = _frame_count(out)
+        if not expected or not got or got >= expected:
+            return out
+        log.warning("lipsync: concat kept %d of %d frame(s) -- the demuxer "
+                    "dropped a shard whose parameters did not match; rejoining "
+                    "through the concat filter", got, expected)
+        ins, labels = [], []
+        for i, p in enumerate(parts):
+            ins += ["-i", str(p)]
+            labels.append(f"[{i}:v]setpts=PTS-STARTPTS[v{i}];")
+        graph = ("".join(labels)
+                 + "".join(f"[v{i}]" for i in range(len(parts)))
+                 + f"concat=n={len(parts)}:v=1:a=0[v]")
+        silent = out.with_suffix(".filterjoin.mp4")
+        _ff_run([ff, "-y", "-hide_banner", "-loglevel", "error", *ins,
+                 "-filter_complex", graph, "-map", "[v]", "-an",
+                 "-c:v", "libx264", "-preset", "fast", "-crf", "18",
+                 "-pix_fmt", "yuv420p", str(silent)], "shard filter-concat")
+        # The demuxer join carried the audio; keep it rather than re-deriving.
+        _remux_audio(silent, out, out, shortest=False)
+        silent.unlink(missing_ok=True)
+        log.info("lipsync: filter-concat recovered %d frame(s)",
+                 _frame_count(out))
         return out
 
-    log.warning("lipsync: concat kept %d of %d frame(s) -- the demuxer "
-                "dropped a shard whose parameters did not match; rejoining "
-                "through the concat filter", got, expected)
-    ff = _ffmpeg_bin()
-    ins, labels = [], []
-    for i, p in enumerate(parts):
-        ins += ["-i", str(p)]
-        labels.append(f"[{i}:v]setpts=PTS-STARTPTS[v{i}];")
-    graph = ("".join(labels)
-             + "".join(f"[v{i}]" for i in range(len(parts)))
-             + f"concat=n={len(parts)}:v=1:a=0[v]")
-    silent = out.with_suffix(".filterjoin.mp4")
-    _ff_run([ff, "-y", "-hide_banner", "-loglevel", "error", *ins,
-             "-filter_complex", graph, "-map", "[v]", "-an",
+    # Video-only join, then remux the dub -- never decodes the pieces' audio.
+    joined = out.with_suffix(".silent.mp4")
+    listing = joined.with_suffix(".concat.txt")
+    listing.write_text("".join(f"file '{p.resolve()}'\n" for p in parts))
+    _ff_run([ff, "-y", "-hide_banner", "-loglevel", "error",
+             "-f", "concat", "-safe", "0", "-i", str(listing),
              "-c:v", "libx264", "-preset", "fast", "-crf", "18",
-             "-pix_fmt", "yuv420p", str(silent)], "shard filter-concat")
-    # The demuxer join carried the audio; keep it rather than re-deriving.
-    _remux_audio(silent, out, out, shortest=False)
-    silent.unlink(missing_ok=True)
-    log.info("lipsync: filter-concat recovered %d frame(s)", _frame_count(out))
+             "-pix_fmt", "yuv420p", "-an", str(joined)], "shard concat")
+    listing.unlink(missing_ok=True)
+
+    got = _frame_count(joined)
+    if expected and got and got < expected:
+        log.warning("lipsync: concat kept %d of %d frame(s) -- the demuxer "
+                    "dropped a piece whose parameters did not match; rejoining "
+                    "through the concat filter", got, expected)
+        ins, labels = [], []
+        for i, p in enumerate(parts):
+            ins += ["-i", str(p)]
+            labels.append(f"[{i}:v]setpts=PTS-STARTPTS[v{i}];")
+        graph = ("".join(labels)
+                 + "".join(f"[v{i}]" for i in range(len(parts)))
+                 + f"concat=n={len(parts)}:v=1:a=0[v]")
+        fj = out.with_suffix(".filterjoin.mp4")
+        _ff_run([ff, "-y", "-hide_banner", "-loglevel", "error", *ins,
+                 "-filter_complex", graph, "-map", "[v]", "-an",
+                 "-c:v", "libx264", "-preset", "fast", "-crf", "18",
+                 "-pix_fmt", "yuv420p", str(fj)], "shard filter-concat")
+        joined.unlink(missing_ok=True)
+        joined = fj
+
+    _remux_audio(joined, Path(audio), out, shortest=False)
+    joined.unlink(missing_ok=True)
+    log.info("lipsync: joined %d piece(s) video-only and remuxed the dub "
+             "(%d frame(s))", len(parts), _frame_count(out))
     return out
 
 
@@ -993,6 +1182,7 @@ def _render_one(
     gpus: list,
     lipsync_kwargs: dict,
     coord_list: Optional[list] = None,
+    targets_npz: Optional[Path] = None,
 ):
     """One render of one (video, audio) pair: sharded if given >1 GPU.
 
@@ -1005,6 +1195,7 @@ def _render_one(
             model=model, face_video=face_video, driving_audio=driving_audio,
             out_video=out_video, out_dir=out_dir, gpus=gpus,
             lipsync_kwargs=lipsync_kwargs, coord_list=coord_list,
+            targets_npz=targets_npz,
         )
     pinned_kwargs = dict(lipsync_kwargs)
     if gpus:
@@ -1013,9 +1204,14 @@ def _render_one(
     log.info("lipsync[%s, gpu=%s]: %s + %s → %s",
              model, pinned_kwargs.get("cuda_device"),
              face_video, driving_audio, out_video)
+    extra = {}
+    if coord_list:
+        extra["coord_list"] = coord_list
+    if targets_npz:
+        extra["targets_npz"] = str(targets_npz)
     return lipsync.sync(LipSyncRequest(
         video=face_video, audio=driving_audio, out_path=out_video,
-        extra=({"coord_list": coord_list} if coord_list else {}),
+        extra=extra,
     ))
 
 
@@ -1031,95 +1227,143 @@ def _run_lipsync_segmented(
     seg_s: float,
     duration_s: float,
     coord_list: Optional[list] = None,
+    targets_npz: Optional[Path] = None,
 ):
-    """Render a long clip as <=`seg_s` pieces, SEQUENTIALLY, then join.
+    """Render a long clip as small pieces, warm model per GPU, then join.
 
     A memory bound, not a speed one. Both vendored models hold one decoded
     uint8 frame per source frame for the whole clip, so peak RSS is linear
     in LENGTH -- measured 5.87 GiB + 6.14 MiB/frame for MuseTalk at 1080p,
-    which puts a 7-minute clip at ~70 GiB on a 62 GiB host. Running the
-    pieces one after another makes that a function of `seg_s` instead.
+    which puts a 7-minute clip at ~70 GiB on a 62 GiB host. Cutting the clip
+    into pieces makes peak RAM a function of the piece, not the clip.
 
-    Sequential is the whole point: two segments in flight would put both
-    frame sets in RAM at once and undo it. Within ONE segment the given
-    GPUs are still used in parallel -- that splits frames across processes
-    without changing the total resident set, so it buys wall time for free.
+    **Warm model.** The pieces for one GPU go to a single `sync_many` call,
+    so the adapter loads the ~9 GiB of weights ONCE and cycles only the
+    per-piece frame buffers in and out. The old path spawned a fresh process
+    and reloaded the model for every piece, which the `run_lipsync` docstring
+    measured as the dominant cost at this clip length (a 37 s shard cost
+    ~5 min whether it animated 348 frames or none).
+
+    **Peak RAM is held constant across GPU counts.** Each GPU's warm worker
+    processes its pieces SEQUENTIALLY, so one GPU holds one piece's frames at
+    a time. To keep the TOTAL resident set at `seg_s` worth of frames while
+    `g` GPUs run concurrently, the piece is sized `seg_s / g`: `g` pieces in
+    flight x `seg_s/g` each = `seg_s`. This is the same bound the old
+    shard-within-segment path held (two half-segment shards resident), now
+    reached without paying a model load per piece.
     """
     import math
-    from models.lipsync import LipSyncResult
+    from models.lipsync import LipSyncRequest, LipSyncResult
 
-    n = max(1, math.ceil(duration_s / seg_s))
+    # Devices to spread pieces over. `[None]` means "inherit the parent env's
+    # default GPU" -- the same convention `_render_one` uses when `gpus` is
+    # empty -- so the single-worker path below still runs.
+    devices = list(gpus) if gpus else [None]
+    g = max(1, len(devices))
+    # Piece length so that `g` concurrent pieces sum to `seg_s` of frames.
+    piece_s = seg_s / g
+    n = max(1, math.ceil(duration_s / piece_s))
     seg_dir = out_dir / f"{out_video.stem}.segments"
     seg_dir.mkdir(parents=True, exist_ok=True)
 
     # `min_chunk_s` guards against a tail sliver; `split_video_audio`
     # returns a single pair when the clip is too short to divide, which the
-    # loop below handles as the one-segment case.
+    # branch below handles as the one-piece case.
     pairs = split_video_audio(face_video, driving_audio, n, seg_dir,
-                              min_chunk_s=min(15.0, seg_s))
+                              min_chunk_s=min(15.0, piece_s))
     if len(pairs) == 1:
-        log.info("lipsync[%s]: %.0fs is one segment; rendering in one pass",
+        log.info("lipsync[%s]: %.0fs is one piece; rendering in one pass",
                  model, duration_s)
         return _render_one(
             model=model, face_video=face_video, driving_audio=driving_audio,
             out_video=out_video, out_dir=out_dir, gpus=gpus,
             lipsync_kwargs=lipsync_kwargs, coord_list=coord_list,
+            targets_npz=targets_npz,
         )
 
-    seg_coords = _split_coords(coord_list, pairs, model=model, what="segment")
+    seg_coords = _split_coords(coord_list, pairs, model=model, what="piece")
+    seg_targets = _split_targets(targets_npz, pairs, seg_dir,
+                                 model=model, what="piece")
 
-    log.info("lipsync[%s]: %.0fs -> %d segment(s) of <=%.0fs, rendered one "
-             "at a time (peak RAM tracks the segment, not the clip)",
-             model, duration_s, len(pairs), seg_s)
+    # Round-robin pieces onto devices IN TIME ORDER, so each device's warm
+    # worker still gets a contiguous-enough spread and the whole set is
+    # reassembled by global index for the concat.
+    groups: dict = {d_i: [] for d_i in range(len(devices))}
+    for i in range(len(pairs)):
+        groups[i % len(devices)].append(i)
+
+    log.info("lipsync[%s]: %.0fs -> %d piece(s) of <=%.1fs across %d GPU(s), "
+             "model loaded once per GPU (peak RAM tracks ~%.0fs of frames)",
+             model, duration_s, len(pairs), piece_s, len(devices), seg_s)
 
     from .memguard import breach as _mem_breach
 
+    # Refuse up front if the host is ALREADY out of memory: loading a model
+    # per GPU into a machine that cannot hold a piece's frames only buys a
+    # render killed a minute later. The per-batch watchdog inside each worker
+    # covers growth DURING the run.
+    why = _mem_breach()
+    if why:
+        return LipSyncResult(
+            model_name=model, out_video=out_video, duration_s=0.0, fps=0.0,
+            error=(f"not starting lip-sync: {why}. Wait for memory to free "
+                   f"up, or raise DUBBING_MEM_GUARD_PCT."))
+
+    def _worker(d_i: int):
+        """Render device `d_i`'s pieces in one warm `sync_many` call."""
+        device = devices[d_i]
+        idxs = groups[d_i]
+        if not idxs:
+            return d_i, []
+        kwargs = dict(lipsync_kwargs)
+        if device is not None:
+            kwargs.setdefault("cuda_device", device)
+        adapter = get_lipsync(model, **kwargs)
+        reqs = []
+        for i in idxs:
+            v, a = pairs[i]
+            extra: dict = {}
+            if seg_coords[i]:
+                extra["coord_list"] = seg_coords[i]
+            if seg_targets[i]:
+                extra["targets_npz"] = str(seg_targets[i])
+            reqs.append(LipSyncRequest(
+                video=v, audio=a,
+                out_path=seg_dir / f"seg{i:02d}.lipsync.mp4", extra=extra))
+        log.info("lipsync[%s, gpu=%s]: warm worker rendering %d piece(s): %s",
+                 model, device, len(idxs),
+                 ", ".join(f"#{i}" for i in idxs))
+        return d_i, adapter.sync_many(reqs)
+
+    # One warm worker per device, in parallel. Sequential WITHIN a worker
+    # (sync_many loops its pieces), concurrent ACROSS workers -- which is what
+    # keeps peak RAM at `seg_s` while both cards stay busy.
+    results_by_idx: dict = {}
+    with ThreadPoolExecutor(max_workers=len(devices)) as pool:
+        for d_i, res in pool.map(_worker, range(len(devices))):
+            for i, r in zip(groups[d_i], res):
+                results_by_idx[i] = r
+
     rendered: list = []
     for i, (v, a) in enumerate(pairs):
-        part_out = seg_dir / f"seg{i:02d}.lipsync.mp4"
-        # Between segments, not only inside one. A segment's own watchdog
-        # protects the host while that segment runs; this catches the case
-        # where memory is ALREADY gone when the next one is about to
-        # start -- a neighbour's job grew, or the previous segment's page
-        # cache has not been reclaimed. Starting anyway buys a render that
-        # gets killed a minute later having paid for its model load.
-        why = _mem_breach()
-        if why:
-            return LipSyncResult(
-                model_name=model, out_video=out_video, duration_s=0.0,
-                fps=0.0,
-                error=(f"stopped before segment {i + 1}/{len(pairs)}: {why}. "
-                       f"{i} segment(s) already rendered under "
-                       f"{seg_dir}."),
-            )
-        log.info("lipsync[%s]: segment %d/%d (%s)%s",
-                 model, i + 1, len(pairs), v.name,
-                 f" ({len(seg_coords[i])} target boxes)"
-                 if seg_coords[i] else "")
-        r = _render_one(
-            model=model, face_video=v, driving_audio=a,
-            out_video=part_out, out_dir=seg_dir, gpus=gpus,
-            lipsync_kwargs=lipsync_kwargs, coord_list=seg_coords[i],
-        )
-        if r.error:
-            # Stop at the first failure rather than paying for the rest.
-            # Every later segment would hit the same cause -- a busy card,
-            # a missing checkpoint -- and the lane that did not stop burned
-            # 17 minutes proving exactly that on 2026-10-20.
+        r = results_by_idx.get(i)
+        if r is None or r.error:
+            # One lost piece means the join cannot be whole, so stop rather
+            # than ship a clip with a gap. A shared cause (busy card, missing
+            # checkpoint) would hit every piece anyway.
+            err = r.error if r is not None else "no result returned"
             return LipSyncResult(
                 model_name=getattr(r, "model_name", model),
                 out_video=out_video, duration_s=0.0, fps=0.0,
-                error=(f"segment {i + 1}/{len(pairs)} failed: {r.error}"),
-            )
+                error=(f"piece {i + 1}/{len(pairs)} failed: {err}"))
         got = Path(r.out_video)
-        # Conform each segment to ITS OWN source part before joining, for
-        # the same reason the shard path does: an audio-driven model can
-        # return a different frame count than it was given, and the join
-        # must not splice one segment's padding in front of the next.
+        # Conform each piece to ITS OWN source before joining: an audio-driven
+        # model can return a different frame count than it was given, and the
+        # join must not splice one piece's padding in front of the next.
         try:
             _conform_to_source(got, v, a, model=model)
         except Exception as e:                           # noqa: BLE001
-            log.warning("lipsync[%s]: segment %d conform failed (%s)",
+            log.warning("lipsync[%s]: piece %d conform failed (%s)",
                         model, i + 1, e)
         rendered.append(got)
 
@@ -1129,7 +1373,7 @@ def _run_lipsync_segmented(
         # Only a SHORTFALL is a problem; a longer render is the dub
         # outlasting the picture and is trimmed by the conform above.
         if src_n and out_n and out_n < src_n:
-            short.append(f"segment {i + 1}/{len(pairs)}: {out_n} of {src_n}")
+            short.append(f"piece {i + 1}/{len(pairs)}: {out_n} of {src_n}")
     if short:
         return LipSyncResult(
             model_name=model, out_video=out_video, duration_s=0.0, fps=0.0,
@@ -1138,12 +1382,14 @@ def _run_lipsync_segmented(
 
     _concat_shards_verified(
         rendered, out_video,
-        expected=sum(_frame_count(v) for v, _a in pairs))
+        expected=sum(_frame_count(v) for v, _a in pairs),
+        audio=driving_audio)
 
     fps, dur = _probe_video_fps_dur(out_video)
     return LipSyncResult(
         model_name=model, out_video=out_video, duration_s=dur, fps=fps,
         extra={"segmented": {"n": len(pairs), "segment_s": seg_s,
+                             "piece_s": piece_s, "warm": True,
                              "gpus": list(gpus)}},
     )
 
@@ -1158,6 +1404,7 @@ def _run_lipsync_sharded(
     gpus: list,
     lipsync_kwargs: dict,
     coord_list: Optional[list] = None,
+    targets_npz: Optional[Path] = None,
 ):
     """Fan one job across `gpus`: split in time, run in parallel, concat.
 
@@ -1184,12 +1431,20 @@ def _run_lipsync_sharded(
         lipsync = get_lipsync(model, **pinned_kwargs)
         log.info("lipsync[%s, gpu=%s, sharded→fallback]: %s → %s",
                  model, gpus[0], face_video, out_video)
+        extra = {}
+        if coord_list:
+            extra["coord_list"] = coord_list
+        if targets_npz:
+            # Nothing was cut, so the whole-clip targets still line up.
+            extra["targets_npz"] = str(targets_npz)
         return lipsync.sync(LipSyncRequest(
             video=face_video, audio=driving_audio, out_path=out_video,
-            extra=({"coord_list": coord_list} if coord_list else {}),
+            extra=extra,
         ))
 
     shard_coords = _split_coords(coord_list, pairs, model=model, what="shard")
+    shard_targets = _split_targets(targets_npz, pairs, shard_dir,
+                                   model=model, what="shard")
 
     def _one(i_gpu_pair):
         i, gpu, (v, a) = i_gpu_pair
@@ -1197,12 +1452,18 @@ def _run_lipsync_sharded(
         lipsync = get_lipsync(model, **pinned_kwargs)
         part_out = shard_dir / f"part{i:02d}.lipsync.mp4"
         coords = shard_coords[i]
-        log.info("lipsync[%s, gpu=%d, shard=%d/%d]: %s → %s%s",
+        tgt = shard_targets[i]
+        log.info("lipsync[%s, gpu=%d, shard=%d/%d]: %s → %s%s%s",
                  model, gpu, i + 1, len(pairs), v.name, part_out.name,
-                 f" ({len(coords)} target boxes)" if coords else "")
+                 f" ({len(coords)} target boxes)" if coords else "",
+                 f" (targets {tgt.name})" if tgt else "")
+        extra = {}
+        if coords:
+            extra["coord_list"] = coords
+        if tgt:
+            extra["targets_npz"] = str(tgt)
         return lipsync.sync(LipSyncRequest(
-            video=v, audio=a, out_path=part_out,
-            extra=({"coord_list": coords} if coords else {}),
+            video=v, audio=a, out_path=part_out, extra=extra,
         ))
 
     jobs = [(i, gpus[i], pair) for i, pair in enumerate(pairs)]
@@ -1255,7 +1516,8 @@ def _run_lipsync_sharded(
 
     _concat_shards_verified([Path(r.out_video) for r in results], out_video,
                             expected=sum(_frame_count(pair[0])
-                                         for _i, _g, pair in jobs))
+                                         for _i, _g, pair in jobs),
+                            audio=driving_audio)
     # Keep the shard dir around for debugging; the concat.txt is already cleaned.
 
     fps, dur = _probe_video_fps_dur(out_video)

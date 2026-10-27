@@ -41,7 +41,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
-from fastapi import (APIRouter, Depends, File, HTTPException, Response,
+from fastapi import (APIRouter, File, HTTPException, Response,
                      UploadFile, status)
 from fastapi.concurrency import run_in_threadpool
 
@@ -50,7 +50,7 @@ if str(REPO_ROOT) not in sys.path:                           # pragma: no cover
     sys.path.insert(0, str(REPO_ROOT))
 
 from ui import jobqueue, langs, presets, ytmeta               # noqa: E402
-from ui.auth import basic_auth                                # noqa: E402
+from ui.detect_language import detect_from_probe               # noqa: E402
 from ui.progress import plan_stages, read_progress, write_atomic  # noqa: E402
 from ui.schemas import MIN_WINDOW_S, JobRequest, ProbeRequest    # noqa: E402
 from ui._io import data_dir as _data_dir, env_int as _env_int   # noqa: E402
@@ -258,8 +258,7 @@ async def _probe_checked(url: str) -> Dict[str, Any]:
 
 
 @router.post("/api/youtube/probe")
-async def youtube_probe(req: ProbeRequest,
-                        _: None = Depends(basic_auth)) -> Dict[str, Any]:
+async def youtube_probe(req: ProbeRequest) -> Dict[str, Any]:
     """What the form needs to render: title, duration, poster, estimates."""
     meta = await _probe_checked(req.url)
     dur = float(meta.get("duration_s") or 0.0)
@@ -282,6 +281,14 @@ async def youtube_probe(req: ProbeRequest,
         m: presets.estimate_runtime(dur, lipsync_model=m)
         for m in available_models()}
     meta["max_lipsync_s"] = max_lipsync_s()
+
+    try:
+        detected = await run_in_threadpool(detect_from_probe, meta)
+        if detected:
+            meta["detected_source_language"] = detected
+    except Exception as e:
+        log.warning("language detection failed during probe: %s", e)
+
     return meta
 
 
@@ -321,8 +328,7 @@ async def _resolve_source(req: JobRequest) -> Dict[str, Any]:
 
 
 @router.post("/api/uploads", status_code=status.HTTP_201_CREATED)
-async def upload_video(file: UploadFile = File(...),
-                       _: None = Depends(basic_auth)) -> Dict[str, Any]:
+async def upload_video(file: UploadFile = File(...)) -> Dict[str, Any]:
     """Accept a local video and answer with the same shape as the probe.
 
     The form treats an upload and a YouTube link identically from here on:
@@ -407,7 +413,7 @@ async def upload_video(file: UploadFile = File(...),
     log.info("upload %s: %s (%.1f MB, %.1fs)", upload_id, file.filename,
              written / 1e6, dur)
 
-    return {
+    result = {
         "upload_id": upload_id,
         "source": "upload",
         "title": title,
@@ -419,14 +425,26 @@ async def upload_video(file: UploadFile = File(...),
         "max_lipsync_s": max_lipsync_s(),
     }
 
+    try:
+        detected = await run_in_threadpool(
+            detect_from_probe,
+            {"title": title},
+            video_path=dest,
+        )
+        if detected:
+            result["detected_source_language"] = detected
+    except Exception as e:
+        log.warning("language detection failed during upload: %s", e)
+
+    return result
+
 
 class _TooBig(Exception):
     """Internal: the upload passed the size cap mid-stream."""
 
 
 @router.post("/api/jobs", status_code=status.HTTP_201_CREATED)
-async def create_job(req: JobRequest, response: Response,
-                     _: None = Depends(basic_auth)) -> Dict[str, Any]:
+async def create_job(req: JobRequest, response: Response) -> Dict[str, Any]:
     meta = await _resolve_source(req)
 
     duration_s = meta.get("duration_s")
@@ -583,8 +601,7 @@ def _write_meta(job_root: Path, meta: Dict[str, Any], *,
 # ---------------------------------------------------------------------------
 
 @router.post("/api/jobs/{job_id}/cancel")
-async def cancel_job(job_id: str,
-                     _: None = Depends(basic_auth)) -> Dict[str, Any]:
+async def cancel_job(job_id: str) -> Dict[str, Any]:
     """Stop a running job or drop a queued one.
 
     The route is `{job_id}`, not `{job_id:path}`: the path converter is

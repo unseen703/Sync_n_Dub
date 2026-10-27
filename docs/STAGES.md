@@ -165,7 +165,7 @@ choice anyone made.
 than hidden.** On that job three cues needed 1.97/2.09/2.17x — past anything
 intelligible in Hindi. They stay pinned at 1.8 and report the overrun. The
 real lever is shortening the text (`backend/condense.py`,
-`--condense-overlong`), which is still **off** in `ui/presets.py`.
+`--condense-overlong`), on for every UI run since 2026-10-22.
 
 **Why the default moved**, since it changes the output of every CLI run:
 `global_tempo` met a +4.86 s TTS overrun on job `20261021-114009` by
@@ -322,6 +322,30 @@ Three things about it are easy to get wrong:
   status file at all. `ui/progress.py::read_progress` normalises all four,
   so nothing above it branches on which runner produced a job.
 
+**Two things the UI refuses on purpose.** (Moved from README 2026-10-26.)
+
+- **Lip-sync is capped at 20 minutes of video.** It runs at 3–21× clip
+  length on two 16 GiB cards, so 20 minutes is already one to seven hours.
+  An audio-only dub can be longer; the cap is on the lip-synced portion. The
+  form shows an estimate before you start.
+- **A voice change doesn't re-render until you say so.** It dirties voice
+  assignment through TTS, mix and lip-sync, and 9e has no per-speaker
+  incremental mode, so one speaker's new voice is a full re-synthesis. The
+  dialog quotes what re-runs and what stays (download, diarization,
+  transcription and translation are never at risk). The path never asks
+  for a retranslate, so the quoted cost is the applied cost.
+
+**The lip-sync model is chosen from the video.** The UI samples ~40
+frames, takes the median largest-face height as a fraction of frame
+height, and picks **wav2lip** below 25% (wide shots; its 96×96 mouth crop is
+proportionate) or **MuseTalk** above (close-ups need 256×256). Measured: a
+wide 9-face lecture scores 0.105, two close-ups 0.419 and 0.401. It says
+what it picked and why, and the operator can override. The threshold is
+calibrated on three clips from one source video, a sane default rather than
+a validated classifier; `DUBBING_UI_FACE_THRESHOLD` moves it. A 4K source
+is the case to override by hand: a 96×96 crop on a ~520 px face is upscaled
+roughly 5×.
+
 **Every hosted stage of a default UI run is Bodhan.** As of 2026-10-17
 `ui/presets.py` defaults ASR, MT and TTS all to `bodhan` (ASR moved off
 `whisperx` by request). That removes the one stage that used to run locally,
@@ -338,6 +362,36 @@ put the English terms back — an extra Bodhan call per retained span, editing
 the translation it had just asked to be made differently. `translit_model`
 is therefore ABSENT from `build_kwargs`, not None: `plan_stages` keys off
 presence, so a None would still draw the stage on the progress bar.
+
+Bodhan's `target_script` takes three values; `codemix` is the default in
+the adapter (`DEFAULT_TARGET_SCRIPT`), the CLI (`--mt-target-script`) and
+`scripts/clip_dub_audio.py` (`--target-script`):
+
+| `target_script` | What comes back |
+|---|---|
+| `codemix` *(default)* | English technical terms stay in Latin inside the target-script sentence — `weight सही है` |
+| `native` | Everything re-scripted into Devanagari/Tamil/… |
+| `roman` | The whole sentence in Latin script |
+
+**Why not `native`: it re-scripts inconsistently.** On one 30 s Hindi clip
+of the NAG lecture, the same term came back three ways:
+
+```
+cue 0  →  जहां हमारे पास डेल्टा डब्ल्यूटी था       ("WT" transliterated)
+cue 5  →  W के संबंध में लॉस फंक्शन                ("W" left in Latin)
+cue 7  →  ब्रैकेट हमारे पास WT था                  ("WT" left in Latin)
+```
+
+An Indic TTS voice doesn't reliably pronounce a stray Latin remnant, so the
+listener hears a dropped or mangled term. `codemix` keeps the Latin
+deliberately and uniformly, which is also how Indian technical lectures are
+actually spoken. On the same clip it gave clean Hinglish on every cue, and
+`indic-speak` synthesised all 8 cues across the window.
+
+For fully native script, pass `--target-script native` and clean the
+remnants with `backend/codemix.py` (`--translit`, `--termbase`), exposed in
+`scripts/clip_dub_audio.py` as `--normalize-script`. That's the opposite of
+`codemix`; combining the two cancels out.
 
 **One speaker keeps one voice, and the weak link is the LABEL, not the map.**
 Diarization runs once over the whole audio, so pyannote's labels are already

@@ -112,13 +112,12 @@ def _env(name: str, default: str) -> str:
 def default_source_language() -> Optional[str]:
     """What the UI assumes is SPOKEN in the source, unless told otherwise.
 
-    English, because the direction this project dubs in is English -> Indic.
-    `DUBBING_UI_SOURCE_LANGUAGE=auto` restores per-turn detection, which is
-    what this used to do implicitly and which produced one lecture
-    transcribed into four different Indic scripts (see
-    `models/asr/bodhan_adapter.py`).
+    Defaults to ``auto`` (automatic detection). The probe endpoint detects
+    the language from yt-dlp metadata or a Gemini Flash Lite audio analysis
+    and auto-selects it in the form. ``DUBBING_UI_SOURCE_LANGUAGE=en``
+    restores the old English-pinned behaviour.
     """
-    v = _env("DUBBING_UI_SOURCE_LANGUAGE", "en").lower()
+    v = _env("DUBBING_UI_SOURCE_LANGUAGE", "auto").lower()
     return None if v in ("auto", "detect", "none", "") else v
 
 
@@ -196,8 +195,13 @@ UI_STAGE_DEFAULTS: Dict[str, Any] = {
     #     4 labels -> 11, and labels below the single-speaker purity floor
     #     went 3-of-4 to 1-of-11.
     "refine_speaker_labels": True,
-    "asd_model": "talknet",             # 6   ASD + Hungarian assignment
-    "asd_on_screen_threshold": 0.3,
+    # loconet is the default (2026-10-26): the only joint multi-speaker model,
+    # so it's the one that can actually tell competing faces apart rather than
+    # scoring each in isolation. Its weights are AVA-only and over-fire on
+    # dubbed footage, which is why the on-screen threshold below is 0.5 rather
+    # than the 0.3 that suited TalkNet -- a higher bar to offset the bias.
+    "asd_model": "loconet",             # 6   ASD + Hungarian assignment
+    "asd_on_screen_threshold": 0.5,
     # 2. NO `render_mode`. The hosted indic-transcribe endpoint REFUSES it:
     #    `HTTP 422 unexpected field(s): ['render_mode']`, which fails the
     #    whole job at stage 7. It was set to "mixed" here on the reasoning
@@ -214,24 +218,24 @@ UI_STAGE_DEFAULTS: Dict[str, Any] = {
     "viseme_backend": "mms_char",
 }
 
-#: Segment-wise pacing (9f2): each clip is fitted to its own slot in both
-#: directions rather than the whole file getting one `atempo`. This is exactly
-#: what `backend/cli.py::resolve_speed_setup` builds for `--speed-mode segment`,
-#: copied deliberately rather than imported because the CLI resolver takes an
-#: argparse namespace this path does not have.
+#: Warp-mode pacing (2026-10-26 default): the continuous-rate producer plans
+#: a per-cue speech tempo under a slew limit and a boundary ramp, borrows
+#: silence instead of only speeding speech, and the mix reads the pre-stretched
+#: warped clip. This is what `backend/cli.py::resolve_speed_setup` builds for
+#: `--speed-mode warp`, called here rather than copied because the CLI resolver
+#: takes an argparse namespace this path does not have.
 #:
 #: The three companion keys are NOT optional. `backend/tts.py` stretches each
-#: clip to its target and the timing plan fits it again in the mix; leaving
-#: `tts_apply_stretch` on would stretch every clip twice to the same slot.
-#: What a UI submission adds to the pipeline kwargs to pace the dub.
+#: clip to its target and the warp producer stretches it again -- leaving
+#: `tts_apply_stretch` on would stretch every clip twice. `mix_clip_source`
+#: must be `"warped"` or the mix would place unstretched clips at warped
+#: positions and the dub would drift immediately.
 #:
-#: This was a hand-kept COPY of what `backend.cli.resolve_speed_setup` builds
-#: for `--speed-mode segment`, with `tests/test_speed_mode.py` checking the
-#: two still agreed. Both sides call `backend.speed` now, so the UI and a
-#: bare CLI run are the same values by construction. Taking no arguments is
-#: the point: the UI does not expose these bounds, so it gets the same
-#: defaults `--speed-cap` / `--speed-floor` carry.
-UI_TIMING_DEFAULTS: Dict[str, Any] = _speed.segment_timing_kwargs()
+#: Taking no arguments is the point: the UI does not expose these bounds, so
+#: it gets the same defaults `--speed-step` / `--speed-tempo-max` carry. The
+#: previous naive_slot default is still reachable from the CLI via
+#: `--speed-mode segment`.
+UI_TIMING_DEFAULTS: Dict[str, Any] = _speed.warp_timing_kwargs()
 
 
 def build_kwargs(preset: str, *, target_language: str,

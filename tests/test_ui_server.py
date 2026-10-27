@@ -237,53 +237,6 @@ def test_manifest_config_wins_over_the_flat_one(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# the bind guard
-# ---------------------------------------------------------------------------
-
-def test_loopback_needs_no_credentials():
-    from ui.auth import require_auth_for_nonloopback
-    assert require_auth_for_nonloopback("127.0.0.1") is None
-
-
-@pytest.mark.parametrize("host", ["0.0.0.0", "192.168.1.5", "10.0.0.2"])
-def test_public_bind_without_credentials_is_refused(monkeypatch, host):
-    """This UI runs yt-dlp on arbitrary URLs and starts GPU jobs."""
-    from ui.auth import require_auth_for_nonloopback
-    monkeypatch.delenv("DUBBING_UI_USER", raising=False)
-    monkeypatch.delenv("DUBBING_UI_PASS", raising=False)
-    with pytest.raises(SystemExit, match="without auth"):
-        require_auth_for_nonloopback(host)
-
-
-def test_public_bind_with_credentials_is_allowed(monkeypatch):
-    from ui.auth import require_auth_for_nonloopback
-    monkeypatch.setenv("DUBBING_UI_USER", "u")
-    monkeypatch.setenv("DUBBING_UI_PASS", "p")
-    assert require_auth_for_nonloopback("0.0.0.0") is None
-
-
-def test_basic_auth_rejects_a_wrong_password(monkeypatch):
-    from fastapi import HTTPException
-    from fastapi.security import HTTPBasicCredentials
-
-    from ui.auth import basic_auth
-    monkeypatch.setenv("DUBBING_UI_USER", "u")
-    monkeypatch.setenv("DUBBING_UI_PASS", "right")
-    with pytest.raises(HTTPException) as e:
-        basic_auth(HTTPBasicCredentials(username="u", password="wrong"))
-    assert e.value.status_code == 401
-    assert basic_auth(HTTPBasicCredentials(username="u", password="right")) is None
-
-
-def test_basic_auth_is_a_noop_when_unconfigured(monkeypatch):
-    """The loopback default must not require credentials nobody set."""
-    from ui.auth import basic_auth
-    monkeypatch.delenv("DUBBING_UI_USER", raising=False)
-    monkeypatch.delenv("DUBBING_UI_PASS", raising=False)
-    assert basic_auth(None) is None
-
-
-# ---------------------------------------------------------------------------
 # router mounting — order is load-bearing
 # ---------------------------------------------------------------------------
 

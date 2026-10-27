@@ -265,8 +265,14 @@ def test_no_mp4_error_carries_musetalks_swallowed_message(tmp_path, monkeypatch)
 
     stdout = ("loading models\n"
               "Error occurred during processing: boom in the blend loop\n")
+    # ffprobe (in _cap_resolution/_nb_frames) still uses subprocess.run; the
+    # render now shells out through run_streaming, whose .stdout carries the
+    # swallowed message the adapter must surface.
     monkeypatch.setattr(MA.subprocess, "run",
                         lambda *a, **k: sp.CompletedProcess(a, 0, stdout, ""))
+    monkeypatch.setattr(MA, "run_streaming",
+                        lambda *a, **k: sp.CompletedProcess(
+                            a[0] if a else None, 0, stdout, ""))
     a = MA.MuseTalkSync()
     monkeypatch.setattr(a, "_ensure_loaded", lambda: None)
     from models.lipsync.base import LipSyncRequest
@@ -475,20 +481,32 @@ def test_lipsync_segments_long_clips_by_default():
     assert "def _run_lipsync_segmented" in src
 
 
-def test_segments_run_one_at_a_time_not_in_parallel():
-    """Sequential is the whole point.
+def test_segments_run_warm_per_gpu_without_raising_peak_ram():
+    """One warm worker per GPU, pieces sized so concurrency is RAM-neutral.
 
-    Sharding splits frames across PROCESSES that run together, so the total
-    resident set is unchanged -- it buys wall time, not memory. Only
-    running the pieces one after another bounds RAM. A ThreadPoolExecutor
-    inside the segment loop would silently undo the entire change.
+    The old rule was strictly sequential: two pieces in flight would hold two
+    frame sets at once and undo the whole point of segmenting -- but it cost a
+    full model load PER PIECE, the dominant term at this clip length. The
+    warm-model rework keeps the SAME peak RAM while loading the model once per
+    GPU. Each GPU's worker renders its pieces sequentially (sync_many loops
+    them), and the piece is sized `seg_s / g` so that `g` pieces running at
+    once sum to `seg_s` of frames -- exactly the bound the strictly-sequential
+    path held, and the one the shard-within-segment path held before it.
     """
     src = (REPO / "backend" / "lipsync.py").read_text()
     fn = src[src.index("def _run_lipsync_segmented"):
              src.index("def _run_lipsync_sharded")]
-    assert "ThreadPoolExecutor" not in fn, (
-        "segments must not run concurrently -- that restores the peak RAM "
-        "the segmenting exists to remove")
+    # Pieces shrink with the GPU count, or `g` concurrent workers raise peak
+    # RAM above the one-segment bound segmenting exists to hold.
+    assert "piece_s = seg_s / g" in fn, (
+        "pieces must shrink with the GPU count, or concurrent workers restore "
+        "the peak RAM the segmenting removes")
+    # Sequential WITHIN a worker: a GPU's whole run of pieces goes to one warm
+    # call that loops them, not a fresh model load per piece.
+    assert "sync_many(" in fn
+    # Concurrency is now ACROSS GPUs (one worker each) -- which is what keeps
+    # both cards busy without putting a second piece on the same card.
+    assert "ThreadPoolExecutor" in fn
     assert "for i, (v, a) in enumerate(pairs)" in fn
 
 
@@ -508,8 +526,8 @@ def test_a_supplied_coord_list_is_split_across_segments():
     src = (REPO / "backend" / "lipsync.py").read_text()
     assert "if want_segments and coord_list:" not in src, (
         "segmenting is disabled again when targets are supplied")
-    assert "coord_list=seg_coords[i]" in src, (
-        "segments no longer receive their own slice of the target list")
+    assert 'extra["coord_list"] = seg_coords[i]' in src, (
+        "pieces no longer receive their own slice of the target list")
     assert "_split_coords(" in src
 
 

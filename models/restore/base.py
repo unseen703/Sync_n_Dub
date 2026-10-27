@@ -21,6 +21,27 @@ class RestoreRequest:
     bundles the two (its `upscale` resizes the whole background and pastes
     the face onto that), and keeping them bundled is what made a same-size
     pass resample every frame to 4K and back for nothing.
+
+    `workers_per_gpu` is the second axis of the split `num_gpus` starts, and
+    until now the only one with no way to reach it: `scripts/face_enhance.py`
+    has had the flag since it learned to shard, and nothing in the repo ever
+    set it. One worker measured 1691 MiB of 16311 and 33.9% mean GPU
+    utilisation -- the per-frame path is CPU-bound (decode, paste_back,
+    resize, x264), so a card given one worker sits idle two thirds of the
+    time while its memory goes unused.
+
+    None keeps the script's own default of 1, which is today's behaviour.
+    That is deliberate: peak VRAM rises linearly per worker and the gain is
+    bounded by CPU contention, so the useful value is a measurement on this
+    host rather than a guess written into a default.
+
+    `seek_shards` lets each shard seek to its first frame instead of decoding
+    every frame before it -- four shards otherwise decode 2.5x the video
+    between them. False by default and deliberately NOT exposed over HTTP:
+    an off-by-one seek shifts every whole-video index in the shard without
+    changing the frame count, so `--frame-mask` restores the wrong mouths and
+    nothing downstream can tell. The guards and the check that proves it on a
+    given source are in `scripts/face_enhance.py`'s module docstring.
     """
     video: Path
     out_path: Path
@@ -31,6 +52,8 @@ class RestoreRequest:
     only_center_face: bool = False
     bg_upsample: bool = False
     num_gpus: Optional[int] = None
+    workers_per_gpu: Optional[int] = None
+    seek_shards: bool = False
     extra: Dict[str, Any] = field(default_factory=dict)
 
 

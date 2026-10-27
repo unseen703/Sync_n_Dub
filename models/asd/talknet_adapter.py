@@ -26,9 +26,25 @@ from typing import Dict, List, Optional
 import numpy as np
 
 from ..faces.base import FaceTrack, FaceTracks
+from ._mfcc_av import (
+    MFCC_HZ,
+    align_pair,
+    crop_all_tracks,
+    crop_one,
+    load_audio_int16,
+    mfcc_features,
+    window_bounds,
+)
 from .base import ASDResult, ASDScore, BaseASD
 
 log = logging.getLogger(__name__)
+
+# The cropping and MFCC half of this adapter moved to `_mfcc_av` on
+# 2026-10-25 when Light-ASD arrived needing the identical code. These two
+# names are kept because they were module-level and importable; the bodies
+# are gone, not duplicated.
+_crop_all_tracks = crop_all_tracks
+_crop_one = crop_one
 
 
 class TalkNetASD(BaseASD):
@@ -42,6 +58,7 @@ class TalkNetASD(BaseASD):
         checkpoint: Optional[Path] = None,
         crop_size: int = 112,
         target_fps: float = 25.0,
+        window_frames: int = 150,
     ):
         super().__init__(device=device)
         # Resolved the same way the lip-sync upstreams are, so TalkNet moved
@@ -73,6 +90,24 @@ class TalkNetASD(BaseASD):
             self.checkpoint = self.repo_path / "pretrain_TalkSet.model"
         self.crop_size = crop_size
         self.target_fps = target_fps
+        # Frames per forward pass. The visual frontend holds a
+        # (1, T, 64, 56, 56) float activation, ~0.77 MiB/frame, and the crops
+        # are 112x112 whatever the source resolution -- so T is the whole
+        # memory story and a window size is a hard bound, not a guess. A
+        # 7-minute single-face track (10575 frames) asked for 7.91 GiB in one
+        # `batch_norm` and took job 20261024-155149 down at stage 6.
+        #
+        # Upstream never runs a whole track either: `demoTalkNet.py`:237-245
+        # cuts it into 1-6 s pieces and runs the FULL stack per piece. This
+        # adapter simply never ported that. 150 frames is upstream's longest
+        # piece (6 s at 25 fps), ~115 MiB peak. 0 restores the single-pass
+        # behaviour for anyone who wants it back.
+        # `or window_frames`, not `or 0`: `.env` ships this blank, and a
+        # blank must mean "the default" -- reading it as 0 would silently
+        # restore the single-pass behaviour this exists to end. "0" is a
+        # truthy string, so disabling on purpose still works.
+        self.window_frames = int(os.getenv("TALKNET_WINDOW_FRAMES")
+                                 or window_frames)
         self._model = None
 
     def _ensure_loaded(self) -> None:
@@ -131,35 +166,19 @@ class TalkNetASD(BaseASD):
 
         import torch
         import cv2
-        import soundfile as sf
-        from python_speech_features import mfcc as mfcc_fn  # upstream dep
 
-        audio, sr = sf.read(str(audio_path), dtype="float32", always_2d=False)
-        if audio.ndim == 2:
-            audio = audio.mean(axis=1)
-        if sr != 16000:
-            raise ValueError(
-                f"TalkNet expects 16 kHz audio; got {sr}. Resample upstream."
-            )
+        # The int16 rescale that keeps these scores off the floor lives in
+        # `_mfcc_av.load_audio_int16` now -- see its docstring for the
+        # measurement, and for why a third copy of it was not made.
+        audio = load_audio_int16(audio_path, model_name="TalkNet")
 
-        # TalkNet's MFCC front-end was trained on int16-valued PCM: upstream
-        # reads the wav with `scipy.io.wavfile.read` (which yields int16 for
-        # 16-bit PCM) and hands that straight to `python_speech_features.mfcc`
-        # -- see TalkNet-ASD/dataLoader.py:11,41 and demoTalkNet.py:218-219.
-        # soundfile gives us floats in [-1, 1] instead, which shifts every
-        # log-energy cepstral term by ~log(32768) and drags all scores toward
-        # zero. Measured on one 3 s single-speaker close-up: mean 0.044 /
-        # max 0.129 / 0 of 75 frames above 0.5 as floats, versus mean 0.411 /
-        # max 0.798 / 31 of 75 frames once rescaled. The stage never errored.
-        audio = audio * 32768.0
-
-        # Decode the video ONCE and bucket each cropped face to its track(s).
-        # Previously the adapter reopened and resliced the video per track —
-        # with N tracks that's O(N * video_len) decode, which exploded on
-        # busy footage (262 tracks → hours). Now it's O(video_len).
-        crops_by_track = _crop_all_tracks(
+        crops_by_track = crop_all_tracks(
             tracks.tracks, video_path, self.crop_size, cv2,
         )
+
+        if self.window_frames > 0:
+            log.info("talknet: scoring %d track(s) in windows of %d frames",
+                     len(tracks.tracks), self.window_frames)
 
         per_track: Dict[str, ASDScore] = {}
         for tr in tracks.tracks:
@@ -167,7 +186,7 @@ class TalkNetASD(BaseASD):
                                         np.zeros((0, self.crop_size, self.crop_size),
                                                  dtype=np.uint8))
             per_track[tr.track_id] = self._score_track(
-                tr, crops, audio, tracks.fps, mfcc_fn, torch,
+                tr, crops, audio, tracks.fps, torch,
             )
 
         return ASDResult(
@@ -183,7 +202,6 @@ class TalkNetASD(BaseASD):
         crops: np.ndarray,
         audio: np.ndarray,
         fps: float,
-        mfcc_fn,
         torch,
     ) -> ASDScore:
         if track.num_frames == 0 or crops.shape[0] == 0:
@@ -200,45 +218,47 @@ class TalkNetASD(BaseASD):
             return ASDScore(track.track_id,
                             frames=track.frames.copy(),
                             scores=np.zeros((track.num_frames,), dtype=np.float32))
-        feats = mfcc_fn(clip_audio, 16000, numcep=13, winlen=0.025, winstep=0.010)
-        audio_feat = torch.FloatTensor(np.asarray(feats))
-        video_feat = torch.FloatTensor(np.asarray(crops))
+        # No `fps=` here, deliberately: TalkNet's upstream resamples the
+        # video to 25 fps and keeps the MFCC window fixed, so passing the
+        # source rate would change this stage's output on every non-25 fps
+        # video. `_mfcc_av.mfcc_features` documents the asymmetry.
+        feats = mfcc_features(clip_audio)
 
+        bounds = window_bounds(n_frames, self.window_frames)
+
+        # MFCC is a fixed 100 Hz whatever the video fps, so a window's audio
+        # slice is its frame span through 100/fps -- the same ratio upstream
+        # hard-codes as `duration*100` against `duration*25`.
+        mfcc_per_frame = MFCC_HZ / float(fps or self.target_fps)
+
+        chunks: List[np.ndarray] = []
         with torch.no_grad():
-            if self.device.startswith("cuda"):
-                audio_feat = audio_feat.cuda(); video_feat = video_feat.cuda()
-            audio_embed = self._model.model.forward_audio_frontend(audio_feat.unsqueeze(0))
-            video_embed = self._model.model.forward_visual_frontend(video_feat.unsqueeze(0))
-            # Trim both to the common length BEFORE cross-attention.
-            #
-            # The two frontends disagree by a frame on most clips: the audio
-            # one downsamples 100 Hz MFCC by 4 (-> 25 Hz), the visual one
-            # emits exactly one embedding per crop, and `n_frames *
-            # samples_per_frame` rarely divides into a whole number of MFCC
-            # windows. The residual becomes a 17-vs-16 mismatch inside
-            # `attentionLayer.forward`'s `src + self.dropout1(src2)`, which
-            # raises RuntimeError and takes the whole stage -- and so the
-            # whole job -- down with it.
-            #
-            # Upstream does the same alignment earlier, on durations, in
-            # `demoTalkNet.py`:
-            #     length = min((audio.shape[0] - audio.shape[0] % 4) / 100,
-            #                  video.shape[0] / 25)
-            # This adapter builds its tensors itself and never ported that
-            # line. Trimming the tail is correct rather than merely safe:
-            # the extra frame has no counterpart to attend to.
-            t = min(audio_embed.shape[1], video_embed.shape[1])
-            if audio_embed.shape[1] != video_embed.shape[1]:
-                log.debug("talknet: trimming a=%d v=%d -> %d",
-                          audio_embed.shape[1], video_embed.shape[1], t)
-            audio_embed = audio_embed[:, :t]
-            video_embed = video_embed[:, :t]
-            audio_embed, video_embed = self._model.model.forward_cross_attention(
-                audio_embed, video_embed
-            )
-            out = self._model.model.forward_audio_visual_backend(audio_embed, video_embed)
-            logits = self._model.lossAV.FC(out)
-            scores = torch.softmax(logits, dim=-1)[:, 1].cpu().numpy()
+            for f0, f1 in bounds:
+                want = f1 - f0
+                a0 = int(round(f0 * mfcc_per_frame))
+                a1 = min(len(feats), int(round(f1 * mfcc_per_frame)))
+                if a1 - a0 < 4:
+                    # The audio frontend downsamples by 4; with fewer rows
+                    # than that it has nothing to emit, so the window would
+                    # contribute no scores however it was run.
+                    chunks.append(np.zeros((want,), dtype=np.float32))
+                    continue
+                sc = self._score_window(np.asarray(feats[a0:a1]),
+                                        crops[f0:f1], torch)
+                if len(sc) < want:
+                    # The two frontends disagree by up to a frame (see
+                    # `_score_window`). On a whole-track pass that was a
+                    # one-frame trim at the END, which the caller absorbed.
+                    # Across ~70 windows an unpadded short window would
+                    # shift every LATER frame's score off its own frame, so
+                    # hold the last value instead of letting it slide.
+                    sc = np.concatenate([sc, np.full(
+                        want - len(sc), sc[-1] if len(sc) else 0.0,
+                        dtype=np.float32)])
+                chunks.append(sc[:want])
+
+        scores = (np.concatenate(chunks) if chunks
+                  else np.zeros((0,), dtype=np.float32))
 
         n = min(len(scores), track.num_frames)
         return ASDScore(
@@ -247,76 +267,37 @@ class TalkNetASD(BaseASD):
             scores=scores[:n].astype(np.float32),
         )
 
+    def _score_window(
+        self,
+        feats: np.ndarray,
+        crops: np.ndarray,
+        torch,
+    ) -> np.ndarray:
+        """One forward pass over a bounded slice: one score per crop.
 
-# ---------------------------------------------------------------------------
-# frame cropping — shared with TS-TalkNet
-# ---------------------------------------------------------------------------
+        May return FEWER scores than crops when the two frontends disagree
+        on length; the caller pads to the window width so the concatenation
+        stays aligned to `track.frames`.
 
-def _crop_all_tracks(
-    tracks: List[FaceTrack],
-    video_path: Path,
-    size: int,
-    cv2,
-) -> Dict[str, np.ndarray]:
-    """Sweep the video once; dispatch each needed frame to every track that
-    wants it.
+        The caller holds the `torch.no_grad()` -- it spans every window.
+        """
+        audio_feat = torch.FloatTensor(np.asarray(feats))
+        video_feat = torch.FloatTensor(np.asarray(crops))
 
-    Returns {track_id: (N, size, size) uint8 grayscale array}, with crops in
-    the same frame order as the track's `.frames` array. Any frame a track
-    expected but the decoder skipped (e.g. truncated video) is dropped —
-    the caller trims scores to `min(len(crops), track.num_frames)` so this
-    is safe.
-    """
-    # Build: frame_idx -> list of (track_id, bbox, position_in_track_output)
-    from collections import defaultdict
-    buckets: Dict[int, list] = defaultdict(list)
-    out: Dict[str, List[Optional[np.ndarray]]] = {}
-    for tr in tracks:
-        out[tr.track_id] = [None] * len(tr.frames)
-        for pos, (f, bb) in enumerate(zip(tr.frames, tr.bboxes)):
-            buckets[int(f)].append((tr.track_id, bb, pos))
-
-    if not buckets:
-        return {tid: np.zeros((0, size, size), dtype=np.uint8) for tid in out}
-
-    cap = cv2.VideoCapture(str(video_path))
-    if not cap.isOpened():
-        raise RuntimeError(f"Cannot open {video_path}")
-
-    max_needed = max(buckets)
-    idx = 0
-    try:
-        while idx <= max_needed:
-            ok, frame = cap.read()
-            if not ok:
-                break
-            if idx in buckets:
-                for tid, bb, pos in buckets[idx]:
-                    out[tid][pos] = _crop_one(frame, bb, size, cv2)
-            idx += 1
-    finally:
-        cap.release()
-
-    # Compact: drop any None slots (frames the decoder didn't reach) so the
-    # returned array lengths match what inference actually consumes.
-    packed: Dict[str, np.ndarray] = {}
-    for tid, crops in out.items():
-        valid = [c for c in crops if c is not None]
-        packed[tid] = (np.stack(valid) if valid
-                       else np.zeros((0, size, size), dtype=np.uint8))
-    return packed
-
-
-def _crop_one(frame: np.ndarray, bb, size: int, cv2) -> np.ndarray:
-    x1, y1, x2, y2 = bb
-    cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
-    side = max(x2 - x1, y2 - y1) * 1.4   # TalkNet wants context, not a tight crop
-    xa = int(max(0, cx - side / 2))
-    ya = int(max(0, cy - side / 2))
-    xb = int(min(frame.shape[1], cx + side / 2))
-    yb = int(min(frame.shape[0], cy + side / 2))
-    patch = frame[ya:yb, xa:xb]
-    if patch.size == 0:
-        return np.zeros((size, size), dtype=np.uint8)
-    patch = cv2.resize(patch, (size, size), interpolation=cv2.INTER_AREA)
-    return cv2.cvtColor(patch, cv2.COLOR_BGR2GRAY)
+        if self.device.startswith("cuda"):
+            audio_feat = audio_feat.cuda(); video_feat = video_feat.cuda()
+        audio_embed = self._model.model.forward_audio_frontend(audio_feat.unsqueeze(0))
+        video_embed = self._model.model.forward_visual_frontend(video_feat.unsqueeze(0))
+        # Trim both to the common length BEFORE cross-attention. Untrimmed,
+        # the one-frame disagreement becomes a 17-vs-16 mismatch inside
+        # `attentionLayer.forward`'s `src + self.dropout1(src2)`, which
+        # raises and takes the whole stage -- and so the whole job -- down.
+        # `_mfcc_av.align_pair` carries the full why.
+        audio_embed, video_embed = align_pair(
+            audio_embed, video_embed, who="talknet")
+        audio_embed, video_embed = self._model.model.forward_cross_attention(
+            audio_embed, video_embed
+        )
+        out = self._model.model.forward_audio_visual_backend(audio_embed, video_embed)
+        logits = self._model.lossAV.FC(out)
+        return torch.softmax(logits, dim=-1)[:, 1].cpu().numpy().astype(np.float32)

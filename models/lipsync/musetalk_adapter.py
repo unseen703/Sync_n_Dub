@@ -33,7 +33,8 @@ from typing import Optional, Tuple
 
 from backend.media_io import probe_video as _probe_video
 from . import coords
-from .base import BaseLipSync, LipSyncRequest, LipSyncResult, resolve_env_python, resolve_vendor_repo
+from .base import (BaseLipSync, LipSyncRequest, LipSyncResult,
+                   resolve_env_python, resolve_vendor_repo, run_streaming)
 
 log = logging.getLogger(__name__)
 
@@ -276,30 +277,105 @@ class MuseTalkSync(BaseLipSync):
         return scaled, (nw / w, nh / h)
 
     def sync(self, request: LipSyncRequest) -> LipSyncResult:
-        self._ensure_loaded()
-        out = Path(request.out_path)
-        out.parent.mkdir(parents=True, exist_ok=True)
+        return self.sync_many([request])[0]
 
-        video_abs = Path(request.video).resolve()
-        audio_abs = Path(request.audio).resolve()
+    def sync_many(self, requests):
+        """Render many (video, audio) pairs in ONE MuseTalk process.
+
+        MuseTalk's `scripts/inference.py` already loads the VAE, UNet, Whisper
+        and face parser ONCE (before the task loop) and then iterates every
+        task in its YAML -- its per-task `frame_list` is a local that is
+        released on the next iteration's reassignment, and it `rmtree`s the
+        per-task PNG dirs between tasks. So the only thing standing between us
+        and "load once, cycle frames" was that the adapter wrote a ONE-entry
+        YAML and spawned a fresh process per piece. Writing all the pieces
+        into one YAML keeps peak RAM a function of a single piece (the loop is
+        still sequential) while paying the ~9 GiB model load exactly once for
+        the whole batch. `backend.lipsync` hands one GPU's whole run of pieces
+        to one call for this reason.
+
+        Each task carries its own downscale factor, its own staged coord
+        pickle, and its own output; a task that MuseTalk silently skips (it
+        wraps each in `try/except` and only prints) is detected by its missing
+        output and reported in that request's own result, not allowed to abort
+        the siblings.
+        """
+        if not requests:
+            return []
+        self._ensure_loaded()
 
         with tempfile.TemporaryDirectory(prefix="musetalk_") as td:
             tdp = Path(td)
-            # BEFORE the yaml is written and before any coord-cache key is
-            # derived: a cache entry keyed on the 4K file would carry boxes
-            # in 4K coordinates into a 1080p render.
-            video_abs, frame_scale = self._cap_resolution(video_abs, tdp)
-            yaml_path = tdp / "task.yaml"
-            # MuseTalk's inference.py expects {task_name: {video_path, audio_path, bbox_shift}}
-            task_name = Path(request.out_path).stem
-            yaml_path.write_text(
-                f"{task_name}:\n"
-                f"  video_path: \"{video_abs}\"\n"
-                f"  audio_path: \"{audio_abs}\"\n"
-                f"  bbox_shift: {self.bbox_shift}\n"
-            )
             result_dir = tdp / "results"
             result_dir.mkdir(exist_ok=True)
+
+            # One record per request, built before the YAML so every task's
+            # downscale and coord staging is settled up front.
+            tasks = []
+            any_staged = False           # at least one task has a pickle to load
+            want_saved = False           # keep pickles (targets, or cache on)
+            yaml_lines: list[str] = []
+            for idx, request in enumerate(requests):
+                out = Path(request.out_path)
+                out.parent.mkdir(parents=True, exist_ok=True)
+                video_abs = Path(request.video).resolve()
+                audio_abs = Path(request.audio).resolve()
+                # BEFORE the coord-cache key is derived: a key on the 4K file
+                # would carry boxes in 4K coordinates into a 1080p render.
+                video_abs, frame_scale = self._cap_resolution(video_abs, tdp)
+
+                coord_params = {"bbox_shift": self.bbox_shift,
+                                "version": self.version}
+                # An ASD-gated target list beats both detection and the cache.
+                # Built by `backend.lipsync_targets` from the tracks TalkNet
+                # confirmed speaking, so MuseTalk animates that face and writes
+                # every other frame through untouched; without it MuseTalk
+                # takes whatever S3FD returned first (`d = d[0]`).
+                targets = (request.extra or {}).get("coord_list")
+                # MuseTalk names the pickle `basename.split('.')[0] + ".pkl"`
+                # (inference.py:234), truncating at the FIRST dot, and writes it
+                # to `<result_dir>/../<name>.pkl` i.e. here in `tdp`. Each
+                # piece's video has a distinct basename (part00, part01, ...),
+                # so the pickles do not collide across tasks.
+                staged = tdp / (video_abs.name.split(".")[0] + ".pkl")
+                if targets:
+                    targets = _rescale_boxes(targets, frame_scale)
+                    staged.write_bytes(pickle.dumps(list(targets)))
+                    any_staged = True
+                    want_saved = True
+                    log.info("musetalk: task %d uses %d supplied target boxes "
+                             "(%d frames left untouched%s)", idx, len(targets),
+                             sum(1 for b in targets if tuple(b) == (0.0, 0.0, 0.0, 0.0)),
+                             "" if frame_scale == (1.0, 1.0) else
+                             f", rescaled x{frame_scale[0]:.4f}/{frame_scale[1]:.4f} "
+                             f"for the downscaled frame")
+                elif self.use_coord_cache:
+                    want_saved = True
+                    cached = coords.load(video_abs, "musetalk", coord_params,
+                                         expect_frames=_nb_frames(video_abs))
+                    if cached is not None:
+                        staged.write_bytes(pickle.dumps(cached))
+                        any_staged = True
+
+                # A unique YAML key AND a unique result_name per task, so the
+                # shared `temp_dir` cannot have two tasks write the same file.
+                key = f"t{idx:03d}_{out.stem}"
+                result_name = f"{key}.mp4"
+                yaml_lines.append(
+                    f"{key}:\n"
+                    f"  video_path: \"{video_abs}\"\n"
+                    f"  audio_path: \"{audio_abs}\"\n"
+                    f"  bbox_shift: {self.bbox_shift}\n"
+                    f"  result_name: \"{result_name}\"\n"
+                )
+                tasks.append({"request": request, "out": out,
+                              "video_abs": video_abs, "targets": bool(targets),
+                              "staged": staged, "coord_params": coord_params,
+                              "result_name": result_name})
+
+            yaml_path = tdp / "tasks.yaml"
+            yaml_path.write_text("".join(yaml_lines))
+
             cmd = [
                 self.python_bin, "-m", "scripts.inference",
                 "--inference_config", str(yaml_path),
@@ -310,122 +386,99 @@ class MuseTalkSync(BaseLipSync):
             ]
             if self.use_float16:
                 cmd.append("--use_float16")
-
-            # MuseTalk derives the pickle path as `<result_dir>/../<stem>.pkl`,
-            # i.e. `tdp/<video stem>.pkl`. Stage a hit there and it loads it
-            # instead of running DWPose + S3FD over every frame.
-            coord_params = {"bbox_shift": self.bbox_shift,
-                            "version": self.version}
-            # An ASD-gated target list beats both detection and the cache.
-            # `backend.lipsync_targets` builds it from the tracks TalkNet
-            # confirmed as speaking, so MuseTalk animates that face and
-            # writes every other frame through untouched. Without it
-            # MuseTalk picks whatever S3FD returned first (`d = d[0]`),
-            # which on a multi-face shot is an arbitrary face.
-            targets = (request.extra or {}).get("coord_list")
-            # MuseTalk names the pickle with `basename.split('.')[0]`
-            # (inference.py:99), which truncates at the FIRST dot -- our
-            # inputs are `<stem>.dubbed.mp4`, so `Path.stem` gives
-            # "x.dubbed" where MuseTalk writes "x". Using the wrong name
-            # made the cache a silent no-op in both directions: nothing was
-            # ever stored, and a staged hit was never read.
-            staged = tdp / (video_abs.name.split(".")[0] + ".pkl")
-            if targets:
-                # Source-space boxes onto the frame actually being rendered.
-                targets = _rescale_boxes(targets, frame_scale)
-                staged.write_bytes(pickle.dumps(list(targets)))
+            if any_staged:
                 cmd.append("--use_saved_coord")
-                # Keep it, or inference.py deletes the file we just wrote.
+            if want_saved:
+                # Keeps every task's pickle so a freshly-detected one can be
+                # copied into the cache below; without it inference.py deletes
+                # them on the way out.
                 cmd.append("--saved_coord")
-                log.info("musetalk: using %d supplied target boxes "
-                         "(%d frames left untouched%s)", len(targets),
-                         sum(1 for b in targets if tuple(b) == (0.0, 0.0, 0.0, 0.0)),
-                         "" if frame_scale == (1.0, 1.0) else
-                         f", rescaled x{frame_scale[0]:.4f}/{frame_scale[1]:.4f} "
-                         f"for the downscaled frame")
-            elif self.use_coord_cache:
-                cached = coords.load(video_abs, "musetalk", coord_params,
-                                     expect_frames=_nb_frames(video_abs))
-                if cached is not None:
-                    staged.write_bytes(pickle.dumps(cached))
-                    cmd.append("--use_saved_coord")
-                # `--saved_coord` keeps the pickle so we can copy it out;
-                # without it inference.py deletes it on the way out.
-                cmd.append("--saved_coord")
-            log.info("musetalk[gpu=%s]: %s", self.cuda_device, " ".join(cmd))
+
+            log.info("musetalk[gpu=%s]: %d task(s): %s",
+                     self.cuda_device, len(tasks), " ".join(cmd))
             env = dict(self._subprocess_env())
             # Lazy decode saves ~17 GiB RSS on a 2-min 1080p clip at identical
             # wall time with bit-identical output -- but ONLY on the
             # --use_saved_coord branch (vendor/musetalk/scripts/inference.py:286).
-            # The cold-cache branch calls get_landmark_and_bbox, which loads
-            # every frame anyway, so lazy there adds a decode for no win. An
-            # operator-set value wins, so A/Bs stay possible; see
+            # The cold branch calls get_landmark_and_bbox, which loads every
+            # frame anyway. An operator-set value wins; see
             # scripts/ab_lazy_frames.py.
             if "--use_saved_coord" in cmd and "MUSETALK_LAZY_FRAMES" not in env:
                 env["MUSETALK_LAZY_FRAMES"] = "1"
-            proc = subprocess.run(cmd, cwd=str(self.repo_path),
-                                  env=env,
-                                  capture_output=True, text=True)
-            if proc.returncode != 0:
-                return LipSyncResult(
-                    model_name=f"musetalk-{self.version}", out_video=out,
-                    duration_s=0.0, fps=0.0,
-                    error=f"musetalk rc={proc.returncode}: {proc.stderr.strip()[-3000:]}",
-                )
-            produced = list(result_dir.rglob("*.mp4"))
-            if not produced:
-                # rc == 0 and no file is NOT ambiguous here: MuseTalk wraps
-                # the whole job in `try/except Exception` and merely PRINTS
-                # ("Error occurred during processing:", scripts/inference.py
-                # :288), so a real crash still exits 0. Without the captured
-                # output the reason is lost entirely -- which cost a whole
-                # 15-minute render on 2026-10-18, reported only as "produced
-                # no mp4". The tail of stdout carries that printed line.
-                tail = (proc.stdout or "").strip().splitlines()[-25:]
-                swallowed = [l for l in tail
-                             if "Error occurred during processing" in l]
-                detail = swallowed[0] if swallowed else " | ".join(tail[-5:])
-                return LipSyncResult(
-                    model_name=f"musetalk-{self.version}", out_video=out,
-                    duration_s=0.0, fps=0.0,
-                    error=(f"musetalk exited 0 but produced no mp4 in "
-                           f"{result_dir} — {detail or 'no output captured'}"),
-                )
-            # Prefer the file whose name matches the task name.
-            match = [p for p in produced if task_name in p.name]
-            src = match[0] if match else produced[0]
-            shutil.copy2(src, out)
+            # Stream live: MuseTalk prints `Results saved to <file>` as each
+            # task finishes, so forwarding those lines puts per-piece progress
+            # in run.log instead of one silent block until the batch is done.
+            proc = run_streaming(
+                cmd, cwd=str(self.repo_path), env=env, log=log,
+                tag=f"musetalk[gpu={self.cuda_device}]",
+                progress_prefixes=("Results saved to", "[memguard]",
+                                   "Error occurred during processing"))
 
-            if not targets and self.use_coord_cache and staged.is_file():
-                try:
-                    fresh = pickle.loads(staged.read_bytes())
-                    coords.save(video_abs, "musetalk", coord_params, fresh,
-                                frames=len(fresh))
-                except Exception as e:                   # noqa: BLE001
-                    log.warning("musetalk: could not cache coords (%s)", e)
+            # A non-zero exit is the WHOLE batch failing (an import error, a
+            # dead interpreter) -- the model load is shared, so it takes every
+            # task with it. Report the same error against each request.
+            if proc.returncode != 0:
+                err = f"musetalk rc={proc.returncode}: {proc.stdout.strip()[-3000:]}"
+                return [LipSyncResult(model_name=f"musetalk-{self.version}",
+                                      out_video=t["out"], duration_s=0.0,
+                                      fps=0.0, error=err) for t in tasks]
+
+            # MuseTalk writes each task to `<result_dir>/<version>/<result_name>`.
+            temp_dir = result_dir / self.version
+            tail = (proc.stdout or "").strip().splitlines()[-40:]
+            swallowed = [l for l in tail
+                         if "Error occurred during processing" in l]
+
+            results = []
+            for t in tasks:
+                out = t["out"]
+                produced = temp_dir / t["result_name"]
+                if not produced.is_file():
+                    # rc == 0 and no file for THIS task: MuseTalk wraps each
+                    # task in `try/except Exception` and only PRINTS
+                    # ("Error occurred during processing:"), so a crash on one
+                    # task still exits 0 and the siblings carry on. Attribute
+                    # the swallowed message to the task that lost its output.
+                    detail = (swallowed[0] if swallowed
+                              else " | ".join(tail[-5:]) or "no output captured")
+                    results.append(LipSyncResult(
+                        model_name=f"musetalk-{self.version}", out_video=out,
+                        duration_s=0.0, fps=0.0,
+                        error=(f"musetalk exited 0 but produced no mp4 for "
+                               f"{out.name} in {temp_dir} — {detail}")))
+                    continue
+                shutil.copy2(produced, out)
+
+                if not t["targets"] and self.use_coord_cache \
+                        and t["staged"].is_file():
+                    try:
+                        fresh = pickle.loads(t["staged"].read_bytes())
+                        coords.save(t["video_abs"], "musetalk",
+                                    t["coord_params"], fresh, frames=len(fresh))
+                    except Exception as e:               # noqa: BLE001
+                        log.warning("musetalk: could not cache coords (%s)", e)
+
+                fps, dur = _probe_video(out)
+                results.append(LipSyncResult(
+                    model_name=f"musetalk-{self.version}", out_video=out,
+                    duration_s=dur, fps=fps,
+                    extra={"licence": self.licence, "version": self.version,
+                           "use_float16": self.use_float16,
+                           "batch_size": self.batch_size,
+                           "keep_work_dir": self.keep_work_dir}))
 
             if self.keep_work_dir:
-                kept = out.parent / f"{out.stem}.musetalk_work"
+                kept = tasks[0]["out"].parent / f"{tasks[0]['out'].stem}.musetalk_work"
                 try:
                     if kept.exists():
                         shutil.rmtree(kept)
-                    # ignore the mp4s: they are already the output.
                     shutil.copytree(tdp, kept,
                                     ignore=shutil.ignore_patterns("*.mp4"))
                     log.info("musetalk: work dir kept at %s", kept)
-                except Exception as e:                     # noqa: BLE001
-                    # Debug aid only -- never fail a good render over it.
+                except Exception as e:                   # noqa: BLE001
                     log.warning("musetalk: could not keep work dir (%s)", e)
 
-        fps, dur = _probe_video(out)
-        return LipSyncResult(
-            model_name=f"musetalk-{self.version}", out_video=out,
-            duration_s=dur, fps=fps,
-            extra={"licence": self.licence, "version": self.version,
-                   "use_float16": self.use_float16,
-                   "batch_size": self.batch_size,
-                   "keep_work_dir": self.keep_work_dir},
-        )
+        return results
 
 
 def _nb_frames(path: Path) -> Optional[int]:

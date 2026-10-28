@@ -1,5 +1,6 @@
-# Face-restoration env (`--restore gfpgan`, the UI's "Enhance" panel). On
-# disk as `wav2liphd` -- a full `conda create --clone dubbing` plus the four
+# Face-restoration env (`--restore gfpgan`, the UI's "Enhance" panel).
+# Renamed from `wav2liphd` on 2026-10-28; the adapter still resolves the old
+# name, with a warning. A full `conda create --clone dubbing` plus the four
 # packages in restore.pip.txt (verified: that is the ENTIRE diff against
 # `dubbing`, confirmed by diffing both envs' pip freezes directly).
 #
@@ -28,7 +29,7 @@
 # work and remove a whole env, but this has not been tried on a live
 # install -- flagging it rather than acting on it.
 #
-# scripts/setup_face_restore.py currently hardcodes this env's path
-# (`ENV = Path("/data1/dipak_data/miniconda3/envs/wav2liphd")`) rather than
-# resolving it the way `models/lipsync/base.py::resolve_env_python` does;
-# fixing that is tracked separately, not done as part of writing this spec.
+# scripts/setup_face_restore.py still hardcodes this env's prefix rather
+# than resolving it the way `models/lipsync/base.py::resolve_env_python`
+# does -- it now picks `restore` or the former `wav2liphd` by existence,
+# which covers the rename but not a different conda prefix.

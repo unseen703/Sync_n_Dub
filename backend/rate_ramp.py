@@ -1,48 +1,41 @@
 """Smooth speech-rate ramps and pause absorption, as one resampling time map.
 
-Ported from `third_party/rate_ramp.py` with the changes marked PORT: below.
-The integration maths, the log-domain interpolation and the closed-form
-duration correction are the original author's and are correct; what changed
-is what the envelope is allowed to express and what happens when a cue goes
-wrong.
-
 `backend.tempo_plan` hands each cue a steady-state SPEECH rate plus the rates
-at its two joints. Applying one factor piecewise-constant makes the rate STEP
-at every cue boundary, which is audible -- the just-noticeable difference for
-speech tempo is around 10% (Quene 2007) and a 1.2x -> 1.8x boundary is 50%.
-Here each cue's rate is a continuous curve: it enters at `lead_tempo`, eases
-to `tempo`, holds, eases out to `trail_tempo`. Because the planner sets
-`lead_tempo[i+1] == trail_tempo[i]`, the rate is continuous along the whole
-chain even though every cue is stretched as an independent file.
+at its two joints. Applying one factor piecewise-constant STEPS the rate at
+every cue boundary, which is audible -- the just-noticeable difference is
+around 10% (Quene 2007) and a 1.2x -> 1.8x boundary is 50%. Here each cue's
+rate is a continuous curve: in at `lead_tempo`, eased to `tempo`, held, eased
+out to `trail_tempo`. The planner sets `lead_tempo[i+1] == trail_tempo[i]`,
+so the rate is continuous along the whole chain even though each cue is
+stretched as its own file.
 
-PORT: THE ENVELOPE ALSO CARRIES THE PAUSES. `gap_rates` lets the curve run
-fast inside the engine's own silence and slow inside the speech:
+`gap_rates` also carries the pauses -- fast inside the engine's own silence,
+slow inside the speech:
 
     r(t)  3.0x        ---,        ---,              <- inside pauses
          1.05x  --\______/_________/______/--       <- inside speech
                   ^ lead ramp        trail ramp ^
 
-That is `backend.pause_absorb` expressed as a rate rather than as a cut. It
-matters for three reasons: the cue stays ONE piece, so `mix.DEFAULT_MAX_PIECES`
-stops being a ceiling; there are no piece seams to click; and the realised
-duration is exact by construction rather than by arithmetic.
+That is `backend.pause_absorb` expressed as a rate rather than a cut, which
+keeps the cue ONE piece (so `mix.DEFAULT_MAX_PIECES` is not a ceiling),
+leaves no seams to click, and makes the realised duration exact by
+construction.
 
-Two places where the original design doc was shakier than it looked, both
-already corrected by its author and kept here:
+Two facts about the duration correction `k`:
 
-1. The duration-correction constant `k` needs no root find. Scaling the
-   envelope scales the realised duration by exactly `1/k`:
-   INT dv/(k r) == (1/k) INT dv/r. So `k = I / T` in closed form.
+1. No root find is needed. Scaling the envelope scales the realised duration
+   by exactly `1/k`, since INT dv/(k r) == (1/k) INT dv/r, so `k = I / T`.
 2. Scaling by `k` scales the BOUNDARY rates too, so chain continuity breaks
-   by `|k - 1|`. That is not bounded by 2%: a short cue with wide ramps and a
-   big lead/tempo ratio reaches 5-8%. It is measured and reported.
+   by `|k - 1|`. That is not bounded by 2% -- a short cue with wide ramps and
+   a big lead/tempo ratio reaches 5-8% -- so it is measured and reported.
 
-PORT: and on (2), the original RAISES past `max_boundary_drift`. In a
-pipeline that kills a dub over one awkward cue, so `strict=False` is the
-default -- the drift is recorded on the result and the caller decides. The
-asserts that guarded real invariants are raises now, because `python -O`
-strips asserts and `_integerize`'s monotonicity is what pyrubberband
-validates.
+Past `max_boundary_drift` this records the drift rather than raising;
+`strict=True` restores the raise. Real invariants raise rather than assert,
+because `python -O` strips asserts and `_integerize`'s monotonicity is what
+pyrubberband validates.
+
+Ported from `third_party/rate_ramp.py`; deliberate differences are marked
+PORT: in the code.
 """
 from __future__ import annotations
 
@@ -65,8 +58,8 @@ Span = tuple[float, float]
 GapRate = tuple[float, float, float]          # (start_s, end_s, rate)
 _EPS = 1e-12
 
-#: Width of the smoothstep in and out of a gap's own rate. Short, because a
-#: gap is short; long enough that the entry to 3x is not a step of its own.
+#: Width of the smoothstep in and out of a gap's own rate: short, since a gap
+#: is short, but long enough that entering 3x is not itself a step.
 DEFAULT_GAP_EDGE_S = 0.04
 
 
@@ -76,9 +69,8 @@ DEFAULT_GAP_EDGE_S = 0.04
 def _smoothstep(u):
     """C1 Hermite step 3u^2 - 2u^3, zero slope at both ends.
 
-    Zero slope means d(rate)/dt is continuous across the join between a ramp
-    and the plateau beside it. A linear ramp has a kink there and the kink is
-    what reads as a click in a rate change.
+    Zero slope keeps d(rate)/dt continuous where a ramp meets the plateau
+    beside it; a linear ramp kinks there, and the kink reads as a click.
     """
     import numpy as np
     u = np.clip(u, 0.0, 1.0)
@@ -89,10 +81,10 @@ def ramp_windows(tts_duration: float, cfg: TempoConfig,
                  silence_spans: Sequence[Span] | None = None):
     """`(a0, b0, a1, b1, w)`: the lead ramp [a0,b0] and trail ramp [a1,b1].
 
-    Width is `cfg.ramp_s` clamped to 40% of the cue, which also guarantees the
-    two cannot overlap (0.4 + 0.4 < 1). With `ramp_prefer_silence`, each
-    window slides toward the nearest silence span within `ramp_s` of its edge
-    -- changing rate inside a pause is far less audible than mid-phoneme.
+    Width is `cfg.ramp_s` clamped to 40% of the cue, which also keeps the two
+    from overlapping. With `ramp_prefer_silence` each window slides toward
+    the nearest silence within `ramp_s` of its edge -- a rate change inside a
+    pause is far less audible than mid-phoneme.
     """
     import numpy as np
 
@@ -139,19 +131,16 @@ def rate_envelope(
 ) -> Callable:
     """Instantaneous rate `r(t)` on the SOURCE (unstretched) clip clock.
 
-    Everything is composed in LOG RATE, because a rate factor is a ratio, not
-    a displacement: in log space 0.8x and 1.25x are mirror images, the
-    midpoint of a transition is the geometric mean, `r` stays positive for any
-    inputs, and `d(log r)/dt` -- fractional rate change per second -- is the
-    quantity the ear actually tracks.
+    Composed in LOG RATE: a rate factor is a ratio, so in log space 0.8x and
+    1.25x are mirror images, a transition's midpoint is the geometric mean,
+    `r` stays positive for any input, and `d(log r)/dt` is what the ear
+    tracks.
 
-    PORT: composed as BASE + CORRECTION rather than the original's `np.where`,
-    which could only express three constant levels. The base is the speech
-    tempo, overridden by each gap's own rate; the two boundary ramps are then
-    added on top as corrections that decay to zero. Written that way the ramps
-    survive being slid INTO a gap by `ramp_prefer_silence` -- they scale
-    whatever rate is locally in force instead of overwriting it, which the
-    `np.where` form got wrong the moment a gap and a ramp overlapped.
+    PORT: BASE + CORRECTION, not `np.where`. The base is the speech tempo
+    overridden by each gap's own rate; the two boundary ramps are added on
+    top as corrections decaying to zero. That way a ramp slid INTO a gap by
+    `ramp_prefer_silence` scales the rate locally in force instead of
+    overwriting it.
     """
     import numpy as np
 
@@ -170,8 +159,8 @@ def rate_envelope(
         t = np.clip(np.asarray(tau, dtype=float), 0.0, d)
         logr = np.full(t.shape, lt)
 
-        # base: each gap runs at its own rate, eased in and out so the entry
-        # to 3x is not itself a step.
+        # Base: each gap at its own rate, eased in and out so entering 3x is
+        # not itself a step.
         for gs, ge, gr in (gap_rates or []):
             if ge <= gs or gr <= 0:
                 continue
@@ -186,8 +175,8 @@ def rate_envelope(
             inside = np.where((t >= gs - edge) & (t <= ge + edge), inside, 0.0)
             logr = logr + dg * inside
 
-        # corrections: full at the cue edge, decayed to nothing by the end of
-        # each ramp window.
+        # Corrections: full at the cue edge, decayed to nothing by the end
+        # of each ramp window.
         if w > 0.0:
             logr = logr + d_lead * (1.0 - _smoothstep((t - a0) / w))
             logr = logr + d_trail * _smoothstep((t - a1) / w)
@@ -268,7 +257,7 @@ def build_warp(
 ) -> WarpResult:
     """Integrate the envelope, rescale to hit `out_slot` exactly, emit anchors.
 
-    Output time is `t_out(tau) = INT_0^tau dv / r(v)` -- the rate lives on the
+    Output time is `t_out(tau) = INT_0^tau dv / r(v)`: the rate lives on the
     source clock, so output time accumulates as its reciprocal.
     """
     import numpy as np
@@ -307,9 +296,8 @@ def build_warp(
                f"the slot, or raise max_boundary_drift.")
         if strict:
             raise ValueError(msg)
-        # PORT: a warning, not a dead run. The cue still renders at the right
-        # LENGTH; only the joint continuity promise is weaker than advertised,
-        # and that is a quality note rather than a broken dub.
+        # PORT: a warning, not a dead run. The cue renders at the right
+        # LENGTH; only the joint-continuity promise is weaker.
         log.warning("rate_ramp: %s", msg)
 
     keep = _pick_anchors(tau, t, k * rate, n_anchors, anchor_tol_s)
@@ -326,10 +314,10 @@ def build_warp(
 def _integerize(src_sec, tgt_sec, sr: int, n_samples: int, n_target: int):
     """Round to samples, keeping BOTH columns strictly increasing.
 
-    pyrubberband validates that a time map rises in both columns and ends at
-    `(len(y), target_len)`; equal consecutive entries are rejected. Duplicates
-    are dropped rather than nudged -- nudging moves an anchor off the curve,
-    dropping one only coarsens it by under a sample.
+    pyrubberband requires a time map that rises in both columns and ends at
+    `(len(y), target_len)`, rejecting equal consecutive entries. Duplicates
+    are dropped rather than nudged: nudging moves an anchor off the curve,
+    dropping coarsens it by under a sample.
     """
     import numpy as np
 

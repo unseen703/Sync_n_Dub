@@ -1,9 +1,9 @@
-"""Forced-alignment adapter registry.
+"""Forced-alignment adapter registry — MMS only.
 
-  - mms_fa    : torchaudio MMS forced aligner (multilingual, char-level CTC)
-  - whisperx  : WhisperX's wav2vec2 CTC aligner (same code path WhisperX
-                uses internally, exposed here so a non-WhisperX ASR can reuse
-                it after the fact)
+  - mms_fa : torchaudio MMS forced aligner (multilingual, char-level CTC)
+
+`whisperx` (WhisperX's wav2vec2 CTC aligner) was removed on 2026-10-28 with
+the WhisperX ASR adapter.In git at b823223.
 """
 from __future__ import annotations
 
@@ -12,7 +12,6 @@ from .base import AlignRequest, AlignResult, AlignedSegment, BaseAligner
 
 _REGISTRY_SPEC: dict[str, tuple[str, str]] = {
     "mms_fa": (".mms_fa_adapter", "MMSForcedAligner"),
-    "whisperx": (".whisperx_adapter", "WhisperXAligner"),
 }
 
 _registry = make_registry(

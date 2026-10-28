@@ -1,11 +1,14 @@
-"""Transliteration adapter registry.
+"""Transliteration adapter registry — Bodhan Indic-Transliterate only.
 
-  - bodhan    : Bodhan Indic-Transliterate via REST (POST /v1/chat/completions)
-  - indicxlit : AI4Bharat IndicXlit (en ↔ 21 Indic langs; local transformers)
+  - bodhan : Bodhan Indic-Transliterate via REST (POST /v1/chat/completions)
 
-Both do script-only conversion (same language in, same language out); the
-code-mix stage calls them to render retained English spans in the target
-script, plus to normalise mixed-script segments to a single script.
+Script-only conversion (same language in, same language out); the code-mix
+stage calls it to render retained English spans in the target script, plus
+to normalise mixed-script segments to a single script.
+
+`indicxlit` (AI4Bharat IndicXlit, local transformers) was removed on
+2026-10-28 — a second local model for a stage the hosted endpoint already
+covers for all 22 languages. In git at b823223.
 """
 from __future__ import annotations
 
@@ -14,7 +17,6 @@ from .base import BaseTransliterator, TranslitRequest, TranslitResult, TranslitS
 
 _REGISTRY_SPEC: dict[str, tuple[str, str]] = {
     "bodhan": (".bodhan_adapter", "BodhanTransliterate"),
-    "indicxlit": (".indicxlit_adapter", "IndicXlitTransliterate"),
 }
 
 _registry = make_registry(

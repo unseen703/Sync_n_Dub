@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Run ONE lip-sync adapter on an already-dubbed mix, waiting for a free GPU.
 #
-#   scripts/run_lipsync.sh <wav2lip|musetalk|latentsync|lipgan> <stem>
+#   scripts/run_lipsync.sh <wav2lip|musetalk|latentsync15> <stem>
 #
 # Replaces retry_wav2lip.sh / retry_latentsync.sh / run_musetalk.sh, which were
 # this same script three times over: each pinned one model, one GPU and the
@@ -26,7 +26,7 @@ PY=/data1/dipak_data/miniconda3/envs/dubbing/bin/python
 cd "$REPO"
 
 if [ $# -lt 2 ]; then
-  echo "usage: $0 <wav2lip|musetalk|latentsync|lipgan> <stem> [extra args...]" >&2
+  echo "usage: $0 <wav2lip|musetalk|latentsync15> <stem> [extra args...]" >&2
   exit 2
 fi
 MODEL=$1; STEM=$2; shift 2

@@ -14,21 +14,28 @@ import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Sequence
 
 
 def resolve_env_python(model: str, env_name: str,
-                       explicit: Optional[str] = None) -> str:
+                       explicit: Optional[str] = None,
+                       *, legacy_env_names: Sequence[str] = ()) -> str:
     """Interpreter for an adapter that cannot run in the `dubbing` env.
 
     MuseTalk and LatentSync have upstream pins incompatible with `dubbing`,
     so they have their own conda envs.
 
     Order: explicit argument -> `<MODEL>_PYTHON` -> sibling conda env ->
-    `sys.executable` (warned). The sibling env is tried before
-    `sys.executable` because falling back to `dubbing` runs MuseTalk where
-    `import diffusers` fails -- after ASR, MT, TTS and the mix are paid for,
-    with the adapter still logging "done".
+    any `legacy_env_names` -> `sys.executable` (warned). The sibling env is
+    tried before `sys.executable` because falling back to `dubbing` runs
+    MuseTalk where `import diffusers` fails -- after ASR, MT, TTS and the
+    mix are paid for, with the adapter still logging "done".
+
+    `legacy_env_names` covers an env being renamed on disk: the new name is
+    preferred, the old one still works, and a run between the code change
+    and the `conda rename` does not land on the wrong interpreter. The
+    fallback LOGS, so a checkout still on the old name says so rather than
+    going quiet.
 
     The sibling path is derived from `sys.executable`
     (`<prefix>/envs/<env_name>/bin/python`), not hard-coded.
@@ -51,6 +58,15 @@ def resolve_env_python(model: str, env_name: str,
             log.info("%s: using sibling env interpreter %s (set %s to override)",
                      model, sibling, var)
             return str(sibling)
+        for legacy in legacy_env_names:
+            old = envs_dir / legacy / "bin" / "python"
+            if old.is_file():
+                log.warning(
+                    "%s: conda env %r not found, falling back to the former "
+                    "name %r at %s. Rename it (`conda rename -n %s %s`) or "
+                    "set %s.", model, env_name, legacy, old, legacy,
+                    env_name, var)
+                return str(old)
     except (IndexError, OSError):
         pass
 

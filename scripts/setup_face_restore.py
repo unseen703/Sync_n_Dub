@@ -1,4 +1,4 @@
-"""Make the `wav2liphd` env usable: shim basicsr, place the facexlib weights.
+"""Make the `restore` env usable: shim basicsr, place the facexlib weights.
 
 Run once after `pip install basicsr facexlib gfpgan realesrgan` into that
 env. Idempotent -- safe to re-run, and re-running is the intended fix after
@@ -17,7 +17,7 @@ the good case: they fail before a render rather than after one.
 2. **facexlib downloads its detection and parsing weights on first use**,
    into its own package directory, from GitHub at render time. On a shared
    box mid-run that is a surprise network dependency inside stage 9h. The
-   two files are already in `models/weights/wav2lip_hd/`, so they are copied
+   two files are already in `models/weights/restore/`, so they are copied
    where facexlib and gfpgan look.
 """
 from __future__ import annotations
@@ -27,9 +27,12 @@ import subprocess
 import sys
 from pathlib import Path
 
-ENV = Path("/data1/dipak_data/miniconda3/envs/wav2liphd")
+#: Renamed from `wav2liphd` on 2026-10-28. The old path is still accepted
+#: so this runs on a host where `conda rename` has not happened yet.
+_ENVS = Path("/data1/dipak_data/miniconda3/envs")
+ENV = _ENVS / "restore" if (_ENVS / "restore").is_dir() else _ENVS / "wav2liphd"
 PY = ENV / "bin" / "python"
-WEIGHTS = Path(__file__).resolve().parent.parent / "models/weights/wav2lip_hd"
+WEIGHTS = Path(__file__).resolve().parent.parent / "models/weights/restore"
 
 OLD = "torchvision.transforms.functional_tensor"
 NEW = "torchvision.transforms.functional"

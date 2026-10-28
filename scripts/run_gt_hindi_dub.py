@@ -3,15 +3,17 @@
 
 For each of the 4 source videos in the golden index, this script:
   1. Extracts two 30-second clips (from different regions of the video)
-  2. Runs ASR  (indictranscribe_core — local canary model)
+  2. Runs ASR  (bodhan indic-transcribe — REST API, needs BODHAN_ASR_KEY)
   3. Runs MT   (bodhan indic-translate — REST API)
   4. Runs code-mix / script normalisation (allow code-mixed output)
   5. Runs TTS  (bodhan indic-speak — REST API, needs BODHAN_TTS_KEY)
 
 Usage:
-    python -I scripts/run_gt_hindi_dub.py [--asr indictranscribe_core|indictranscribe_flex]
-                                          [--tts bodhan|indicf5]
-                                          [--dry-run]
+    python -I scripts/run_gt_hindi_dub.py [--dry-run]
+
+The `--asr` / `--tts` choices went on 2026-10-28 with the local adapters
+(`indictranscribe_core`, `indictranscribe_flex`, `indicf5`). Every stage
+here is a Bodhan REST call now.
 """
 from __future__ import annotations
 
@@ -224,11 +226,9 @@ def run_clip_pipeline(
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--asr", default="indictranscribe_core",
-                    choices=["indictranscribe_core", "indictranscribe_flex"],
-                    help="ASR model (default: indictranscribe_core)")
-    ap.add_argument("--tts", default="bodhan",
-                    choices=["bodhan", "indicf5"],
+    ap.add_argument("--asr", default="bodhan", choices=["bodhan"],
+                    help="ASR model (default: bodhan)")
+    ap.add_argument("--tts", default="bodhan", choices=["bodhan"],
                     help="TTS model (default: bodhan)")
     ap.add_argument("--device", default=None,
                     help="Compute device (default: auto)")

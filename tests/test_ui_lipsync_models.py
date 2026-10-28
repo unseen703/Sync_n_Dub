@@ -34,17 +34,33 @@ def test_no_described_model_has_left_the_registry():
         f"described but unregistered: {drift['stale_facts']}")
 
 
-def test_hd_is_not_swallowed_by_the_plain_model():
-    """`"wav2lip_hd".startswith("wav2lip")` is True.
+def test_a_longer_id_is_not_swallowed_by_a_shorter_one():
+    """`"latentsync15".startswith("latentsync")` is True.
 
-    Three separate prefix loops tested the short key first, so an HD run was
-    relabelled, re-recorded and re-parsed as plain Wav2Lip. `normalise` tests
-    the longest key first; this is the regression.
+    Three separate prefix loops used to test the short key first, so a run
+    was relabelled, re-recorded and re-parsed as the wrong model -- found on
+    `wav2lip_hd` vs `wav2lip`, and the same shape applies to the LatentSync
+    pair. `normalise` tests the longest key first; this is the regression.
     """
-    assert lipsync_models.normalise("wav2lip_hd") == "wav2lip_hd"
-    assert lipsync_models.normalise("wav2lip-hd") == "wav2lip_hd"
+    assert lipsync_models.normalise("latentsync15") == "latentsync15"
+    assert lipsync_models.normalise("latentsync-15") == "latentsync15"
+    assert lipsync_models.normalise("LatentSync15") == "latentsync15"
     assert lipsync_models.normalise("wav2lip") == "wav2lip"
-    assert lipsync_models.normalise("Wav2Lip_HD") == "wav2lip_hd"
+
+
+def test_a_removed_id_resolves_by_prefix_or_not_at_all():
+    """The accepted cost of dropping the retired FACTS rows (2026-10-28).
+
+    `wav2lip_hd`, `lipgan` and `latentsync` were display-only rows kept so a
+    finished job on disk still read correctly. They were removed by request.
+    The consequence, pinned here so it stays deliberate: the three `hd_*`
+    job folders now label as plain Wav2Lip and quote its 3-5x band, and a
+    `latentsync` (1.6) job -- there are none -- would not resolve at all.
+    """
+    assert lipsync_models.normalise("wav2lip_hd") == "wav2lip"
+    assert lipsync_models.normalise("lipgan") is None
+    assert lipsync_models.normalise("latentsync") is None
+    assert lipsync_models.RETIRED == frozenset()
 
 
 def test_recorded_variants_still_normalise():
@@ -55,11 +71,12 @@ def test_recorded_variants_still_normalise():
     assert lipsync_models.normalise("sadtalker") is None
 
 
-def test_summary_line_names_hd_as_hd():
-    """`ui/spec.py` said "On — Wav2Lip" for an HD run."""
-    word = spec.LIPSYNC_WORDS[lipsync_models.normalise("wav2lip_hd")]
-    assert "HD" in word
-    assert spec.LIPSYNC_WORDS["wav2lip"] != word
+def test_every_described_model_has_a_summary_word():
+    """`ui/spec.py` derives its wording from FACTS rather than its own
+    prefix loop, which is what used to report an HD run as plain Wav2Lip."""
+    for key in lipsync_models.FACTS:
+        assert spec.LIPSYNC_WORDS[key].startswith("On — ")
+    assert len(set(spec.LIPSYNC_WORDS.values())) == len(lipsync_models.FACTS)
 
 
 @pytest.mark.parametrize("model", sorted(available_models()))
@@ -92,17 +109,18 @@ def test_an_untimed_model_never_quotes_a_bare_number():
     assert est["lipsync_measured"] is False
     assert "not timed on this host" in est["text"]
 
-    known = presets.estimate_runtime(60.0, lipsync_model="wav2lip_hd")
+    known = presets.estimate_runtime(60.0, lipsync_model="musetalk")
     assert known["lipsync_measured"] is True
     assert "not timed" not in known["text"]
 
 
-def test_hd_is_never_cheaper_than_the_model_it_wraps():
-    """It runs that model and then a per-frame GAN pass over the result."""
-    plain = presets.estimate_runtime(60.0, lipsync_model="wav2lip")
-    hd = presets.estimate_runtime(60.0, lipsync_model="wav2lip_hd")
-    assert hd["low_s"] > plain["low_s"]
-    assert hd["high_s"] > plain["high_s"]
+def test_a_slower_model_is_never_quoted_as_cheaper():
+    """MuseTalk composites at full resolution; Wav2Lip caps at 1080p and
+    renders at 96px. The bands must not cross."""
+    fast = presets.estimate_runtime(60.0, lipsync_model="wav2lip")
+    slow = presets.estimate_runtime(60.0, lipsync_model="musetalk")
+    assert slow["low_s"] > fast["low_s"]
+    assert slow["high_s"] > fast["high_s"]
 
 
 def test_options_are_built_from_the_registry():

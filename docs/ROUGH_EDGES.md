@@ -151,8 +151,9 @@ holds the incident history.
   `backend/tts.py` reads all five. But `style` reaches only the Bodhan adapter
   (`models/tts/bodhan_adapter.py` puts it in `instructions`), and `rate` only
   engines with `supports_rate = True` — since Edge was removed on 2026-10-17
-  that is Bodhan alone, and IndicF5 reads neither. A tone edit on
-  an IndicF5 run therefore changes the wording and nothing about the delivery.
+  that is Bodhan alone. IndicF5 read neither and was removed on 2026-10-28,
+  so a tone edit now reaches the delivery on every live engine — but a job on
+  disk recorded against IndicF5 or Edge still gets the wording change only.
 
   **Bodhan's rate field is an inference, and a checkable one.** The hosted
   docs (console.bodhan.ai/api-docs) list only `model`, `input`, `voice` and
@@ -295,17 +296,39 @@ holds the incident history.
   GPUs: 40s→246s, 40s→550s, 100s→2292s. The spread is not noise; stage 2 is
   per-PIXEL, so it tracks frame size as well as length.
 
-- **LatentSync runs 1.5 as well as 1.6, and a version is a PAIR.** Added
-  2026-10-23. `latentsync15` is its own registry id rather than a kwarg,
-  because the UI replay (`edit_agent._rerun_lipsync_only`) forwards only
-  `batch_size` — a version passed as an adapter kwarg could not be reached
-  from the one place the model is chosen. Same shape as `wav2lip_hd`
-  subclassing `wav2lip`.
+- **The retired lip-sync FACTS rows were dropped, and three jobs relabelled.**
+  2026-10-28, by request. `ui/lipsync_models.FACTS` carried `wav2lip_hd`,
+  `lipgan` and `latentsync` as display-only `retired: True` rows so a
+  finished job on disk still read correctly. All three are gone and
+  `RETIRED` is now empty.
+
+  Checked against disk before removing: `latentsync` and `lipgan` are named
+  by **zero** job folders. `wav2lip_hd` is named by **three** —
+  `hd_bench1_40s`, `hd_w4l11_40s`, `hd_iitprof_2900to3000` — and because
+  `normalise()` matches on prefix those now resolve to plain `wav2lip`:
+  they label as "Wav2Lip" and quote its 3–5x band instead of 6–24x.
+  Cosmetic for a finished render, and accepted deliberately rather than
+  missed.
+
+  The mechanism stays. The next removal that has jobs behind it should use a
+  retired row, and a key that is a prefix of a live one (`latentsync` of
+  `latentsync15`) must never be re-added without one.
+
+- **Only LatentSync 1.5 is left, and a version is still a PAIR.** Added
+  2026-10-23; **1.6 removed 2026-10-28**, because ~18 GB against 16311 MiB
+  cards made it the one registered model that could not run here, and an OOM
+  surfaced as "produced no mp4" rather than an error.
+
+  The surviving id stays `latentsync15`, not `latentsync`: the id names the
+  (checkpoint, resolution) pair, and reverting it would make a future 1.6 a
+  silent prefix alias for the 256 model. The two classes collapsed into one
+  — `LatentSync15Sync` is gone and `LatentSyncSync` carries
+  `name = "latentsync15"`.
 
   | id | config | checkpoint | res | inference |
   |---|---|---|---|---|
-  | `latentsync` | `stage2_512.yaml` | `latentsync_unet.pt` | 512 | ~18 GB |
   | `latentsync15` | `stage2.yaml` | `latentsync_unet_1.5.pt` | 256 | ~8 GB |
+  | ~~`latentsync`~~ | ~~`stage2_512.yaml`~~ | ~~`latentsync_unet.pt`~~ | ~~512~~ | removed |
 
   Upstream's 1.6 changelog: the architecture is unchanged, so "you only need
   to load the corresponding checkpoint and modify the `resolution`
@@ -314,11 +337,11 @@ holds the incident history.
   generates a soft mouth, with no exception and no warning, after ~80x the
   clip length of GPU time. `_ensure_loaded` reads `data.resolution` out of
   the config and refuses a mismatched pair; an unreadable config warns
-  instead of blocking. The two checkpoints get **different filenames**
-  because upstream ships both as `latentsync_unet.pt` from different HF
-  repos, so dropping 1.5's weights in place would silently convert every 1.6
-  run into a mismatch. On these 16 GiB cards 1.5 is the one that fits with
-  room; 1.6 exists because 1.5's teeth and lips are blurrier.
+  instead of blocking. **That guard outlives 1.6** —
+  `LATENTSYNC_UNET_CONFIG` can still point at a hand-edited 512 yaml. 1.5
+  also keeps its **suffixed filename** rather than reclaiming the bare
+  `latentsync_unet.pt`, because a vendor checkout from before the removal
+  may still hold 1.6's weights under that name.
 
 - **The lip-sync upstreams live under `models/lipsync/vendor/`, not
   `third_party/`.** Moved 2026-10-23 by request — ~21 GB (LatentSync 12G,
@@ -533,8 +556,9 @@ holds the incident history.
 
   Two things follow that are easy to miss:
 
-  1. **`--tts bodhan` now implies `--voice-engine indic-speak`**
-     (`pipeline._default_voice_engine`). Those were separate flags, and the
+  1. **`--tts bodhan` implies the `indic-speak` catalog**
+     (`pipeline._default_voice_engine`). These were separate flags until
+     `--voice-engine` was removed on 2026-10-28, and the
      gap was a silent wrong output: without `--voice-engine`, stage 9d
      skipped casting, every speaker got `voice=None`, and
      `bodhan_adapter._post_one`'s `"voice": voice or "Amit"` read the whole

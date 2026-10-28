@@ -2,8 +2,8 @@
 
 Stage 9d calls `assign_voices` and writes `SpeakerVoice[]` to
 `<job>/voices/<stem>.<voice_engine>.voices.json` only when `voice_engine` is
-set; the default Edge/IndicF5 path builds `speaker_voice_map` in memory and
-persists nothing. Either way the map reaches
+set; a run with no catalog builds `speaker_voice_map` in memory and persists
+nothing. Either way the map reaches
 `backend.tts.synthesize_segments`, and the voice that spoke is recorded per
 segment as `tts_voice`.
 
@@ -28,7 +28,7 @@ log = logging.getLogger(__name__)
 @dataclass
 class Voice:
     """One row from a TTS engine's voice catalog."""
-    engine: str                                   # "indic-speak" | "indicf5"
+    engine: str                                   # "indic-speak"
     voice: str                                    # engine-specific voice id
     gender: Optional[str] = None                  # "male" | "female" | "neutral"
     age: Optional[str] = None                     # "child" | "young" | "adult" | "elder"

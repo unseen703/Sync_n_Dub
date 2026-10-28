@@ -7,14 +7,15 @@ the speakers in a scene jointly (short-term inter-speaker convolution
 interleaved with long-term intra-speaker attention), and its gain is
 concentrated in the multi-speaker case (+3% mAP).
 
-Three load-bearing differences from the MFCC adapters:
+Three load-bearing differences from the MFCC adapters that preceded it
+(talknet, light_asd, lr_asd -- all removed 2026-10-28):
 
 1. **The audio frontend is VGGish, not MFCC.** `model/loconet_encoder.py`
    builds `torchvggish.vggish.VGGish`, and the val loader feeds it
    `vggish_input.waveform_to_examples` log-mel (64 bands) at 4x the video
-   frame rate. So the audio half of `_mfcc_av` is NOT reused -- this calls
-   the clone's own `vggish_input` on the int16-valued wav. Only
-   `crop_all_tracks` is shared, since the visual input is identical.
+   frame rate -- this calls the clone's own `vggish_input` on the
+   int16-valued wav. Only the crop half of `_av_frontend` is shared, since
+   the visual input was identical; its MFCC half went with those adapters.
 
 2. **Scoring is joint, per scene.** The model takes `NUM_SPEAKERS` (=3)
    faces at once: the target at slot 0 plus up to two co-occurring faces as
@@ -59,7 +60,7 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 
 from ..faces.base import FaceTrack, FaceTracks
-from ._mfcc_av import crop_all_tracks, window_bounds
+from ._av_frontend import crop_all_tracks, window_bounds
 from .base import ASDResult, ASDScore, BaseASD
 
 log = logging.getLogger(__name__)

@@ -210,9 +210,8 @@ export function LipsyncPanel({ jobId, onStarted }: {
               </span>
             </span>
             {/* The caveat belongs in front of the click, not in a log after
-                it: wav2lip_hd is a second per-frame pass, and LatentSync's
-                default 512 UNet is measured above these cards' 16 GiB — an
-                OOM there surfaces only as "produced no mp4". */}
+                it: LatentSync is the slowest by far and has no measured
+                band on this host, so its cost cannot be quoted up front. */}
             {row.note ? (
               <span className="pl-6 text-[11px] leading-snug text-ink3">
                 {row.note}

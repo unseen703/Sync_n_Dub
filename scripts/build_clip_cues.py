@@ -113,7 +113,7 @@ def main() -> int:
                     help="Source-language audio for this window, recorded into "
                          "the cue JSON so the dub stage can predict the "
                          "speaker's gender from it. Defaults to --audio.")
-    ap.add_argument("--asr-model", default="whisperx")
+    ap.add_argument("--asr-model", default="bodhan")
     ap.add_argument("--language", default="en")
     ap.add_argument("--start", required=True, type=float)
     ap.add_argument("--duration", required=True, type=float)

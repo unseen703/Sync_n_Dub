@@ -1045,10 +1045,10 @@ def lipsync_readiness(job_id: str) -> Dict[str, Any]:
     already = bool(list((view.root / "lipsync").glob("*.mp4")))
 
     # One estimate PER MODEL, because the operator is now the one choosing
-    # and the models differ by roughly 20x on this host (wav2lip 3-5x clip
-    # length, wav2lip_hd 6-24x, musetalk 8-21x, latentsync ~83x). A model
-    # list without the hours next to it moves the decision without informing
-    # it.
+    # and the models differ several-fold on this host (wav2lip 3-5x clip
+    # length, musetalk 8-21x; latentsync15 is untimed here and says so). A
+    # model list without the hours next to it moves the decision without
+    # informing it.
     from .routes_create import max_lipsync_s
     from . import lipsync_models as ls_models
     clip_s = _clip_seconds(_read_json(view.merged_json) or {})
@@ -1073,9 +1073,9 @@ def lipsync_readiness(job_id: str) -> Dict[str, Any]:
         # `models` stays a list of ids — it is what the POST takes, and an
         # older bundle still reads it. `model_rows` carries the same ids with
         # the label, the speed band and the caveat that belongs in front of
-        # the click: that wav2lip_hd is a second per-frame pass, and that
-        # LatentSync's default 512 UNet does not fit these cards. The panel
-        # used to render the raw registry slug with nothing beside it.
+        # the click -- LatentSync being the slowest by far, and untimed here.
+        # The panel used to render the raw registry slug with nothing beside
+        # it.
         "models": list(available_models()),
         "model_rows": ls_models.options(),
         "clip_s": clip_s,
@@ -1312,7 +1312,15 @@ def revert_edits(job_id: str,
     segments = (body or {}).get("segments") or None
     if segments is not None and not isinstance(segments, list):
         raise HTTPException(422, "segments must be a list of segment ids")
+    try:
+        from backend import job_versions as _jv
+        _jv.read(view.root)               # back-fill before the file changes
+    except Exception as e:                                  # noqa: BLE001
+        log.warning("versions: index unavailable (%s)", e)
+        _jv = None
     restored = E.revert(view.merged_json, segments=segments)
+    if restored and _jv is not None:
+        _jv.record_revert(view.root, view.merged_json, segments)
 
     warnings: List[str] = []
     records = sorted((view.root / "edits").glob("edit_*.json"))
@@ -1420,6 +1428,25 @@ def get_edit_history(job_id: str) -> Dict[str, Any]:
         "is_running": is_running,
         "outdated": has_pending and not is_running,
     }
+
+
+@router.get("/api/jobs/{job_id}/versions")
+def get_versions(job_id: str) -> Dict[str, Any]:
+    """Every version of this job and the files each one produced.
+
+    Backend record only -- the UI keeps reading the live files, which always
+    belong to `current`. Added beside `/history` rather than into it so that
+    response keeps its shape. Old jobs are back-filled on first read.
+    """
+    root = DATA_DIR / "jobs" / job_id.strip("/")
+    if not root.is_dir():
+        raise HTTPException(404, f"Job not found: {job_id}")
+    from backend import job_versions as _jv
+    try:
+        doc = _jv.read(root)
+    except OSError as e:
+        raise HTTPException(500, f"could not read the version index: {e}") from None
+    return {"job_id": root.name, **doc}
 
 
 # ---------------------------------------------------------------------------

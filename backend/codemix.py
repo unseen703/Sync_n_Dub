@@ -6,7 +6,7 @@ Takes merged ASR+MT segments and renders a `final_text` field per segment:
      (termbase, acronyms, numbers-with-units, proper-nouns via a simple
      capitalisation heuristic).
   2. Transliterate every retained span into the target script using
-     Bodhan Indic-Transliterate (default) or IndicXlit.
+     Bodhan Indic-Transliterate.
   3. Script-normalise the MT output: any Latin-script word still present
      in the translation gets rewritten in the target script (so even
      Path A — pure Bodhan native output — gets consistent scripting).

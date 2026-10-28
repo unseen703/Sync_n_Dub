@@ -106,7 +106,7 @@ def test_faces_and_asd_run_even_though_lip_sync_does_not():
     invisible."""
     kw = P.build_kwargs("dub", target_language="hi")
     assert kw["face_detector"] == "retinaface"
-    assert kw["asd_model"] == "talknet"
+    assert kw["asd_model"] == "loconet"
     keys = [s["key"] for s in plan_stages(P.plan_config(kw))]
     assert "5" in keys and "6" in keys
 

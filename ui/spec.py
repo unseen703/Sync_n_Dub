@@ -79,7 +79,7 @@ TTS_WORDS = {
     "edge":        "Microsoft Edge voices (removed)",
     "bodhan":      "Bodhan Indic voices",
     "indic-speak": "Bodhan Indic voices",
-    "indicf5":     "IndicF5 — cloned from each speaker",
+    "indicf5":     "IndicF5 — cloned from each speaker (removed)",
 }
 
 #: How stage 9b1 decided the register, in operator terms. The tier is worth

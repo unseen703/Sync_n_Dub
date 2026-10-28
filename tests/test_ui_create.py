@@ -535,7 +535,7 @@ def test_faces_run_on_every_submission(client, probe_ok):
     kw = json.loads((client.jobs_dir / r.json()["job_id"]
                      / "request.json").read_text())["pipeline"]
     assert kw["face_detector"] == "retinaface"
-    assert kw["asd_model"] == "talknet"
+    assert kw["asd_model"] == "loconet"
 
 
 def test_the_batch_size_is_recorded_at_submit(client, probe_ok):
@@ -848,22 +848,15 @@ def test_asr_defaults_to_bodhan():
     """Changed from whisperx on 2026-10-17, at the user's request.
 
     Pinned because it moves the one stage that used to run locally onto the
-    network: a Bodhan outage now takes ASR, MT and TTS together, where it
-    used to leave transcription standing.
+    network: a Bodhan outage takes ASR, MT and TTS together, where it used
+    to leave transcription standing. As of 2026-10-28 there is no manual
+    way back either — the local ASR adapters were removed, so
+    `DUBBING_UI_ASR_MODEL` can only name a model the registry no longer has.
     """
     from ui import presets
     assert presets.default_asr() == "bodhan"
     assert presets.build_kwargs("standard", target_language="hi")["asr_model"] \
         == "bodhan"
-
-
-def test_asr_is_still_overridable_to_a_local_model(monkeypatch):
-    """The manual fallback for an outage. If this stops working there is no
-    way back to a local transcriber without editing code."""
-    from ui import presets
-    monkeypatch.setenv("DUBBING_UI_ASR_MODEL", "whisperx")
-    assert presets.build_kwargs("standard", target_language="hi")["asr_model"] \
-        == "whisperx"
 
 
 def test_code_mixing_is_the_mt_api_s_job_not_a_second_pass():

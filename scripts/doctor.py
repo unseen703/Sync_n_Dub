@@ -134,7 +134,7 @@ def check_tmux() -> Row:
 _ENV_CHECKS = [
     ("musetalk",   "musetalk",   "musetalk",   ["torch", "diffusers", "mmcv", "mmdet", "mmpose", "chumpy"]),
     ("latentsync", "latentsync", "latentsync", ["torch", "diffusers", "insightface", "decord"]),
-    ("restore",    "wav2liphd",  "restore",    ["torch", "basicsr", "facexlib", "gfpgan", "realesrgan"]),
+    ("restore",    "restore",    "restore",    ["torch", "basicsr", "facexlib", "gfpgan", "realesrgan"]),
 ]
 
 

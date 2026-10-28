@@ -1,33 +1,24 @@
-"""OpenRouter chat client — the one place in this repo that talks to an LLM.
+"""OpenRouter chat client -- the one place in this repo that talks to an LLM.
 
-Shape copied from `models/mt/bodhan_adapter.py` on purpose: both endpoints are
-OpenAI-chat-compatible, both are rate limited, and both are read from `.env`
-through `os.getenv` after `backend.cli` (or `backend.edit_agent`) has called
-`load_dotenv()` once. Nothing here ever logs a key.
+Same shape as `models/mt/bodhan_adapter.py`: an OpenAI-chat-compatible, rate
+limited endpoint read from `.env` through `os.getenv`, after `backend.cli` or
+`backend.edit_agent` has called `load_dotenv()`. Nothing here logs a key.
 
 Env
 ---
-  OPENROUTER_API_KEY   required. Without it `available()` returns False and
-                       every caller in this repo falls back to a deterministic
-                       path rather than crashing — an NLQ edit still parses,
-                       it just loses the LLM's reading of the sentence.
+  OPENROUTER_API_KEY   required. Without it `available()` is False and every
+                       caller falls back to a deterministic path rather than
+                       crashing -- an NLQ edit still parses, it just loses
+                       the LLM's reading of the sentence.
   OPENROUTER_URL       default https://openrouter.ai/api/v1
   OPENROUTER_MODEL     default google/gemma-3-12b-it
-  OPENROUTER_JSON_MODE auto (=off) | on | off — see JSON_MODE_ENV
+  OPENROUTER_JSON_MODE auto (=off) | on | off -- see JSON_MODE_ENV
 
-On the default model
---------------------
-The request was "gemma-3b". OpenRouter has no such slug; the Gemma 3
-instruction-tuned family there is `google/gemma-3-{1b,4b,12b,27b}-it` (plus
-`:free` variants). `google/gemma-3-4b-it` is the nearest thing to what was
-asked for, so that is the default — override with OPENROUTER_MODEL or
-`--llm-model` without touching code.
-
-A 4B model is a weak structured-output generator. Everything here is built
-for that: the JSON schema goes in the prompt AND in `response_format`, the
-reply is run through a fence-stripping/brace-balancing extractor, a malformed
-reply is retried once with the parser error fed back, and the caller is
-expected to have a rule-based fallback (`backend.edit_agent._rule_parse`).
+The default is a small model and a weak structured-output generator, so the
+JSON schema goes in the prompt AND in `response_format`, the reply runs
+through a fence-stripping/brace-balancing extractor, a malformed reply is
+retried once with the parser error fed back, and callers are expected to have
+a rule-based fallback (`backend.edit_agent._rule_parse`).
 """
 from __future__ import annotations
 
@@ -44,16 +35,13 @@ from . import tracing as _tracing
 log = logging.getLogger(__name__)
 
 DEFAULT_URL = "https://openrouter.ai/api/v1"
-#: Gemma 3 12B as of 2026-10-19, by request. Verified live on OpenRouter:
-#: 131k context, $0.05/M in and $0.15/M out, and it advertises
-#: `response_format` + `structured_outputs`, which is what `chat_json`
-#: relies on. The 4B it replaces was a weak structured-output generator
-#: — every op it returned still gets schema-validated and re-resolved
-#: against real segment ids, and that stays true at 12B.
+#: Gemma 3 12B: 131k context, $0.05/M in and $0.15/M out, advertising
+#: `response_format` + `structured_outputs` for `chat_json`. Every op it
+#: returns is still schema-validated and re-resolved against real segment ids.
 DEFAULT_MODEL = "google/gemma-3-12b-it"
 
-#: Sent so usage shows up under a recognisable name in the OpenRouter
-#: dashboard. Both headers are optional for the API and carry no secrets.
+#: Sent so usage is recognisable in the OpenRouter dashboard. Both headers
+#: are optional and carry no secrets.
 _REFERER = "https://github.com/unseen703/Sync_n_Dub"
 _TITLE = "Dubbing Studio"
 
@@ -61,23 +49,13 @@ _RETRY_STATUS = {408, 409, 429, 500, 502, 503, 504}
 
 #: Whether to send `response_format={"type":"json_object"}`.
 #:
-#: `auto` (the default) means OFF, and that is a measurement rather than a
-#: preference. On 2026-10-19, `google/gemma-3-12b-it` through OpenRouter
-#: answered the edit-agent prompt like this WITH json mode on:
-#:
-#:     {"ops":[{}]}
-#:     {".ops":[{".op":".lipsync_window",".scope":{"start_s":"0:20.00", ...
-#:
-#: — an empty op, and keys prefixed with a full stop. Both are *valid JSON*,
-#: so nothing downstream can tell they are wrong: `extract_json` parses them
-#: happily and the caller gets `ops=None` or an op with no name. The same
-#: two requests, same prompt, json mode OFF, came back correct inside ```json
-#: fences, which `extract_json` already strips.
-#:
-#: So the flag that exists to guarantee parseable JSON is what was breaking
-#: it. `on` restores it for a model that genuinely needs it; `off` is
-#: explicit. The caller runs `extract_json` either way, which is why turning
-#: it off costs nothing.
+#: `auto` means OFF. With json mode on, Gemma 3 12B answers the edit-agent
+#: prompt with empty ops and full-stop-prefixed keys -- `{"ops":[{}]}`,
+#: `{".ops":[{".op":".lipsync_window", ...` -- which are valid JSON, so
+#: `extract_json` parses them happily and the caller gets `ops=None` or an op
+#: with no name. The same prompts with json mode off come back correct inside
+#: ```json fences, which `extract_json` strips. `on` restores it for a model
+#: that needs it; the caller runs `extract_json` either way.
 JSON_MODE_ENV = "OPENROUTER_JSON_MODE"
 
 
@@ -94,9 +72,11 @@ def _json_mode_enabled(requested: bool) -> bool:
 
 
 def _env_num(name: str, default):
-    """Read a numeric env var, tolerating the blank that a copied template
-    leaves behind. `int(os.getenv("X", 4))` raises on `X=`, which turns a
-    harmlessly empty line in .env into a crash at client construction."""
+    """Read a numeric env var, tolerating a blank left by a copied template.
+
+    Without this `float("")` turns an empty line in .env into a crash at
+    client construction.
+    """
     raw = (os.getenv(name) or "").strip()
     if not raw:
         return default
@@ -121,10 +101,9 @@ _FENCE_RE = re.compile(r"```(?:json|JSON)?\s*(.*?)```", re.DOTALL)
 def extract_json(text: str) -> Any:
     """Pull the first JSON value out of a chat reply.
 
-    Small models wrap JSON in prose, in ``` fences, or in both, and they like
-    to append a closing sentence. Plain `json.loads` on the whole reply fails
-    on all three, so: fences first, then a brace/bracket scan that respects
-    string literals and escapes.
+    Small models wrap JSON in prose, in ``` fences, or both, and append a
+    closing sentence, so plain `json.loads` fails. Fences are stripped first,
+    then a brace/bracket scan that respects string literals and escapes.
 
     Raises ValueError when there is no parseable JSON value at all.
     """
@@ -287,12 +266,9 @@ class OpenRouterClient:
             "messages": list(messages),
             "temperature": self.temperature if temperature is None else float(temperature),
             "max_tokens": self.max_tokens if max_tokens is None else int(max_tokens),
-            # Token counts AND the dollar cost come back in the response
-            # body. This is the route that works with an ORDINARY OpenRouter
-            # key: the account-level Analytics API needs a *management* key
-            # and answers 403 to a normal one, so per-request usage is the
-            # only thing a plain key can read — and it is the better figure
-            # anyway, because it attaches to the call that incurred it.
+            # Token counts and dollar cost come back in the response body.
+            # The account-level Analytics API needs a MANAGEMENT key and 403s
+            # a normal one, so this is the only usage a plain key can read.
             "usage": {"include": True},
         }
         json_object = _json_mode_enabled(json_object)
@@ -301,9 +277,8 @@ class OpenRouterClient:
         if extra_body:
             payload.update(extra_body)
 
-        # ONE generation spans every retry rather than one per attempt: a 429
-        # that succeeds on the third try is a single logical call that took
-        # three round trips, and `attempts` in the metadata is what says so.
+        # ONE generation spans every retry: a 429 that succeeds on the third
+        # try is one logical call, and `attempts` records the round trips.
         t0 = time.monotonic()
         with _tracing.generation(
             trace_name or "openrouter.chat",
@@ -385,10 +360,8 @@ class OpenRouterClient:
         convo = list(messages)
         err: Optional[Exception] = None
         for round_ in range(repair_rounds + 1):
-            # Each repair round is its OWN generation, deliberately. A reply
-            # that needed a second ask is the interesting case, and folding
-            # the two into one span would hide both the bad JSON and the fact
-            # that it cost two calls.
+            # Each repair round is its OWN generation: folding them into one
+            # span would hide the bad JSON and the second call it cost.
             name = trace_name or "openrouter.chat_json"
             text = self.chat(convo, temperature=temperature,
                              max_tokens=max_tokens, json_object=True,

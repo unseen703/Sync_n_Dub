@@ -56,34 +56,31 @@ def synthesize_segments(
 ) -> dict:
     """Synthesise every segment and stretch each to its target duration.
 
-    `stretch_backend` selects the time-stretch implementation and is recorded in
-    `extra.tts` so a finished run carries evidence of which one ran -- the old
-    code silently fell back to a pitch-shifting resampler and left no trace.
+    `stretch_backend` picks the time-stretch implementation and is recorded
+    in `extra.tts`, so a run carries evidence of which one ran.
 
     `apply_stretch=False` writes raw clips only and leaves `stretch_factor`
     unset, for variants where a downstream timing plan owns all stretching.
-    Without it the pipeline stretches twice: once here, once as a global
+    Without it the pipeline stretches twice -- here, and again as a global
     `atempo` in the mix.
 
-    `speed_control` asks the ENGINE to speak at a different rate instead of
-    stretching the waveform afterwards -- the method-2 arm of the comparison.
-      "off"         : no rate is ever sent (bit-identical to the old path).
-      "oneshot"     : predict the clip length from the text with a fitted
-                      duration model and set the rate once, before synthesis.
-                      Costs nothing extra; only as good as the predictor.
+    `speed_control` asks the ENGINE for a different rate instead of
+    stretching the waveform afterwards:
+      "off"         : no rate is ever sent.
+      "oneshot"     : predict clip length from the text and set the rate once
+                      before synthesis. Free, and only as good as the
+                      predictor.
       "closed_loop" : synthesise at 1.0, measure, re-synthesise at
-                      measured/target, repeat while outside `speed_tolerance`
-                      for at most `speed_max_rounds` extra rounds. Accurate,
-                      but each round is a real TTS call -- `extra.tts
-                      .extra_synthesis_rounds` records the bill.
-    Both no-op (with one warning) on an adapter whose `supports_rate` is False.
+                      measured/target, repeating while outside
+                      `speed_tolerance` for at most `speed_max_rounds` extra
+                      rounds. Each round is a real TTS call;
+                      `extra.tts.extra_synthesis_rounds` records the bill.
+    Both no-op with one warning on an adapter whose `supports_rate` is False.
 
-    There is no cross-engine fallback. Bodhan is the only TTS engine here, so
-    when it cannot speak there is no second voice to borrow -- the segments
-    come back with `tts_error` set and the count lands in `extra.tts.errors`.
-    The fallback that does exist is one layer up and is about WHICH voice,
-    not which engine: `backend.voices.assign_voices` picks by target language
-    and speaker gender when it cannot rank by timbre.
+    There is no cross-engine fallback -- Bodhan is the only engine, so a
+    failure sets `tts_error` on the segment and counts into
+    `extra.tts.errors`. The fallback that exists is one layer up and chooses
+    a VOICE, not an engine: see `backend.voices.assign_voices`.
     """
     if tts_model not in available_models():
         raise ValueError(
@@ -109,10 +106,9 @@ def synthesize_segments(
         info = speaker_voice_map.get(spk) or {}
         text = seg.get("final_text") or seg.get("mt_text") or seg.get("text") or ""
         text = sanitize_for_tts(text, seg_id=seg["id"])
-        # Per-SEGMENT overrides beat the per-speaker assignment. `backend.edits`
-        # writes these for an edit scoped to a window rather than to a whole
-        # speaker ("the voice at 1:20 should be female"), and nothing else in
-        # the pipeline sets them, so a run without edits is unchanged.
+        # Per-SEGMENT overrides beat the per-speaker assignment.
+        # `backend.edits` writes these for an edit scoped to a window rather
+        # than a whole speaker; nothing else in the pipeline sets them.
         ref = seg.get("tts_reference_audio") or info.get("reference_audio")
         requests.append(TTSRequest(
             id=seg["id"],
@@ -122,15 +118,14 @@ def synthesize_segments(
             reference_audio=(Path(ref) if ref else None),
             reference_text=info.get("reference_text"),
             speaker=spk,
-            # Same precedence as ever (segment beats document), plus the one
-            # new case: `NEUTRAL_STYLE` resolves to None, so "read it plainly"
-            # reaches the engine as no style rather than falling back to the
-            # register it was asked to drop.
+            # Segment beats document. `NEUTRAL_STYLE` resolves to None, so
+            # "read it plainly" reaches the engine as no style rather than
+            # falling back to the register it was asked to drop.
             style=resolve_style(seg.get("tts_style"), info.get("style")),
         ))
 
-    # Resolve up front so the manifest records the backend even if no segment
-    # ends up needing a stretch.
+    # Resolve up front so the manifest records the backend even when no
+    # segment needs a stretch.
     if apply_stretch:
         from .stretch import resolve_backend
         resolved_backend = resolve_backend(stretch_backend)
@@ -145,7 +140,7 @@ def synthesize_segments(
     rate_supported = bool(getattr(tts, "supports_rate", False))
     speed_notes: dict = {}
     if speed_control != "off" and not rate_supported:
-        # Faking a rate with a stretch here would make the comparison
+        # Faking a rate with a stretch would make the comparison
         # meaningless, so refuse rather than approximate.
         log.warning("tts: %s does not accept a synthesis rate (supports_rate=False); "
                     "speed_control=%r disabled", tts_model, speed_control)
@@ -168,16 +163,15 @@ def synthesize_segments(
             target = targets.get(req.id, 0.0)
             if target <= 0:
                 continue
-            # predicted/target > 1 means the text is too long for the slot, so
-            # the engine must speak proportionally faster.
+            # predicted/target > 1 means the text is too long for the slot,
+            # so the engine speaks proportionally faster.
             req.rate = _clamp_rate(model.predict(req.text) / target, speed_bounds)
         log.info("tts: oneshot rates set for %d segments (model n_fit=%d, MAE=%.2fs)",
                  len(requests), model.n_fit, model.mae_s)
 
-    # Explicit per-segment rate from `backend.edits.set_speed`. It overrides
-    # whatever the predictor chose, and it is still clamped to `speed_bounds`:
-    # anything the clamp refuses is picked up by the stretch below, which has
-    # its own per-segment cap for exactly this case.
+    # Explicit per-segment rate from `backend.edits.set_speed`: overrides the
+    # predictor, still clamped to `speed_bounds`. Whatever the clamp refuses
+    # is picked up by the stretch below, which has its own per-segment cap.
     rate_overrides = {
         seg["id"]: float(seg["tts_rate_override"])
         for seg in data.get("segments", [])
@@ -196,19 +190,18 @@ def synthesize_segments(
                      tts_model, len(rate_overrides))
 
     # ---- incremental synthesis -------------------------------------------
-    # Only (re)speak a segment when something that affects its audio changed;
-    # reuse the previous clip otherwise. This is what stops a one-cue edit from
-    # re-speaking the whole dub.
+    # Only (re)speak a segment when something affecting its audio changed, so
+    # a one-cue edit does not re-speak the whole dub.
     #
-    # Two signatures per segment: a RAW one (text, voice, style, reference,
-    # language, sample rate, model, and — only if the engine honours it — the
-    # rate), and a STRETCH one (target duration, cap, apply_stretch). A pure
-    # speed edit changes only the stretch signature, so the cached raw clip is
-    # re-fitted with no engine call at all ("restretch").
+    # Two signatures per segment: RAW (text, voice, style, reference,
+    # language, sample rate, model, and the rate only if the engine honours
+    # it) and STRETCH (target duration, cap, apply_stretch). A pure speed edit
+    # changes only the stretch signature, so the cached raw clip is re-fitted
+    # with no engine call ("restretch").
     #
-    # Scoped to speed_control="off" (the production and edit path). The oneshot
-    # and closed_loop experiment arms set per-run rates and are left to run in
-    # full, so their measurements stay bit-identical.
+    # Scoped to speed_control="off". The oneshot and closed_loop arms set
+    # per-run rates and always run in full, so their measurements stay
+    # bit-identical.
     import hashlib
 
     def _raw_sig(req, rate):
@@ -238,7 +231,7 @@ def synthesize_segments(
                 continue
             rsig = _raw_sig(req, float(getattr(req, "rate", 1.0) or 1.0))
             ssig = _stretch_sig(seg)
-            # Stashed now, committed only once the (re)build below succeeds.
+            # Stashed now, committed only once the (re)build succeeds.
             seg["_next_raw_sig"], seg["_next_stretch_sig"] = rsig, ssig
             raw_ok = bool(seg.get("tts_raw_audio")) and Path(seg["tts_raw_audio"]).exists()
             out_ok = bool(seg.get("tts_audio")) and Path(seg["tts_audio"]).exists()
@@ -254,9 +247,9 @@ def synthesize_segments(
         requests = keep
     else:
         actions = {seg["id"]: "resynth" for seg in data.get("segments", [])}
-        # The experiment arms overwrite the raw clips with per-run rates, so
-        # drop any cached signatures: a later production run must re-synthesise
-        # rather than trust a clip made under different settings.
+        # The experiment arms overwrite raw clips with per-run rates, so drop
+        # cached signatures: a later production run must re-synthesise rather
+        # than trust a clip made under different settings.
         for seg in data.get("segments", []):
             seg.pop("tts_raw_sig", None)
             seg.pop("tts_stretch_sig", None)
@@ -294,8 +287,8 @@ def synthesize_segments(
         action = actions.get(sid, "resynth")
 
         if action == "reuse":
-            # Clip and every field it wrote carry over untouched; the stored
-            # signatures already match, so nothing to commit.
+            # Clip and every field it wrote carry over; the stored signatures
+            # already match, so nothing to commit.
             seg.pop("_next_raw_sig", None)
             seg.pop("_next_stretch_sig", None)
             continue
@@ -310,7 +303,7 @@ def synthesize_segments(
                 seg.pop("_next_stretch_sig", None)
                 continue
             if speed_control != "off" or sid in rate_overrides:
-                # Written even for failed segments: a sweep needs to see which
+                # Written even for failed segments, so a sweep can see which
                 # rate was in flight when a clip went missing.
                 seg["tts_rate"] = rates.get(sid, 1.0)
                 seg["tts_rounds"] = rounds.get(sid, 1)
@@ -333,9 +326,9 @@ def synthesize_segments(
             seg.pop("stretch_factor", None)
         else:
             stretched_path = stretched_dir / f"{sid}.wav"
-            # A deliberate speed edit asks for more than the default +-10%;
-            # without its own cap the stretch clamps it back and the edit
-            # arrives as a budget_violation instead of the speed-up requested.
+            # A deliberate speed edit exceeds the default +-10%; without its
+            # own cap the stretch clamps it back and the edit arrives as a
+            # budget_violation instead of the requested speed-up.
             seg_cap = seg.get("tts_max_stretch")
             seg_cap = float(seg_cap) if seg_cap is not None else max_stretch
             try:
@@ -345,9 +338,8 @@ def synthesize_segments(
                     backend=stretch_backend,
                 )
             except Exception as e:
-                # A clip shorter than the backend's analysis window used to
-                # yield a zero-length "success"; surface it instead of mixing
-                # in silence.
+                # A clip shorter than the backend's analysis window yields a
+                # zero-length "success"; surface it rather than mix silence.
                 stretch_errors += 1
                 log.warning("tts: stretch failed for %s (%s); using raw clip",
                             sid, e)
@@ -366,8 +358,8 @@ def synthesize_segments(
                 violations += 1
                 seg.setdefault("qc", {})["budget_violation"] = True
 
-        # Commit the signatures now the (re)build succeeded, so a later run can
-        # skip this segment.
+        # Commit the signatures now the (re)build succeeded, so a later run
+        # can skip this segment.
         if "_next_raw_sig" in seg:
             seg["tts_raw_sig"] = seg.pop("_next_raw_sig")
         if "_next_stretch_sig" in seg:
@@ -399,8 +391,8 @@ def synthesize_segments(
         "rate_mean": (sum(applied) / len(applied)) if applied else 1.0,
         "rate_min": min(applied) if applied else 1.0,
         "rate_max": max(applied) if applied else 1.0,
-        # Every re-synthesis is a billable/rate-limited engine call; the report
-        # has to be able to quote the price of the closed loop.
+        # Every re-synthesis is a billable, rate-limited engine call, so the
+        # report can quote the price of the closed loop.
         "extra_synthesis_rounds": extra_synthesis_rounds,
         **({"speed_notes": speed_notes} if speed_notes else {}),
     }
@@ -433,8 +425,8 @@ def _segment_target_s(seg: dict) -> float:
 def _clamp_rate(rate: float, bounds: Tuple[float, float]) -> float:
     """Keep the requested rate inside the intelligibility window.
 
-    Past roughly +-15% the Azure voices start to sound rushed or drawled, and
-    a rate the engine refuses is worse than a clip we stretch afterwards.
+    Past roughly +-15% the voices sound rushed or drawled, and a rate the
+    engine refuses is worse than stretching the clip afterwards.
     """
     lo, hi = float(bounds[0]), float(bounds[1])
     if lo > hi:
@@ -451,10 +443,10 @@ def _clamp_rate(rate: float, bounds: Tuple[float, float]) -> float:
 def _resolve_duration_model(
     *, language: str, speaker_voice_map: Dict[str, dict], cache_dir: Path,
 ) -> "DurationModel":
-    """Pick the fitted `<lang>.<voice>.json` that matches this run's voices.
+    """Pick the fitted `<lang>.<voice>.json` matching this run's voices.
 
-    Tries each configured voice before the generic "default" slot so a run that
-    calibrated Swara does not silently fall back to the hand-guessed constants.
+    Tries each configured voice before the generic "default" slot, so a run
+    with a calibrated voice does not fall back to hand-guessed constants.
     """
     from .duration import DEFAULT_MODEL, load_or_default_model
     primary = (language or "hi").split("-")[0].lower()

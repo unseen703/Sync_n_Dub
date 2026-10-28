@@ -21,7 +21,7 @@ PY=/data1/dipak_data/miniconda3/envs/dubbing/bin/python   # no `python` on PATH
 bash setup.sh                                 # doctor, model fetch, 60s dry run
 
 $PY -m backend.cli --input <url-or-file> \
-    --model pyannote --asr whisperx --align mms_fa \
+    --model pyannote --asr bodhan --align mms_fa \
     --mt bodhan --mt-target-language hi \
     --tts bodhan --mix --lipsync wav2lip
 
@@ -39,7 +39,7 @@ One run, one folder. Nothing a run produces is written outside it:
 data/jobs/<job_id>/
   manifest.json      status, config, argv, inventory of every file below
   videos/ audio/ stems/ diarization/ faces/ asd/
-  asr/ align/ mt/ voices/ tts/ vc/ mix/ lipsync/ eval/ exp/
+  asr/ align/ mt/ voices/ tts/ mix/ lipsync/ eval/ exp/
 ```
 
 `<job_id>` is `<timestamp>__<input-slug>__<diar>.<asr>.<align>.<mt>.<lang>`, so
@@ -74,7 +74,7 @@ It writes `STATUS.json` per phase.
 | MT script | `--mt-target-script codemix`: English terms stay in Latin, e.g. `weight सही है` | `native` re-scripts inconsistently, which TTS mispronounces. [STAGES.md](docs/STAGES.md) |
 | Pacing | `--speed-mode segment`: each cue fitted to its own slot, `--speed-cap` 1.8, `--speed-floor` 0.75 | `global` (one `atempo` over the whole file) is still available. [STAGES.md](docs/STAGES.md) |
 | Over-long lines | Stage 9c2 rewrites a line past 1.5× (`--condense-overlong`, on in the UI) | [ROUGH_EDGES.md](docs/ROUGH_EDGES.md) |
-| TTS | Bodhan `indic-speak` only; `--tts bodhan` implies `--voice-engine indic-speak` | Edge removed 2026-10-17. [ROUGH_EDGES.md](docs/ROUGH_EDGES.md) |
+| TTS | Bodhan `indic-speak` only; the voice catalog follows from `--tts`, there is no `--voice-engine` | Edge removed 2026-10-17, IndicF5 2026-10-28. [ROUGH_EDGES.md](docs/ROUGH_EDGES.md) |
 | Voice casting | Filter by predicted gender, rank by ECAPA timbre; fall back to target language + gender | [ROUGH_EDGES.md](docs/ROUGH_EDGES.md) |
 | Lip-sync model | wav2lip when the face is under 25% of frame height, MuseTalk above | [STAGES.md](docs/STAGES.md) |
 | Speaking face | Picked from stage 6 ASD scores via `run_lipsync(..., coord_list=…)` | [ROUGH_EDGES.md](docs/ROUGH_EDGES.md) |
@@ -213,7 +213,7 @@ Speakers and faces (stages 4 to 6)
 
 | File | Features |
 | --- | --- |
-| `diarize.py` | Entry point over the diarization registry (pyannote, DiariZen, Nemotron) |
+| `diarize.py` | Entry point over the diarization registry (pyannote community-1) |
 | `segment.py` | Stage 4b: splits long turns at VAD gaps, merges short ones, caps length at energy valleys |
 | `speaker_id.py` | Stage 4c: ECAPA check that one label holds one person; splits impure labels |
 | `faces.py` | Face detection and tracking entry point; preloads insightface before other libs claim shared C libraries |
@@ -225,10 +225,10 @@ Transcript and translation (stages 7 to 9b2)
 
 | File | Features |
 | --- | --- |
-| `asr.py` | ASR entry point (Bodhan, WhisperX, IndicConformer, Indic-Transcribe) |
+| `asr.py` | ASR entry point (Bodhan Indic-Transcribe) |
 | `caption_asr.py` | Uses human-authored YouTube captions as the transcript, reshaped onto diarization turns |
 | `align.py` | CTC forced alignment, fills word timestamps per segment |
-| `translate.py` | MT entry point (Bodhan, NLLB), writes the merged ASR+MT JSON |
+| `translate.py` | MT entry point (Bodhan Indic-Translate), writes the merged ASR+MT JSON |
 | `sanitize.py` | Text clean-up at the ASR to MT, MT output and TTS boundaries |
 | `codemix.py` | Stage 9b: keeps English terms, transliterates them into the target script, normalises Latin leftovers |
 | `classify.py` | Stage 9b1: picks the whole-video TTS register from YouTube categories, channel, description, then LLM |
@@ -236,7 +236,7 @@ Transcript and translation (stages 7 to 9b2)
 | `transcripts.py` | Parses ground-truth `.vtt`/`.srt` and scores ASR and MT (WER, CER, BLEU, chrF, ROUGE, METEOR) |
 | `llm.py` | OpenRouter chat client, the only LLM caller; falls back to deterministic paths with no key |
 
-Duration, voices and synthesis (stages 9c to 9f)
+Duration, voices and synthesis (stages 9c to 9e)
 
 | File | Features |
 | --- | --- |
@@ -244,7 +244,6 @@ Duration, voices and synthesis (stages 9c to 9f)
 | `gender.py` | Speaker gender by majority vote of wav2vec2, F0 pitch and face genderage |
 | `voices.py` | Stage 9d: per-speaker voice casting (gender filter, screen time, ECAPA timbre rank) |
 | `tts.py` | Stage 9e: per-segment Bodhan synthesis with per-segment overrides, writes `tts_audio` and stretch data |
-| `voice_convert.py` | Stage 9f: optional voice conversion toward the speaker's reference clip |
 
 Timing, mix and lip-sync (stages 9f2 to 9h)
 
@@ -255,6 +254,7 @@ Timing, mix and lip-sync (stages 9f2 to 9h)
 | `stretch.py` | Named time-stretch backends (rubberband, atempo, linear control) chosen by filter availability |
 | `mix.py` | Overlays dub clips on the M&E stem; strategies `global_tempo`, `no_tempo`, `timing_plan`; backs `--speed-mode` |
 | `speed.py` | `--speed-mode segment` knobs (cap, floor), dependency-free |
+| `vad.py` | Speech / internal-pause segmentation (pyannote, energy fallback); read by `pause_absorb.py`. Lifted out of the deleted `backend/eval/` on 2026-10-28 |
 | `lipsync.py` | Stage 9h entry point: mux, shard over free GPUs, run the chosen adapter, concat; refuses to report success on a missing render |
 | `restore.py` | Face restoration pass (GFPGAN) over a finished render |
 
@@ -282,28 +282,17 @@ Stages and adapters (registered names in bold)
 | Stage | Adapter file | Features |
 | --- | --- | --- |
 | `align/` | `mms_fa_adapter.py` (**mms_fa**) | torchaudio MMS forced aligner, char-level CTC; romanizes Indic text with `uroman`, skips non-Latin segments if it's missing |
-| | `whisperx_adapter.py` (**whisperx**) | WhisperX wav2vec2 CTC aligner, usable after any ASR; empty words if the language has no head |
-| `asd/` | TalkNet adapter (**talknet**), Light-ASD (**light_asd**), LR-ASD (**lr_asd**) | Per-face speaking scores from 112x112 crops plus MFCC; none picks one face among several. `_mfcc_av.py` is the shared crop and int16 MFCC code |
+| `asd/` | `loconet_adapter.py` (**loconet**) | Joint multi-speaker scoring over 112x112 crops plus VGGish audio -- the only ASD model here that weighs competing faces against each other. `_av_frontend.py` holds the shared crop and VRAM-windowing code |
 | `asr/` | `bodhan_adapter.py` (**bodhan**) | Hosted Indic-Transcribe over REST; `render_mode` native, mixed or roman; adapts concurrency from rate-limit headers |
-| | `whisperx_adapter.py` (**whisperx**) | Whisper (CTranslate2) with wav2vec2 alignment; large-v3 for Indic |
-| | `indicconformer_adapter.py` (**indicconformer**) | AI4Bharat IndicConformer 600M, per-language ONNX heads; language code required |
-| | `indic_transcribe_adapter.py` (**indictranscribe_core**, **indictranscribe_flex**) | Local Canary 1.2B from Hugging Face; long-form helper for segments over 30 s |
 | `diarization/` | `pyannote_adapter.py` (**pyannote**) | pyannote community-1; needs an HF token and the gate accepted |
-| | `diarizen_adapter.py` (**diarizen**) | DiariZen WavLM; CC-BY-NC weights |
-| | `nemotron_adapter.py` (**nemotron**) | NeMo Sortformer, 4-speaker cap |
 | `emotion/` | `emotion2vec_adapter.py` (**emotion2vec**) | emotion2vec+ large via FunASR; utterance-level emotion labels |
 | `faces/` | `detect/` (**retinaface**, **mediapipe**), `track/` (**bytetrack**) | Per-frame detection, then ByteTrack identities; `base.py` holds `FaceBox`, `FaceDetections`, `FaceTracks` |
-| `lipsync/` | `base.py`, `wav2lip_adapter.py` (**wav2lip**), `musetalk_adapter.py` (**musetalk**), `latentsync_adapter.py` (**latentsync**, **latentsync15**) | Each shells into its own conda env and returns a rendered video; LatentSync 1.6 is 512 px (~18 GB), 1.5 is 256 px (~8 GB) |
+| `lipsync/` | `base.py`, `wav2lip_adapter.py` (**wav2lip**), `musetalk_adapter.py` (**musetalk**), `latentsync_adapter.py` (**latentsync15**) | Each shells into its own conda env and returns a rendered video; LatentSync 1.5 is 256 px (~8 GB) |
 | `mt/` | `bodhan_adapter.py` (**bodhan**) | Hosted Indic-Translate, one call per segment; target script native, roman or codemix |
-| | `nllb_adapter.py` (**nllb**) | Local NLLB-200 (distilled 600M default), FLORES codes |
 | `restore/` | `gfpgan_adapter.py` (**gfpgan**) | GFPGAN v1.4 plus Real-ESRGAN over a finished render via `scripts/face_enhance.py`; stage 9i |
 | `translit/` | `bodhan_adapter.py` (**bodhan**) | Hosted Indic-Transliterate; falls back to the MT endpoint |
-| | `indicxlit_adapter.py` (**indicxlit**) | Local AI4Bharat IndicXlit, 21 languages |
 | `tts/` | `bodhan_adapter.py` (**bodhan**) | Hosted Indic-Speak, returns WAV bytes; re-speaks at a different rate; the only stock-voice engine |
-| | `indicf5_adapter.py` (**indicf5**) | Local zero-shot cloning TTS; needs reference audio and text per request |
-| `vc/` | none | Registry is empty since 2026-10-23; the package stays so `--vc` still parses |
-
-Removed registry entries: `wav2lip_hd` and `lipgan` (2026-10-23; restoration is now `--restore gfpgan`), `openvoice` and `vevo`, and `ts_talknet`. Adapter files for `asd/` and `faces/` and the Bodhan base classes were not opened; their rows come from the registry docstrings.
+Removed registry entries: `wav2lip_hd` and `lipgan` (2026-10-23; restoration is now `--restore gfpgan`), `latentsync` (1.6, on 2026-10-28 — ~18 GB against 16 GiB cards), `openvoice` and `vevo`, and `ts_talknet`. All three retired display rows were dropped from `ui/lipsync_models.FACTS` on 2026-10-28 too, so the three `hd_*` job folders now label as plain Wav2Lip. Voice conversion went with them: `models/vc/`, `backend/voice_convert.py`, stage 9f and the `--vc` flag were deleted on 2026-10-28, since the registry had been empty for five days and no run on disk ever set it. Adapter files for `asd/` and `faces/` and the Bodhan base classes were not opened; their rows come from the registry docstrings.
 
 ### `ui/` — operator UI (Python side)
 

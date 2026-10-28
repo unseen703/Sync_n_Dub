@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Re-score one job's ASD with a chosen model and render the boxed video.
 
-The pipeline runs ASD once (talknet) and keeps only the per-segment
+The pipeline runs ASD once (loconet) and keeps only the per-segment
 assignment, so `ui/bbox_video.py` can only ever re-draw that one decision.
 To COMPARE models on the same footage you have to re-score, which is what
 this does: it reuses the job's existing face tracks and source clip, runs
@@ -13,7 +13,7 @@ Nothing in the pipeline reads the output; it is a human comparison artifact.
 Face detection is NOT re-run -- every model sees identical boxes, so any
 difference in the render is the ASD model's, not the tracker's.
 
-    $PY scripts/asd_bbox_video.py --job <job_id> --asd-model lr_asd
+    $PY scripts/asd_bbox_video.py --job <job_id> --asd-model loconet
 
 Inputs are discovered the way `ui/bbox_video.py` discovers them:
   video  videos/*.mp4   tracks  faces/*.npz   audio  audio/*.16k.mono.wav
@@ -52,7 +52,7 @@ def main(argv=None) -> int:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--job", required=True, help="job id under <data>/jobs/")
     ap.add_argument("--asd-model", required=True,
-                    help="talknet | lr_asd | light_asd | loconet")
+                    help="loconet (the only registered ASD model)")
     ap.add_argument("--reuse-scores", action="store_true",
                     help="Do NOT re-score. Load the job's existing "
                          "asd/<stem>.<model>.scores.npz -- the EXACT scores the "

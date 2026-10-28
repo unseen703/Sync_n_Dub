@@ -102,7 +102,6 @@ PIPELINE_KNOBS = (
     "tts_speed_bounds",
     "tts_speed_tolerance",
     "tts_speed_max_rounds",
-    "vc_model",
     # Post-TTS forced alignment (method M5, stage 9f1). Fills
     # `segments[].tts_words[]`, which M3, M4 and M7 all read. Post-MT, so a
     # variant may move it freely and it is NOT a prefix knob.
@@ -219,10 +218,9 @@ _TTS_KNOB_TO_PIPELINE = {
 def _ensure_ffmpeg_on_path() -> None:
     """Put an `ffmpeg` on PATH for this process and everything it spawns.
 
-    Needed because whisperx's `load_audio` shells out to a bare `ffmpeg`, so
-    stage 7 raises FileNotFoundError in a shell with no system ffmpeg.
-    (`backend.media_io` calls the imageio binary by absolute path and does not
-    need this.)
+    Needed because demucs shells out to a bare `ffmpeg`, so stage 3 raises
+    FileNotFoundError in a shell with no system ffmpeg. (`backend.media_io`
+    calls the imageio binary by absolute path and does not need this.)
 
     Delegates to `backend.stem_separation._ensure_ffmpeg_on_path`, which
     builds and caches the shim symlink for demucs. A no-op when
@@ -694,7 +692,7 @@ def ensure_prefix(
         return None, False
 
     log.info("=== prefix: stages 1..9a (runs ONCE for %d-variant sweep) ===", 0)
-    # The only call here that reaches whisperx, which shells out to a bare
+    # The only call here that reaches demucs, which shells out to a bare
     # `ffmpeg`.
     _ensure_ffmpeg_on_path()
     res = run_pipeline(input_, data_dir=Path(data_dir), **(pipeline_kwargs or {}))
@@ -967,7 +965,7 @@ def _run_one(
     # plan.mt.json` and redirects stages 9b..9h into that directory.
     boot: Optional[PipelineResult] = None
     stage_keys = ("translit_model", "duration_adjust", "voice_engine",
-                  "tts_model", "vc_model")
+                  "tts_model")
     live_stages = ([] if donor_vr is not None
                    else [k for k in stage_keys if pipe_cfg.get(k)])
     # The bootstrap runs for either of two reasons: to run a post-MT stage,
@@ -987,11 +985,11 @@ def _run_one(
         for k in _PREFIX_ONLY_KNOBS:
             run_kwargs.pop(k, None)
         if donor_vr is not None:
-            # The donor already ran 9b..9f and this variant inherited its
+            # The donor already ran 9b..9e and this variant inherited its
             # merged JSON. Re-running them would cost a second TTS pass and
             # overwrite the clips being reused.
             run_kwargs.update(translit_model=None, duration_adjust=False,
-                              voice_engine=None, tts_model=None, vc_model=None)
+                              voice_engine=None, tts_model=None)
         run_kwargs["mix"] = False          # the timing plan has to land first
         run_kwargs["lipsync_model"] = None
         if tts_cfg is not None and cfg.get("resynthesis_reason"):
@@ -1210,7 +1208,7 @@ def main(argv=None) -> int:
                         format="%(levelname)s %(name)s: %(message)s")
 
     # Same startup contract as `backend.cli.main`: secrets from `.env`
-    # (HF_TOKEN for pyannote) and an `ffmpeg` on PATH for whisperx.
+    # (HF_TOKEN for pyannote) and an `ffmpeg` on PATH for demucs.
     # `validate` touches neither and runs without a `.env`.
     if a.cmd == "run":
         _load_env(allow_insecure_env=a.allow_insecure_env)

@@ -67,7 +67,7 @@ def _lipsync_model_ids() -> str:
         from models.lipsync import available_models
         return " | ".join(available_models())
     except Exception:                               # noqa: BLE001
-        return "wav2lip | musetalk | latentsync"
+        return "wav2lip | musetalk | latentsync15"
 
 
 def tone_styles() -> Tuple[str, ...]:
@@ -117,7 +117,7 @@ TONE_CHOICES: Tuple[str, ...] = ("TV style news", "educational lecture")
 
 #: Post-MT chain, in execution order. See `run_post_mt_stages`.
 STAGE_ORDER: Tuple[str, ...] = (
-    "codemix", "duration", "voices", "tts", "vc", "timing", "mix", "lipsync",
+    "codemix", "duration", "voices", "tts", "timing", "mix", "lipsync",
 )
 
 #: Default stretch cap in `backend.tts`. A speed edit past this gets its own
@@ -553,7 +553,6 @@ STAGE_PLAIN: Dict[str, str] = {
     "tts":      "re-fits the affected lines — re-speaking only those whose "
                 "wording, voice or style changed — then remixes the audio "
                 "and re-syncs the lips",
-    "vc":       "re-converts the voice, remixes and re-syncs",
     "timing":   "re-fits the timing, remixes and re-syncs",
     "mix":      "remixes the audio and re-syncs the lips",
     "lipsync":  "re-syncs the lips only",
@@ -1682,7 +1681,7 @@ def _h_set_target_language(data, seg_ids, op, applied, ctx, res):
     - **Whole dub** (`scope.all`): re-translate every cue, swap
       `data["target_language"]`, clear every voice pin, and let the post-MT
       replay re-cast voices and re-speak from scratch. `dirty_from="codemix"`
-      — codemix → duration → voices → tts → vc → timing → mix → lipsync.
+      — codemix → duration → voices → tts → timing → mix → lipsync.
     - **Cue list or time window**: re-translate only those cues, pin a
       per-cue voice from the new language's catalog, and leave the global
       target language and the other cues untouched. `dirty_from="tts"` — the

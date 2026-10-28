@@ -88,7 +88,6 @@ STAGE_LABELS: Dict[str, str] = {
     "9c2":    "Shortening lines that run long",
     "9d":     "Voice assignment",
     "9e":     "Speech generation",
-    "9f":     "Converting the voice",
     "9f1":    "Timing the new speech",
     "9f1b":   "Reading mouth shapes",
     "9f2":    "Planning the timing of new speech",
@@ -118,7 +117,7 @@ PHASE_GROUPS: List[tuple] = [
                                  "3", "1-9a", "5", "6b")),
     ("translate", "Translate",  ("4", "4b", "4c", "7", "8",
                                  "9", "9b", "9b1", "9c", "9c2")),
-    ("dub",       "Dub audio",  ("9b2", "9d", "9e", "9f",
+    ("dub",       "Dub audio",  ("9b2", "9d", "9e",
                                  "9f1", "9f1b", "9f2", "9g")),
     ("lipsync",   "Lip-sync",   ("6", "9h", "9i")),
 ]
@@ -140,7 +139,7 @@ PHASE_GROUPS: List[tuple] = [
 #: doing it -- see `plan_stages`.
 HIDDEN_KEYS: tuple = ("10a", "10b",
                       "cut", "probe", "1", "4b", "4c", "5", "8",
-                      "1-9a", "9b", "9b1", "9c", "9f", "9f1", "9f1b")
+                      "1-9a", "9b", "9b1", "9c", "9f1", "9f1b")
 
 _GROUP_OF: Dict[str, str] = {
     key: gid for gid, _label, keys in PHASE_GROUPS for key in keys
@@ -249,12 +248,10 @@ def plan_stages(config: Dict[str, Any], *, pre: Optional[List[str]] = None,
     # per-segment estimates 9c writes -- so it cannot be planned without it.
     if config.get("duration_adjust") and config.get("condense_overlong_text"):
         keys.append("9c2")
-    if config.get("voice_engine") or config.get("tts") or config.get("vc"):
+    if config.get("voice_engine") or config.get("tts"):
         keys.append("9d")
     if config.get("tts"):
         keys.append("9e")
-    if config.get("vc"):
-        keys.append("9f")
     if config.get("tts_force_align"):
         keys.append("9f1")
     if config.get("visemes"):

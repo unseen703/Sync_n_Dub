@@ -155,3 +155,6 @@ def test_every_mutating_stage_snapshots():
         src = (REPO / rel).read_text()
         assert "mt_versions" in src, f"{rel} does not snapshot"
         assert producer in src, f"{rel} does not snapshot as {producer!r}"
+
+    # `edit_agent.commit()` also maps its snapshot into the job index.
+    assert "job_versions" in (REPO / "backend/edit_agent.py").read_text()

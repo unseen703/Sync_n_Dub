@@ -1,7 +1,11 @@
-"""Machine-translation adapter registry.
+"""Machine-translation adapter registry — Bodhan Indic-Translate only.
 
-  - bodhan      : Bodhan Indic-Translate via REST (POST /v1/chat/completions)
-  - nllb        : facebook/nllb-200-* via local transformers
+  - bodhan : Bodhan Indic-Translate via REST (POST /v1/chat/completions)
+
+`nllb` (facebook/nllb-200-* via local transformers) was removed on
+2026-10-28. Its weights are CC-BY-NC, it was never the default at any call
+site, and it was the only reason `--mt-num-beams` existed. In git at
+b823223.
 """
 from __future__ import annotations
 
@@ -10,7 +14,6 @@ from .base import BaseMT, MTRequest, MTResult, MTSegment
 
 _REGISTRY_SPEC: dict[str, tuple[str, str]] = {
     "bodhan": (".bodhan_adapter", "BodhanMT"),
-    "nllb": (".nllb_adapter", "NLLBMT"),
 }
 
 _registry = make_registry(

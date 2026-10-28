@@ -19,8 +19,9 @@ data/
     diarization/ faces/ asd/
     asr/ align/ mt/         transcripts, word alignment, translation
     mt/versions/            every version of the merged JSON (see below)
-    voices/ tts/ vc/        speaker refs, synthesized clips, voice conversion
-    mix/ lipsync/           final dubbed audio, muxed video
+    voices/ tts/            speaker refs, synthesized clips
+    mix/ lipsync/           final dubbed audio, muxed video (history in versions/ beside each)
+    versions/index.json     which edit produced which files; `current` = latest (see below)
     eval/ exp/              scores; per-variant subtrees for a sweep
   _archive/*.tar.zst        the retired per-stage folders
 ```
@@ -69,6 +70,48 @@ Four naming rules, each defensive rather than cosmetic:
 A snapshot never overwrites: the same producer twice (a re-run, a replay) takes
 the next free number. Failures are logged and swallowed — a job that cannot
 write a snapshot still renders, it just has a thinner history.
+
+## `versions/index.json` — which files belong to which version
+
+`mt/versions/` and `mix/versions/` keep every transcript and every mix, each
+numbered on its own. `versions/index.json` (`backend/job_versions.py`) is the
+map over them: one row per version, saying which edit produced it and which
+files it links to. It copies nothing — an artifact is a relative path plus a
+sha256 into the snapshot folders.
+
+```
+{"schema": 1, "current": 7, "versions": [
+  {"v": 7, "parent": 6, "kind": "edit", "edit_id": "edit_003",
+   "nlq": "...", "ops": [...], "dirty_stages": ["tts", "mix"],
+   "status": "rendered",
+   "artifacts": {"transcript": {"path", "sha256", "bytes"},
+                 "mix_wav": {...}, "mix_mp4": {...}, "lipsync_mp4": {...}}}]}
+```
+
+- `kind`: `original` | `cast` | `edit` | `lipsync` | `revert`.
+  `status`: `applied` → `rendering` → `rendered` | `failed`.
+- **`current` is what "latest" means.** The UI keeps reading the live files;
+  use `job_versions.latest(job, "mix_mp4")` rather than globbing by mtime.
+- **A version number is never reused**, even across the UI server and the
+  detached runner: writes are locked and atomic.
+- **Revert is a new version** (`kind=revert`, `restores=<v>`), never a
+  deletion. It records a transcript only, because the audio on disk keeps the
+  undone edit until a re-render; `latest("mix_wav")` walks `parent` to the mix
+  that is really there.
+- **Lip-sync is the one artifact nothing else snapshots.** Before a new render
+  the previous one is *renamed* into `lipsync/versions/<stem>.vNNN.mp4` (no
+  extra disk), and renamed back if the render fails.
+- Per-cue TTS clips are not versioned; they are a hash cache rebuilt from the
+  transcript.
+- Older jobs are back-filled on first read from `edits/edit_*.json`,
+  `mt/versions/` and `mix/versions/`.
+
+```bash
+python -m backend.job_versions list -j <job_id>
+python -m backend.job_versions show 3 -j <job_id>
+python -m backend.job_versions restore 0 -j <job_id>   # new version; re-render after
+# HTTP: GET /api/jobs/<job_id>/versions   (backend record; the UI does not call it)
+```
 
 ```bash
 python -m backend.cli --input <url-or-file> ...   # one input per run; creates a job

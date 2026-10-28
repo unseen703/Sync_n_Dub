@@ -1,10 +1,10 @@
-"""ASR adapter registry.
+"""ASR adapter registry — Bodhan Indic-Transcribe only.
 
-  - bodhan               : Bodhan Indic-Transcribe (Core / Flex) via REST
-  - whisperx             : WhisperX (whisper + CTC alignment)
-  - indicconformer       : AI4Bharat IndicConformer (Conformer-CTC)
-  - indictranscribe_core : bodhan-ai/indic-transcribe-core (Canary, local HF)
-  - indictranscribe_flex : bodhan-ai/indic-transcribe-flex (Canary, local HF)
+  - bodhan : Bodhan Indic-Transcribe (Core / Flex) via REST
+
+`whisperx`, `indicconformer`, `indictranscribe_core` and
+`indictranscribe_flex` were removed on 2026-10-28. In git at
+b823223.
 """
 from __future__ import annotations
 
@@ -15,10 +15,6 @@ from .base import ASRResult, ASRSegment, BaseASR, Word, transcript_from_asr_json
 
 _REGISTRY_SPEC: dict[str, tuple[str, str]] = {
     "bodhan": (".bodhan_adapter", "BodhanASR"),
-    "whisperx": (".whisperx_adapter", "WhisperXASR"),
-    "indicconformer": (".indicconformer_adapter", "IndicConformerASR"),
-    "indictranscribe_core": (".indic_transcribe_adapter", "IndicTranscribeCoreASR"),
-    "indictranscribe_flex": (".indic_transcribe_adapter", "IndicTranscribeFlexASR"),
 }
 
 _registry = make_registry(
@@ -31,35 +27,18 @@ _registry = make_registry(
 )
 
 get_asr = _registry.get
-_load = _registry.load
 
 
 def available_models(language: Optional[str] = None) -> list[str]:
-    """Registered ASR adapter names, optionally filtered by source language.
+    """Registered ASR adapter names.
 
-    The one stage whose lister is not the shared `sorted(_REGISTRY_SPEC)`.
-
-    When `language` is set, adapters whose `supported_languages` class
-    attribute declares a fixed inventory and does not include the code are
-    omitted. Adapters that leave `supported_languages = None` (whisperx,
-    bodhan) always pass through — they handle any language the caller asks
-    for, either because the model is language-agnostic or because they
-    delegate language detection downstream.
+    `language` is accepted and ignored. bodhan leaves it None and
+    delegates language detection downstream, so with only bodhan registered
+    the filter can never drop anything. The parameter stays because `cli.py`
+    and the UI both pass it, and because the filtering comes back the moment
+    a second, language-limited adapter does.
     """
-    names = sorted(_REGISTRY_SPEC)
-    if language is None:
-        return names
-    out = []
-    for key in names:
-        try:
-            cls = _load(key)
-        except ImportError:
-            # Can't import → can't know its language set → leave it in so the
-            # user gets the ImportError (actionable) instead of silent drop.
-            out.append(key); continue
-        if cls.supports_language(language):
-            out.append(key)
-    return out
+    return sorted(_REGISTRY_SPEC)
 
 
 __all__ = [

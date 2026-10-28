@@ -1206,8 +1206,6 @@ def available_stages(view: JobView, res: EditResult,
     out = ["voices"]                      # 9d always runs when TTS does
     if cfg.get("tts"):
         out.append("tts")
-    if cfg.get("vc"):
-        out.append("vc")
     if cfg.get("timing_producer"):
         out.append("timing")
     if cfg.get("tts"):
@@ -1243,6 +1241,9 @@ def commit(plan: EditPlan) -> EditResult:
     """Write the edits. Re-runs the handlers so LLM rewrites are not reused
     from the dry run — a rewrite is non-deterministic, and showing one string
     while saving another is the kind of mismatch nobody catches later."""
+    # Before anything is written, so an older job's history is back-filled
+    # from the files as they were and does not pick up this edit twice.
+    _jv_ready = _job_versions_ready(plan.view.root)
     res = apply_edits(plan.view.merged_json, plan.ops, ctx=plan.ctx,
                       nlq=plan.nlq, dry_run=False)
     res.dirty_stages = rerun_stages(
@@ -1262,8 +1263,36 @@ def commit(plan: EditPlan) -> EditResult:
     # NNN as the journal entry, so the two line up by name.
     from .mt_versions import snapshot as _mt_snapshot
     _mt_snapshot(plan.view.merged_json, f"edit_{stamp:03d}")
+    # Map this edit to the files it produced. A record, never a dependency.
+    if _jv_ready:
+        try:
+            from . import job_versions as _jv
+            ops_d = [o.to_dict() for o in plan.ops]
+            _jv.append(
+                plan.view.root,
+                ("lipsync" if ops_d and all(o["op"] == "lipsync_window"
+                                            for o in ops_d) else "edit"),
+                edit_id=f"edit_{stamp:03d}", nlq=plan.nlq, ops=ops_d,
+                dirty_stages=res.dirty_stages,
+                artifacts=_jv.link_transcript(plan.view.root,
+                                              f"edit_{stamp:03d}"))
+        except Exception as e:                           # noqa: BLE001
+            log.warning("job_versions: could not record edit_%03d (%s)",
+                        stamp, e)
     plan.result = res
     return res
+
+
+def _job_versions_ready(root: Path) -> bool:
+    """Create (or back-fill) the job's version index; False if that failed."""
+    try:
+        from . import job_versions as _jv
+        _jv.read(root)
+        return True
+    except Exception as e:                               # noqa: BLE001
+        log.warning("job_versions: index unavailable for %s (%s)",
+                    Path(root).name, e)
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -1442,8 +1471,6 @@ def rerun(plan: EditPlan, *, device: Optional[str] = None,
         stretch_backend=nsget("stretch_backend", "auto"),
         tts_apply_stretch=(setup.tts_apply_stretch if setup is not None
                            else not bool(nsget("no_tts_stretch"))),
-        # 9f
-        vc_model=(cfg.get("vc") if "vc" in stages else None),
         # 9f2
         timing_producer=((setup.timing_producer if setup is not None
                           else cfg.get("timing_producer"))
@@ -1797,10 +1824,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 2
 
     if args.revert:
+        _job_versions_ready(view.root)    # back-fill before the file changes
         ids = revert(view.merged_json)
         print(f"reverted {len(ids)} segment(s) in {view.merged_json}"
               if ids else "nothing to revert")
         if ids:
+            from . import job_versions as _jv
+            _jv.record_revert(view.root, view.merged_json)
             print("re-run the dub to hear it: the audio on disk still carries "
                   "the edits.")
         return 0

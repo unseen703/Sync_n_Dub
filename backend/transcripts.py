@@ -1,18 +1,11 @@
 """Ground-truth transcript parsing + ASR/MT evaluation.
 
-Parses the `.vtt` / `.srt` file the downloader fetched alongside the video
-and scores the ASR / MT output against it. The scoring itself is delegated
-to the canonical reference implementations — we never roll our own metric:
+Parses the `.vtt` / `.srt` fetched alongside the video and scores ASR/MT
+output against it. No metric is implemented here -- WER/CER come from jiwer,
+BLEU/chrF from sacrebleu, ROUGE from rouge-score, METEOR from nltk.
 
-    - WER / CER       : jiwer (industry standard; same tool pyannote-metrics,
-                        ESPnet, whisper-benchmark use)
-    - BLEU / chrF     : sacrebleu (the reference BLEU; what WMT publishes)
-    - ROUGE-1/2/L     : rouge-score (Google's canonical implementation)
-    - METEOR          : nltk.translate.meteor_score (reference since 2005)
-
-Each library is imported lazily so a user who only wants ASR metrics does
-not have to install the MT ones (and vice versa) — a missing dependency
-raises a targeted `ImportError` naming the pip package.
+Each library is imported lazily, so ASR-only and MT-only installs both work;
+a missing dependency raises an ImportError naming the pip package.
 """
 from __future__ import annotations
 
@@ -48,9 +41,9 @@ _TIMESTAMP_VTT_SHORT = re.compile(
 )
 # Inline VTT styling: <00:00:01.000><c> word</c>, <b>, <i>, etc.
 _VTT_INLINE_TAG = re.compile(r"<[^>]+>")
-# Just the inline cue timestamps, which carry per-word timing in YouTube
-# auto-captions. Kept separate from `_VTT_INLINE_TAG` so `parse_vtt_words`
-# can read them while `parse_vtt` keeps stripping them.
+# Inline cue timestamps only, which carry per-word timing in YouTube
+# auto-captions. Separate from `_VTT_INLINE_TAG` so `parse_vtt_words` can
+# read them while `parse_vtt` strips them.
 _VTT_INLINE_TS = re.compile(
     r"<(\d{1,2}):(\d{2}):(\d{2})[.,](\d{1,3})>"
 )
@@ -116,9 +109,11 @@ def parse_srt(path: Path) -> List[Cue]:
 
 
 def _dedupe_rolling_cues(cues: List[Cue]) -> List[Cue]:
-    """YouTube auto-captions repeat each line across adjacent cues as new
-    words land. The last cue in a run contains the full sentence, so earlier
-    cues whose text is a prefix of the next cue's text get dropped."""
+    """Drop cues whose text is a prefix of the next cue's.
+
+    YouTube auto-captions repeat each line across adjacent cues as new words
+    scroll in; only that obvious case is removed here.
+    """
     out: List[Cue] = []
     for c in cues:
         if out and c.text.startswith(out[-1].text) and c.text != out[-1].text:
@@ -132,12 +127,10 @@ def _dedupe_rolling_cues(cues: List[Cue]) -> List[Cue]:
 
 # ---- word-level parsing (YouTube auto-caption inline timings) -------------
 #
-# `_dedupe_rolling_cues` cannot actually undo rolling captions: the prefix rule
-# only ever merges the first two cues of a run, so the carried-over line is
-# re-emitted as a fresh cue and the flattened text comes out ~2x too long.
-# The inline `<00:00:00.378><c> word</c>` stream is immune to that — every word
-# appears exactly once, in the cue that first introduced it — and it carries
-# per-word timing, which is the most precise alignment data on disk.
+# `_dedupe_rolling_cues` cannot fully undo rolling captions: its prefix rule
+# merges only the first two cues of a run, so flattened text comes out ~2x too
+# long. The inline `<00:00:00.378><c> word</c>` stream is immune -- every word
+# appears once, in the cue that introduced it -- and carries per-word timing.
 
 @dataclass
 class TimedWord:
@@ -167,8 +160,8 @@ def _iter_vtt_blocks(path: Path):
             end = _tc_to_seconds("0", g[3], g[4], g[5])
         i += 1
         buf: List[str] = []
-        # A cue payload ends at a genuinely empty line. yt-dlp writes a line
-        # holding a single space as real payload, and treating that as the
+        # A cue payload ends at a genuinely empty line. yt-dlp writes a
+        # single-space line as real payload, and treating it as the
         # terminator (as `parse_vtt` does) drops the whole first cue.
         while i < len(lines) and lines[i].rstrip("\r") != "":
             buf.append(lines[i])
@@ -179,8 +172,8 @@ def _iter_vtt_blocks(path: Path):
 def has_inline_word_timings(path: Path) -> bool:
     """True when the file carries `<hh:mm:ss.mmm>` inline cue timestamps.
 
-    Manual/publisher subtitles never do, so callers must check this before
-    trusting `parse_vtt_words` to cover the whole file.
+    Manual/publisher subtitles never do, so check this before trusting
+    `parse_vtt_words` to cover the whole file.
     """
     text = Path(path).read_text(encoding="utf-8", errors="replace")
     return _VTT_INLINE_TS.search(text) is not None
@@ -203,24 +196,19 @@ def _inline_pieces(raw: str, cue_start: float, cue_end: float):
 def parse_vtt_words(path: Path) -> List[TimedWord]:
     """Read the inline `<ts><c>word</c>` stream as deduped, timed words.
 
-    Returns `[]` for files without inline timings (manual subtitles) rather
-    than silently falling back to cue text — the caller has to know which
-    kind of timing it got. A word's `end` is the next word's start, clamped
-    to the cue end for the last word in a cue. One timestamp occasionally
-    introduces several tokens (`&gt;&gt; Like<...>`); those share the run and
-    are spread evenly across it so starts stay strictly ordered.
+    Returns `[]` for files without inline timings rather than falling back to
+    cue text, so the caller always knows which kind of timing it got. A
+    word's `end` is the next word's start, clamped to the cue end for the
+    last word in a cue; one timestamp introducing several tokens spreads them
+    evenly so starts stay ordered.
 
-    A cue carrying no inline timestamp at all is not automatically a repeat:
-    yt-dlp omits the `<ts>` marker when the newly scrolled-in text begins
-    exactly at the cue start, so such a cue can introduce real speech the
-    inline stream never carries (60 words in a 36-minute English file, 810
-    in its Hindi dub). Such cues are diffed against what has already been
-    emitted and only the genuinely new tail is kept, timed across the cue
-    span. The diff runs on the whitespace-free character stream, not on
-    tokens: the inline stream splits punctuation off as its own token
-    (`देंगे` + `।`) while the rolling carry-over line renders it attached
-    (`देंगे।`), so token equality would miss the overlap and re-emit the
-    whole line.
+    A cue with no inline timestamp is not automatically a repeat -- yt-dlp
+    omits the marker when scrolled-in text begins exactly at the cue start --
+    so such cues are diffed against what has been emitted and only the new
+    tail is kept, timed across the cue span. The diff runs on the
+    whitespace-free character stream, not tokens: the inline stream splits
+    punctuation off (`देंगे` + `।`) while the carry-over line attaches it
+    (`देंगे।`), so token equality would miss the overlap.
     """
     import html
 
@@ -239,9 +227,8 @@ def parse_vtt_words(path: Path) -> List[TimedWord]:
             ))
             seen.append(tok)
 
-    # Manual/publisher subtitles have no inline timings anywhere; recovering
-    # their cue text here would hand the caller cue-level guesses dressed up
-    # as word timings. `[]` keeps that distinction honest.
+    # Manual/publisher subtitles carry no inline timings; returning their cue
+    # text would pass cue-level guesses off as word timings.
     recover_untimed = has_inline_word_timings(path)
 
     words: List[TimedWord] = []
@@ -250,8 +237,8 @@ def parse_vtt_words(path: Path) -> List[TimedWord]:
         timed = [raw for raw in body if _VTT_INLINE_TS.search(raw)]
         if timed:
             for raw in timed:
-                # Untimed lines in a cue that *does* carry timings are the
-                # rolling carry-over of an earlier cue; already emitted.
+                # Untimed lines in a cue that does carry timings are the
+                # rolling carry-over of an earlier cue, already emitted.
                 for t0, t1, chunk in _inline_pieces(raw, cue_start, cue_end):
                     toks = _tokens(chunk)
                     if toks:
@@ -263,8 +250,8 @@ def parse_vtt_words(path: Path) -> List[TimedWord]:
         toks = _tokens(" ".join(body))
         if not toks:
             continue
-        # Longest prefix of this cue (in characters) that is already the tail
-        # of the emitted stream is the carry-over; the rest is new speech.
+        # The longest character prefix already at the tail of the emitted
+        # stream is the carry-over; the rest is new speech.
         tail = "".join(seen)[-200:]
         cue_chars = "".join(toks)
         overlap = 0
@@ -291,8 +278,7 @@ def parse_vtt_words(path: Path) -> List[TimedWord]:
     for w in words:
         if out:
             prev = out[-1]
-            # A word that jumps backwards is a repeat carried over from an
-            # earlier cue, not new speech.
+            # A word that jumps backwards is a carry-over, not new speech.
             if w.start < prev.start - 1e-6:
                 continue
             if abs(w.start - prev.start) < 1e-6 and w.text == prev.text:
@@ -306,19 +292,15 @@ def parse_vtt_words(path: Path) -> List[TimedWord]:
 
 
 def rolling_duplication_ratio(path: Path) -> float:
-    """Share of word bigrams that are repeats — a rolling-caption detector.
+    """Share of word bigrams that are repeats -- a rolling-caption detector.
 
-    YouTube auto-captions re-emit each line as the next cue scrolls in, so a
-    naive `parse_vtt` flatten repeats nearly every bigram once (ratio ~0.5).
-    Manual subtitles sit near zero. Returns 0.0 for files too short to score.
+    Rolling auto-captions land near 0.5, manual subtitles near zero. Returns
+    0.0 for files too short to score.
 
-    Deliberately does NOT use `normalize_text`: stripping punctuation merges
-    bigrams that differ only by a comma or danda, which pushes every file's
-    ratio up (manual Bengali 0.0625 -> 0.0899, rolling English 0.5742 ->
-    0.6111). NFC + casefold + whitespace keeps the two populations further
-    apart. (Before `_strip_punct` existed, `normalize_text` also shattered
-    Indic words into bare consonants and scored that same Bengali file at
-    0.5154 — indistinguishable from a rolling file.)
+    Does NOT use `normalize_text`: stripping punctuation merges bigrams that
+    differ only by a comma or danda and pushes every file's ratio up, which
+    moves the two populations closer together. NFC + casefold + whitespace
+    only.
     """
     flat = unicodedata.normalize("NFC", transcript_text(parse_vtt(path))).casefold()
     toks = flat.split()
@@ -332,9 +314,7 @@ def rolling_duplication_ratio(path: Path) -> float:
 def load_transcript(path: Path) -> List[Cue]:
     """Parse a VTT/SRT, or wrap a plain `.txt` transcript as a single cue.
 
-    `.txt` lets a user score against a hand-cleaned reference that has no
-    timing information — handy when the only ground truth is a published
-    script, not the broadcast captions.
+    `.txt` covers a hand-cleaned reference with no timing information.
     """
     ext = Path(path).suffix.lower()
     if ext == ".vtt":
@@ -358,23 +338,19 @@ def transcript_text(cues: List[Cue]) -> str:
 
 _WS = re.compile(r"\s+")
 
-# Per-codepoint verdict cache for `_strip_punct` — characters repeat heavily
-# inside a transcript, so this makes the character walk effectively a lookup.
+# Per-codepoint verdict cache for `_strip_punct`; characters repeat heavily
+# in a transcript, so the walk is effectively a lookup.
 _PUNCT_CACHE: Dict[int, str] = {}
 
 
 def _strip_punct(s: str) -> str:
     """Replace punctuation and symbols with a space, keeping combining marks.
 
-    The obvious `re.sub(r"[^\\w\\s]", " ", s)` is wrong for every Indic
-    script: Python's `\\w` is letters + digits + underscore, and *excludes*
-    Unicode categories Mn/Mc/Me, so it deletes every matra, nukta, anusvara
-    and virama. "गुणवत्ता वाली छवियां" came out as "ग णवत त व ल छव य" — eight
-    real words shattered into bare consonants — which silently poisoned every
-    WER / CER / BLEU / chrF / ROUGE / METEOR number this module reports for
-    Hindi, Bengali, Tamil and the rest. Classify by Unicode category instead
-    so marks stay attached to their base character. For Latin / ASCII input
-    this is identical to the old regex.
+    Do not use `re.sub(r"[^\\w\\s]", " ", s)`: `\\w` excludes Unicode
+    categories Mn/Mc/Me, so it deletes every matra, nukta, anusvara and
+    virama and shatters Indic words into bare consonants. Classifying by
+    Unicode category keeps marks attached to their base character, and is
+    identical to the regex for Latin/ASCII input.
     """
     cache = _PUNCT_CACHE
     out: List[str] = []
@@ -383,7 +359,7 @@ def _strip_punct(s: str) -> str:
         r = cache.get(o)
         if r is None:
             # L* letters, N* numbers, M* combining marks, plus `_` and
-            # whitespace are exactly what `\w`/`\s` kept, minus the M* bug.
+            # whitespace -- what `\w`/`\s` kept, minus the dropped M*.
             keep = unicodedata.category(ch)[0] in "LNM" or ch.isspace() or ch == "_"
             r = cache[o] = ch if keep else " "
         out.append(r)
@@ -393,9 +369,8 @@ def _strip_punct(s: str) -> str:
 def normalize_text(s: str) -> str:
     """Casefold, strip punctuation, collapse whitespace, NFC-normalize.
 
-    Keeps the comparison fair across ASR engines that may or may not emit
-    punctuation / capitalization. Does NOT strip filler words — those are
-    real tokens the ASR either heard or missed.
+    Levels ASR engines that differ on punctuation and capitalization. Filler
+    words are NOT stripped -- they are tokens the ASR either heard or missed.
     """
     s = unicodedata.normalize("NFC", s)
     s = s.casefold()
@@ -405,13 +380,10 @@ def normalize_text(s: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Metric wrappers — thin shims around the canonical library implementations
+# Metric wrappers
 # ---------------------------------------------------------------------------
-#
-# We delegate to the reference packages (jiwer, sacrebleu, rouge_score, nltk)
-# so the numbers we print match what every other benchmark tool prints for
-# the same inputs. No arithmetic lives in this module — only the normalisation
-# of library return types into a flat `dict` we can serialise to JSON.
+# Thin shims over jiwer, sacrebleu, rouge_score and nltk. No arithmetic here --
+# only flattening their return types into a JSON-serialisable dict.
 
 def _require(pkg: str, pip_name: Optional[str] = None):
     """Import `pkg` or raise an ImportError that names the pip package."""
@@ -462,11 +434,10 @@ def cer(reference: str, hypothesis: str) -> Dict[str, Any]:
 def bleu(reference: str, hypothesis: str, *, normalize: bool = True) -> Dict[str, Any]:
     """Corpus BLEU via `sacrebleu.corpus_bleu`.
 
-    With `normalize=True` (the historical default) the text is casefolded and
-    stripped of all punctuation — including the Devanagari danda — *before*
-    sacrebleu applies its own `13a` tokenizer, so the reported signature does
-    not describe the input and the score is not comparable with published
-    WMT BLEU. Pass `normalize=False` for the real, citable number.
+    `normalize=True` casefolds and strips punctuation (the Devanagari danda
+    included) before sacrebleu's own `13a` tokenizer runs, so the reported
+    signature does not describe the input and the score is not comparable
+    with published WMT BLEU. Pass `normalize=False` for a citable number.
     """
     sacrebleu = _require("sacrebleu")
     ref = normalize_text(reference) if normalize else reference
@@ -484,11 +455,11 @@ def bleu(reference: str, hypothesis: str, *, normalize: bool = True) -> Dict[str
 
 
 def chrf(reference: str, hypothesis: str, *, normalize: bool = True) -> Dict[str, Any]:
-    """chrF2 via `sacrebleu.corpus_chrf` — char 6-grams, beta=2, NO word order.
+    """chrF2 via `sacrebleu.corpus_chrf`: char 6-grams, beta=2, no word order.
 
-    This is chrF, *not* chrF++: `word_order` stays at sacrebleu's default of 0.
-    Use `chrf_pp` for chrF++. As with `bleu`, `normalize=True` mangles the text
-    before sacrebleu sees it; pass `normalize=False` for a citable score.
+    chrF, not chrF++ -- `word_order` stays at sacrebleu's default 0; use
+    `chrf_pp` for chrF++. As with `bleu`, pass `normalize=False` for a
+    citable score.
     """
     sacrebleu = _require("sacrebleu")
     ref = normalize_text(reference) if normalize else reference
@@ -504,9 +475,9 @@ def chrf(reference: str, hypothesis: str, *, normalize: bool = True) -> Dict[str
 def chrf_pp(reference: str, hypothesis: str) -> Dict[str, Any]:
     """chrF++ on RAW text: char 6-grams + word 2-grams, beta=2.
 
-    `word_order=2` is what makes it chrF++ rather than chrF2, and the text is
-    passed through untouched — chrF++ is defined over the surface string, so
-    pre-stripping punctuation (the danda, in Hindi) changes the metric.
+    `word_order=2` makes it chrF++ rather than chrF2. The text is passed
+    through untouched: chrF++ is defined over the surface string, so
+    pre-stripping punctuation changes the metric.
     """
     sacrebleu = _require("sacrebleu")
     s = sacrebleu.corpus_chrf(
@@ -523,8 +494,8 @@ def chrf_pp(reference: str, hypothesis: str) -> Dict[str, Any]:
 def chrf_pp_segments(refs: List[str], hyps: List[str]) -> Dict[str, Any]:
     """Per-segment chrF++ plus the corpus score over the same pairs.
 
-    The corpus score is recomputed by sacrebleu over all segments at once —
-    it is not the mean of the per-segment scores, and the two differ.
+    The corpus score is recomputed over all segments at once; it is not the
+    mean of the per-segment scores, and the two differ.
     """
     if len(refs) != len(hyps):
         raise ValueError(
@@ -549,13 +520,10 @@ def chrf_pp_segments(refs: List[str], hyps: List[str]) -> Dict[str, Any]:
 def _rouge_scorer():
     """Lazily build (and cache) the google rouge-score scorer.
 
-    rouge-score's built-in tokenizer is `re.sub(r"[^a-z0-9]+", " ", text)`,
-    i.e. ASCII-only: it deletes every Devanagari, Bengali and Tamil
-    character outright, so ROUGE over an Indic pair was scored on nothing
-    but the embedded English loanwords and digits (and returned a flat 0.0
-    for text with none). We hand it a Unicode-aware tokenizer built on
-    `normalize_text` instead. On ASCII input the two agree exactly — the
-    default also folds case, splits on `_` and drops punctuation.
+    rouge-score's own tokenizer is `re.sub(r"[^a-z0-9]+", " ", text)`, which
+    deletes every Indic character and scores an Indic pair on its English
+    loanwords alone. Pass a Unicode-aware tokenizer built on `normalize_text`
+    instead; the two agree exactly on ASCII input.
     """
     global _ROUGE
     try:
@@ -610,9 +578,8 @@ def _ensure_nltk_data() -> None:
 def meteor(reference: str, hypothesis: str) -> Dict[str, Any]:
     """METEOR via `nltk.translate.meteor_score.single_meteor_score`.
 
-    Uses NLTK's default alignment stages (exact → stem → synonym via WordNet),
-    which is the reference implementation. First call auto-downloads the
-    WordNet / OMW corpora NLTK needs — a few MB, cached under NLTK_DATA.
+    NLTK's default alignment stages (exact -> stem -> WordNet synonym). The
+    first call downloads the WordNet/OMW corpora into NLTK_DATA.
     """
     _ensure_nltk_data()
     from nltk.translate.meteor_score import single_meteor_score  # noqa: WPS433
@@ -642,9 +609,8 @@ def _read_mt_text(mt_json: Path) -> str:
     segs = payload.get("segments") or []
     out: List[str] = []
     for s in segs:
-        # Mirror what tts.py / duration.py actually speak: duration-aware
-        # translation rewrites only `final_text`, so scoring `mt_text` would
-        # measure a string that never reached the dub.
+        # Score what is actually spoken: duration-aware translation rewrites
+        # only `final_text`, so `mt_text` may never have reached the dub.
         t = s.get("final_text") or s.get("mt_text") or ""
         if t:
             out.append(t.strip())
@@ -673,11 +639,9 @@ def evaluate_asr(
 ) -> Dict[str, Any]:
     """Score an ASR JSON against a ground-truth transcript (VTT/SRT/TXT).
 
-    Reports WER + CER (canonical ASR metrics) plus BLEU / ROUGE / METEOR so
-    the same number set is directly comparable with the MT report. Those
-    overlap scores penalise swapped word order that WER already catches, but
-    they stay useful when the ASR output is paraphrastic (e.g. Whisper's
-    punctuation-rewritten long-form transcripts).
+    Reports WER + CER plus BLEU / ROUGE / METEOR, so the number set matches
+    the MT report. The overlap scores double-count word-order errors WER
+    already catches, but stay useful on paraphrastic ASR output.
     """
     cues = load_transcript(transcript_path)
     ref = transcript_text(cues)
@@ -704,9 +668,9 @@ def evaluate_mt(
 ) -> Dict[str, Any]:
     """Score a merged MT JSON against a dubbed-language transcript.
 
-    Reports BLEU / chrF / ROUGE-{1,2,L} / METEOR. BLEU alone is a weak signal
-    for Indic targets (sparse n-gram overlap under morphology); chrF and
-    METEOR give a more honest picture, and ROUGE-L exposes long-range order.
+    Reports BLEU / chrF / ROUGE-{1,2,L} / METEOR. BLEU is weak on Indic
+    targets (sparse n-gram overlap under morphology); chrF and METEOR read
+    better, and ROUGE-L exposes long-range order.
     """
     cues = load_transcript(transcript_path)
     ref = transcript_text(cues)

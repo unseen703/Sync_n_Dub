@@ -25,8 +25,7 @@ arms stay reachable directly.
 `clip_source` picks which per-segment file to place. The TTS stage writes
 two: `tts_raw_audio` is the unstretched synth output, `tts_audio` is the
 WSOLA-stretched clip. Mixing `tts_audio` under `global_tempo` stretches a
-second time on top of the first, so the choice is explicit. `vc_audio` is
-derived from the stretched clip and inherits its timing.
+second time on top of the first, so the choice is explicit.
 
 Nothing is written outside `out_dir`. A missing M&E stem (`--skip-stems`)
 still produces a dialogue-only mix, with a warning; segments with no
@@ -77,7 +76,7 @@ class MixResult:
 
 STRATEGIES = ("global_tempo", "no_tempo", "timing_plan")
 
-CLIP_SOURCES = ("auto", "raw", "stretched", "vc", "warped")
+CLIP_SOURCES = ("auto", "raw", "stretched", "warped")
 
 # One ffmpeg `-i` per piece, so argv and the filter graph both grow with the
 # piece count. Past a few hundred the failure is an opaque OS
@@ -97,7 +96,6 @@ _TEMPO_EPS = 1e-3
 _CLIP_FIELDS = {
     "raw": "tts_raw_audio",
     "stretched": "tts_audio",
-    "vc": "vc_audio",
     # Written by the `warped` producer: already at its planned length, with
     # the rate varying INSIDE the file. Every Piece over one of these carries
     # `local_tempo = 1.0`, so the mix is pure placement.
@@ -106,7 +104,7 @@ _CLIP_FIELDS = {
 
 # Any field that counts as "this segment was synthesised", so a genuinely
 # empty segment can be told from one missing only the requested variant.
-_ALL_CLIP_FIELDS = ("vc_audio", "tts_audio", "tts_raw_audio", "tts_warped_audio")
+_ALL_CLIP_FIELDS = ("tts_audio", "tts_raw_audio", "tts_warped_audio")
 
 
 def _resolve_clip(seg: dict, clip_source: str) -> tuple[Optional[str], Optional[str]]:
@@ -118,8 +116,6 @@ def _resolve_clip(seg: dict, clip_source: str) -> tuple[Optional[str], Optional[
     to `tts_audio` hides a double stretch.
     """
     if clip_source == "auto":
-        if seg.get("vc_audio"):
-            return "vc_audio", seg["vc_audio"]
         if seg.get("tts_audio"):
             return "tts_audio", seg["tts_audio"]
         return None, None
@@ -302,14 +298,13 @@ def mix_dubbed_audio(
         ``atempo`` is applied.
 
     `clip_source` picks which per-segment clip to place:
-      * ``auto`` (default) — ``vc_audio`` when present, else ``tts_audio``;
-        under ``timing_plan`` it resolves to ``raw`` instead (see below).
-        Kept bit-for-bit compatible with pre-``clip_source`` callers.
+      * ``auto`` (default) — ``tts_audio``; under ``timing_plan`` it
+        resolves to ``raw`` instead (see below). Kept bit-for-bit compatible
+        with pre-``clip_source`` callers.
       * ``raw`` — ``tts_raw_audio``, the unstretched synth output. Use this
         with ``global_tempo`` to avoid stretching twice.
       * ``stretched`` — ``tts_audio`` (already WSOLA-stretched by the TTS
         stage).
-      * ``vc`` — ``vc_audio``.
 
     `stretch_backend` is the ffmpeg filter used for every ``local_tempo``
     under ``timing_plan`` (``rubberband``, ``ffmpeg_atempo`` or ``auto``);

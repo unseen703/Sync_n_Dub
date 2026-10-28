@@ -1,14 +1,11 @@
 """MuseTalk 1.5 adapter (TMElyralab/MuseTalk).
 
-MuseTalk is latent-space inpainting (not diffusion): frozen VAE +
-Whisper-tiny audio encoder + SD-style UNet with cross-attention. 256x256
-face region, 30fps+ on a V100 — the fast option for development runs.
-Weights are MIT-licensed and marked commercial-OK by the authors.
+Latent-space inpainting, not diffusion: frozen VAE + Whisper-tiny audio
+encoder + SD-style UNet, rebuilding a 256x256 face region. MIT weights.
 
-The upstream repo exposes `scripts/inference.py` which takes a tiny YAML
-listing (video, audio) pairs. The adapter writes a one-entry YAML on the
-fly, shells out to the script, and copies the result to the requested
-output path.
+Upstream's `scripts/inference.py` takes a YAML listing (video, audio) pairs,
+so the adapter writes a one-entry YAML, shells out, and copies the result to
+the requested output path.
 
 Env:
   MUSETALK_REPO       (default: models/lipsync/vendor/musetalk,
@@ -41,53 +38,33 @@ log = logging.getLogger(__name__)
 
 DEFAULT_REPO = "third_party/MuseTalk"
 
-#: Tallest frame handed to MuseTalk. Above this the input is downscaled
-#: first, keeping aspect ratio. Default 1080 since 2026-10-20, by request.
+#: Tallest frame handed to MuseTalk; taller input is downscaled first,
+#: keeping aspect ratio. A larger source is rendered at 1080p, and that is
+#: logged. Three reasons, all measured on this host:
 #:
-#: Three separate reasons, all measured on this host rather than assumed:
-#:
-#: 1. **RAM.** `scripts/inference.py` extracts every frame to PNG and then
-#:    `read_imgs()` loads ALL of them back into a Python list, so resident
-#:    memory is frames x width x height x 3. Measured slope at 1080p is
-#:    6.14 MiB/frame against a 5.93 MiB theoretical frame -- i.e. one full
-#:    uint8 frame retained per source frame, nothing else. Cost is linear
-#:    in PIXELS, so 4K is 4x: a 60 s 4K clip measured 36.29 GiB RSS, and
-#:    this host has 62 GiB total.
-#: 2. **S3FD gives up on a large frame.** At 3840x2160 it returned `[None]`
-#:    -- no detection at all -- and with zero detections
-#:    `preprocessing.py:135` divides by zero inside a *print statement*,
-#:    after the model has loaded. `ui/talking_head.py` already caps stills
-#:    at `MAX_EDGE = 1280` for exactly this.
-#: 3. **It costs nothing visible.** MuseTalk rebuilds the mouth at 256x256
-#:    whatever the frame size, so above ~1080p the extra pixels are carried
-#:    through the whole pipeline and then thrown at a 256x256 crop.
-#:
-#: The output is then 1080p where the source was larger, which is a real
-#: change and is logged rather than left to be discovered.
+#: 1. RAM. `read_imgs()` holds every extracted frame in a Python list, so RSS
+#:    is linear in pixels -- ~6.1 MiB/frame at 1080p, 4x that at 4K. A 60 s
+#:    4K clip measured 36.3 GiB on a 62 GiB host.
+#: 2. S3FD returns `[None]` at 3840x2160, and zero detections make
+#:    `preprocessing.py:135` divide by zero inside a print, after the model
+#:    has loaded.
+#: 3. No visible cost: the mouth is rebuilt at 256x256 whatever the frame
+#:    size, so the extra pixels are carried through and then discarded.
 MAX_RENDER_HEIGHT = 1080
 
 
 def _rescale_boxes(boxes, scale):
     """Move a supplied `coord_list` into the RENDERED frame's coordinates.
 
-    `backend.lipsync_targets.build_coord_list` reads the SOURCE video, so its
-    boxes are clamped to the source frame -- 3840x2160 on the IIT lecture.
-    `_cap_resolution` then hands MuseTalk a 1920x1080 re-encode, and
-    `scripts/inference.py` slices `frame[y1:y2, x1:x2]` with whatever it was
-    given. A 4K box on a 1080p frame slices past the bottom edge, numpy
-    returns a 0-row array, and `cv2.resize` raises
-    `(-215:Assertion failed) !ssize.empty()` -- *after* the model has loaded
-    and the frames have been extracted. Measured: 87 s to fail.
+    `build_coord_list` reads the SOURCE video, but `_cap_resolution` may hand
+    MuseTalk a smaller re-encode. An oversized box slices past the frame
+    edge, numpy returns a 0-row array and `cv2.resize` raises -- after the
+    model has loaded. The adapter owns the conversion because it is the layer
+    that changed the frame size.
 
-    So the adapter owns this conversion, because the adapter is the layer
-    that changed the frame size. The alternative -- having the caller build
-    the list against the downscaled file -- would mean every caller
-    re-deriving a cap that lives here.
-
-    `PLACEHOLDER` is matched BEFORE scaling and passed through untouched:
-    it is MuseTalk's `coord_placeholder` sentinel meaning "write this frame
-    unchanged", not a box at the origin, and it has to stay bit-identical to
-    be recognised.
+    `PLACEHOLDER` is matched before scaling and passed through bit-identical:
+    it is MuseTalk's "write this frame unchanged" sentinel, not a box at the
+    origin.
     """
     sx, sy = scale
     if (sx, sy) == (1.0, 1.0):
@@ -115,41 +92,27 @@ class MuseTalkSync(BaseLipSync):
         checkpoint: Optional[str] = None,
         python_bin: Optional[str] = None,
         version: Optional[str] = None,
-        # 8, not upstream's 20. Lowered from 10 on 2026-10-20 by request.
-        # Measured on this host: batch 20 peaked 15058 MiB of 16311 (1230
-        # spare) and batch 15 peaked 14654 (1657 spare) -- both close enough
-        # to the ceiling that a second tenant OOMs the render, which MuseTalk
-        # swallows and reports only as "produced no mp4". This box IS shared:
-        # another account held 4.2 GiB on gpu0 for hours on 2026-10-20 and
-        # refused 30 of 32 segment renders. A smaller batch is the margin.
-        #
-        # Batch size is a throughput/VRAM knob and costs NO quality:
-        # `datagen` is a pure chunker, each frame pairs with its own latent
-        # by frame index, and the loop is `@torch.no_grad()` with the models
-        # in `.eval()`. It also does not change the floor -- the ~9 GiB of
-        # weights and the per-frame latent store dominate -- so this buys
-        # headroom, not a different memory curve.
+        # 8, not upstream's 20. On this 16311 MiB card batch 20 peaks at
+        # 15058 MiB and batch 15 at 14654, leaving too little for a second
+        # tenant; an OOM here surfaces only as "produced no mp4".
+        # Batch size is pure throughput/VRAM and costs no quality -- `datagen`
+        # is a chunker and each frame pairs with its own latent by index.
         batch_size: int = 8,
         fps: int = 25,
         bbox_shift: int = 0,
         use_float16: bool = False,
         # Copy MuseTalk's scratch dir out before the TemporaryDirectory is
-        # destroyed. It holds `<task>.pkl` (the per-frame coord list, where
-        # `(0.0,0.0,0.0,0.0)` marks a frame with no detected face) and, when
-        # upstream has not yet deleted them, the composited PNGs. Without
-        # this there is no way after the fact to say WHICH frames had no
-        # face -- only that the count was wrong.
+        # destroyed. It holds `<task>.pkl`, the per-frame coord list where
+        # `(0,0,0,0)` marks a frame with no detected face -- the only record
+        # of WHICH frames were missed rather than just how many.
         keep_work_dir: bool = False,
-        # Reuse per-frame face boxes across runs. MuseTalk supports this
-        # natively (`--use_saved_coord` / `--saved_coord`) but writes the
-        # pickle to `<result_dir>/../<basename>.pkl`, which for us is inside
-        # a TemporaryDirectory and dies with it -- so the feature has never
-        # actually done anything here. We stage a cached pickle in before
-        # the run and copy the fresh one out after.
+        # Reuse per-frame face boxes across runs. MuseTalk's own
+        # `--use_saved_coord` writes its pickle to
+        # `<result_dir>/../<basename>.pkl`, inside our TemporaryDirectory, so
+        # it never survives. Stage a cached pickle in, copy the fresh one out.
         use_coord_cache: bool = True,
-        # Downscale anything taller than this before rendering. See
-        # MAX_RENDER_HEIGHT. 0 disables the cap for a caller who really
-        # wants the source resolution and has the RAM for it.
+        # Downscale anything taller than this before rendering; 0 disables
+        # the cap. See MAX_RENDER_HEIGHT.
         max_height: int = MAX_RENDER_HEIGHT,
         cuda_device: Optional[int] = None,
     ):
@@ -163,16 +126,11 @@ class MuseTalkSync(BaseLipSync):
         self.fps = fps
         self.bbox_shift = bbox_shift
         self.max_height = int(max_height or 0)
-        # Upstream halves pe / vae.vae / unet.model, then derives
-        # `weight_dtype = unet.model.dtype` and casts whisper and every latent
-        # batch to match (scripts/inference.py:52-56, 76, 201) -- so the half
-        # path is internally consistent rather than a partial cast.
-        # `MUSETALK_FP16=1` is the only way to reach this from
-        # `backend/cli.py`, which has no --use-float16 flag — the driver
-        # script and the launcher do, the pipeline does not. Same shape as
-        # MUSETALK_REPO / MUSETALK_VERSION above. Worth reaching: measured
-        # on this host, fp16 is -13% wall and -25% peak VRAM with the face
-        # crop unchanged (34.45 vs 34.46 dB), per the `clip-run` skill.
+        # Upstream halves pe / vae.vae / unet.model and casts whisper and
+        # every latent batch to match, so the half path is consistent rather
+        # than a partial cast. `MUSETALK_FP16=1` is the only way in from
+        # `backend/cli.py`, which has no --use-float16 flag. Measured here:
+        # -13% wall, -25% peak VRAM, face crop unchanged (34.45 vs 34.46 dB).
         if not use_float16:
             use_float16 = (os.getenv("MUSETALK_FP16") or "").strip().lower() \
                 in ("1", "true", "yes", "on")
@@ -198,20 +156,15 @@ class MuseTalkSync(BaseLipSync):
                         ) -> Tuple[Path, Tuple[float, float]]:
         """Downscale to `self.max_height` if taller.
 
-        Returns `(what to render, (sx, sy))`, where the factors map SOURCE
-        pixel coordinates onto the rendered frame. They are `(1.0, 1.0)`
-        whenever nothing was rescaled, which includes every failure path.
-        Callers that hold coordinates in source space -- the supplied
-        `coord_list` -- must apply them; see `_rescale_boxes`.
+        Returns `(what to render, (sx, sy))`, the factors mapping source
+        pixel coordinates onto the rendered frame. `(1.0, 1.0)` whenever
+        nothing was rescaled, including every failure path; callers holding
+        source-space coordinates must apply them (see `_rescale_boxes`).
 
-        Returns the ORIGINAL path on any failure. A render at the source
-        resolution is the old behaviour and still works for anything that
-        fits; losing the whole job because a probe or a rescale failed
-        would be the worse trade.
-
-        Width is forced even (`-2`): H.264 4:2:0 cannot encode an odd
-        dimension, and 2160 -> 1080 on a 1920-wide source is fine but an
-        unusual aspect ratio lands on an odd width and ffmpeg refuses.
+        Returns the original path on any failure, so a probe or rescale
+        error degrades to a source-resolution render rather than losing the
+        job. Width is forced even (`-2`) because H.264 4:2:0 cannot encode
+        an odd dimension.
         """
         unscaled = (1.0, 1.0)
         if self.max_height <= 0:
@@ -257,10 +210,9 @@ class MuseTalkSync(BaseLipSync):
                         "source resolution", e)
             return video, unscaled
 
-        # The factors are measured off the ENCODED file rather than computed
-        # from `max_height`, because `-2` rounds the width to an even number:
-        # a 1998-wide source lands on 998, not 999, and a factor that assumed
-        # otherwise would drift the boxes sideways.
+        # Measure the factors off the ENCODED file, not from `max_height`:
+        # `-2` rounds width to even, so a computed factor drifts the boxes
+        # sideways on an odd-width source.
         try:
             r = subprocess.run(
                 [ffprobe, "-v", "error", "-select_streams", "v:0",
@@ -268,9 +220,9 @@ class MuseTalkSync(BaseLipSync):
                  str(scaled)], capture_output=True, text=True, timeout=60)
             nw, nh = (int(x) for x in r.stdout.strip().splitlines()[0].split(",")[:2])
         except Exception as e:                           # noqa: BLE001
-            # The file rendered, so keep it -- but a supplied coord list
-            # cannot be converted without the factor, and guessing it is how
-            # the 4K-boxes-on-a-1080p-frame crash happened. Refuse instead.
+            # Keep the rendered file, but refuse a supplied coord list: it
+            # cannot be converted without the factor, and a guessed one puts
+            # oversized boxes on a smaller frame.
             raise RuntimeError(
                 f"musetalk: downscaled {video.name} but could not probe the "
                 f"result to convert target boxes ({e})") from e
@@ -282,23 +234,17 @@ class MuseTalkSync(BaseLipSync):
     def sync_many(self, requests):
         """Render many (video, audio) pairs in ONE MuseTalk process.
 
-        MuseTalk's `scripts/inference.py` already loads the VAE, UNet, Whisper
-        and face parser ONCE (before the task loop) and then iterates every
-        task in its YAML -- its per-task `frame_list` is a local that is
-        released on the next iteration's reassignment, and it `rmtree`s the
-        per-task PNG dirs between tasks. So the only thing standing between us
-        and "load once, cycle frames" was that the adapter wrote a ONE-entry
-        YAML and spawned a fresh process per piece. Writing all the pieces
-        into one YAML keeps peak RAM a function of a single piece (the loop is
-        still sequential) while paying the ~9 GiB model load exactly once for
-        the whole batch. `backend.lipsync` hands one GPU's whole run of pieces
-        to one call for this reason.
+        `scripts/inference.py` loads the VAE, UNet, Whisper and face parser
+        once, then iterates every task in its YAML, releasing each task's
+        frames and PNG dir before the next. Writing all pieces into one YAML
+        therefore pays the ~9 GiB model load once while keeping peak RAM a
+        function of a single piece. `backend.lipsync` hands one GPU's whole
+        run of pieces to one call for this.
 
-        Each task carries its own downscale factor, its own staged coord
-        pickle, and its own output; a task that MuseTalk silently skips (it
-        wraps each in `try/except` and only prints) is detected by its missing
-        output and reported in that request's own result, not allowed to abort
-        the siblings.
+        Each task carries its own downscale factor, staged coord pickle and
+        output. MuseTalk wraps each task in `try/except` and only prints, so
+        a silently skipped task is detected by its missing output and
+        reported against that request alone.
         """
         if not requests:
             return []
@@ -309,7 +255,7 @@ class MuseTalkSync(BaseLipSync):
             result_dir = tdp / "results"
             result_dir.mkdir(exist_ok=True)
 
-            # One record per request, built before the YAML so every task's
+            # One record per request, built before the YAML so each task's
             # downscale and coord staging is settled up front.
             tasks = []
             any_staged = False           # at least one task has a pickle to load
@@ -320,23 +266,19 @@ class MuseTalkSync(BaseLipSync):
                 out.parent.mkdir(parents=True, exist_ok=True)
                 video_abs = Path(request.video).resolve()
                 audio_abs = Path(request.audio).resolve()
-                # BEFORE the coord-cache key is derived: a key on the 4K file
-                # would carry boxes in 4K coordinates into a 1080p render.
+                # Before the coord-cache key is derived: a key on the source
+                # file would carry source-sized boxes into a capped render.
                 video_abs, frame_scale = self._cap_resolution(video_abs, tdp)
 
                 coord_params = {"bbox_shift": self.bbox_shift,
                                 "version": self.version}
-                # An ASD-gated target list beats both detection and the cache.
-                # Built by `backend.lipsync_targets` from the tracks TalkNet
-                # confirmed speaking, so MuseTalk animates that face and writes
-                # every other frame through untouched; without it MuseTalk
-                # takes whatever S3FD returned first (`d = d[0]`).
+                # An ASD-gated target list beats both detection and the
+                # cache: MuseTalk otherwise animates whatever S3FD returned
+                # first (`d = d[0]`). See `backend.lipsync_targets`.
                 targets = (request.extra or {}).get("coord_list")
                 # MuseTalk names the pickle `basename.split('.')[0] + ".pkl"`
-                # (inference.py:234), truncating at the FIRST dot, and writes it
-                # to `<result_dir>/../<name>.pkl` i.e. here in `tdp`. Each
-                # piece's video has a distinct basename (part00, part01, ...),
-                # so the pickles do not collide across tasks.
+                # (inference.py:234), truncating at the first dot, into `tdp`.
+                # Piece basenames (part00, part01, ...) keep them distinct.
                 staged = tdp / (video_abs.name.split(".")[0] + ".pkl")
                 if targets:
                     targets = _rescale_boxes(targets, frame_scale)
@@ -357,8 +299,8 @@ class MuseTalkSync(BaseLipSync):
                         staged.write_bytes(pickle.dumps(cached))
                         any_staged = True
 
-                # A unique YAML key AND a unique result_name per task, so the
-                # shared `temp_dir` cannot have two tasks write the same file.
+                # Unique YAML key and result_name per task, so two tasks
+                # cannot write the same file in the shared `temp_dir`.
                 key = f"t{idx:03d}_{out.stem}"
                 result_name = f"{key}.mp4"
                 yaml_lines.append(
@@ -389,34 +331,30 @@ class MuseTalkSync(BaseLipSync):
             if any_staged:
                 cmd.append("--use_saved_coord")
             if want_saved:
-                # Keeps every task's pickle so a freshly-detected one can be
-                # copied into the cache below; without it inference.py deletes
-                # them on the way out.
+                # Keep every task's pickle for the cache below; inference.py
+                # deletes them on the way out otherwise.
                 cmd.append("--saved_coord")
 
             log.info("musetalk[gpu=%s]: %d task(s): %s",
                      self.cuda_device, len(tasks), " ".join(cmd))
             env = dict(self._subprocess_env())
-            # Lazy decode saves ~17 GiB RSS on a 2-min 1080p clip at identical
-            # wall time with bit-identical output -- but ONLY on the
-            # --use_saved_coord branch (vendor/musetalk/scripts/inference.py:286).
-            # The cold branch calls get_landmark_and_bbox, which loads every
-            # frame anyway. An operator-set value wins; see
-            # scripts/ab_lazy_frames.py.
+            # Lazy decode saves ~17 GiB RSS on a 2-min 1080p clip at the same
+            # wall time and bit-identical output, but only on the
+            # --use_saved_coord branch (inference.py:286) -- the cold branch
+            # calls get_landmark_and_bbox and loads every frame anyway. An
+            # operator-set value wins.
             if "--use_saved_coord" in cmd and "MUSETALK_LAZY_FRAMES" not in env:
                 env["MUSETALK_LAZY_FRAMES"] = "1"
-            # Stream live: MuseTalk prints `Results saved to <file>` as each
-            # task finishes, so forwarding those lines puts per-piece progress
-            # in run.log instead of one silent block until the batch is done.
+            # Stream live: MuseTalk prints `Results saved to <file>` per
+            # task, so forwarding gives per-piece progress in run.log.
             proc = run_streaming(
                 cmd, cwd=str(self.repo_path), env=env, log=log,
                 tag=f"musetalk[gpu={self.cuda_device}]",
                 progress_prefixes=("Results saved to", "[memguard]",
                                    "Error occurred during processing"))
 
-            # A non-zero exit is the WHOLE batch failing (an import error, a
-            # dead interpreter) -- the model load is shared, so it takes every
-            # task with it. Report the same error against each request.
+            # A non-zero exit means the whole batch failed -- the model load
+            # is shared -- so report the same error against every request.
             if proc.returncode != 0:
                 err = f"musetalk rc={proc.returncode}: {proc.stdout.strip()[-3000:]}"
                 return [LipSyncResult(model_name=f"musetalk-{self.version}",
@@ -434,11 +372,10 @@ class MuseTalkSync(BaseLipSync):
                 out = t["out"]
                 produced = temp_dir / t["result_name"]
                 if not produced.is_file():
-                    # rc == 0 and no file for THIS task: MuseTalk wraps each
-                    # task in `try/except Exception` and only PRINTS
-                    # ("Error occurred during processing:"), so a crash on one
-                    # task still exits 0 and the siblings carry on. Attribute
-                    # the swallowed message to the task that lost its output.
+                    # rc == 0 with no file for THIS task: MuseTalk catches
+                    # per-task exceptions and only prints them, so a crash
+                    # still exits 0. Attribute the printed message to the
+                    # task that lost its output.
                     detail = (swallowed[0] if swallowed
                               else " | ".join(tail[-5:]) or "no output captured")
                     results.append(LipSyncResult(
@@ -484,11 +421,9 @@ class MuseTalkSync(BaseLipSync):
 def _nb_frames(path: Path) -> Optional[int]:
     """Frame count from container metadata. None when it is not recorded.
 
-    Deliberately NOT `-count_frames`: that decodes the whole file, and these
-    inputs are hundreds of megabytes -- paying a full decode to validate a
-    cache would undo the saving the cache exists for. Our cuts are re-encoded
-    by ffmpeg and do carry `nb_frames`; when a file does not, validation is
-    skipped rather than guessed.
+    Not `-count_frames`: a full decode of these inputs would cost more than
+    the cache it validates saves. ffmpeg-re-encoded cuts carry `nb_frames`;
+    when a file does not, validation is skipped rather than guessed.
     """
     from backend.media_io import _ffprobe_bin
     ffprobe = _ffprobe_bin()

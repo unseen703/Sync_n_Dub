@@ -1,13 +1,15 @@
 """Does the speaker table know who got which voice?
 
-The hard case is the DEFAULT one. Stage 9d writes
-`voices/<stem>.<engine>.voices.json` only inside `if voice_engine:`; the Edge
-and IndicF5 path takes the `else` branch and persists nothing at all. There
-are zero `*.voices.json` files under `data/` right now, so a table that only
-read that file would be empty on every job that exists.
+The hard case is the legacy one. Stage 9d writes
+`voices/<stem>.<engine>.voices.json` only inside `if voice_engine:`; a job
+with no voice catalog takes the `else` branch and persists nothing at all.
+That was the Edge and IndicF5 path, and both are gone — but the jobs they
+wrote are still on disk, and there are zero `*.voices.json` files under
+`data/` right now, so a table that only read that file would be empty on
+every job that exists.
 
 `_replay_else_branch` reproduces that branch exactly rather than guessing.
-Since Edge was removed the pipeline does:
+The pipeline does:
 
     for spk in sorted(speaker_refs):
         speaker_voice_map[spk] = {..., "voice": None, ...}

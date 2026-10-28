@@ -182,9 +182,9 @@ def detect_pauses(
     """
     out = ClipPauses(duration_s=float(duration_s or 0.0), backend=backend)
     try:
-        from .eval.reference import vad as _vad
+        from .vad import vad as _vad
     except Exception as e:                                   # noqa: BLE001
-        out.error = f"backend.eval.reference unavailable: {type(e).__name__}: {e}"
+        out.error = f"backend.vad unavailable: {type(e).__name__}: {e}"
         return out
 
     try:

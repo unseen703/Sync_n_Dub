@@ -95,7 +95,9 @@ if [ "$SKIP_ENVS" -eq 0 ]; then
   if env_exists restore; then
     say "restore: env already exists, skipping creation"
   elif env_exists wav2liphd; then
-    say "restore: found as 'wav2liphd' (the name this host used), leaving it"
+    say "restore: found under the former name 'wav2liphd'. Rename it with"
+    say "  conda rename -n wav2liphd restore   (the adapter accepts either,"
+    say "  but warns on the old one)"
   else
     say "restore: cloning dubbing (see envs/restore.yml for why -- a smaller"
     say "  install that adds the 4 packages straight into dubbing instead"

@@ -17,7 +17,7 @@
         ▼   backend.faces.detect_and_track (RetinaFace|MediaPipe + ByteTrack)
     FaceTracks
         │
-        ▼   backend.asd.score_asd + assign_faces_to_turns (TalkNet|TS-TalkNet + Hungarian)
+        ▼   backend.asd.score_asd + assign_faces_to_turns (LoCoNet + Hungarian)
     SegmentAssignment[]
         │
         ▼   backend.asr.transcribe (Bodhan|WhisperX|IndicConformer)
@@ -26,7 +26,7 @@
         ▼   backend.align.align_asr (MMS-FA|WhisperX)   — word boundaries
     ASRResult with words[]
         │
-        ▼   backend.translate.translate_asr (Bodhan|NLLB)
+        ▼   backend.translate.translate_asr (Bodhan)
     MTResult (per-segment target-language text)
 
 Each post-diarization stage is behind a flag; the baseline pipeline still
@@ -66,7 +66,6 @@ from .stem_separation import separate_stems
 from .transcripts import evaluate_asr, evaluate_mt, write_report
 from .translate import translate_asr, write_mt_outputs
 from .tts import synthesize_segments
-from .voice_convert import convert_segments
 from .gender import predict_genders
 from .voices import (
     assign_voices,
@@ -151,11 +150,6 @@ class PipelineResult:
     tts_out_dir: Optional[Path] = None
     tts_budget_violations: int = 0
     tts_errors: int = 0
-
-    # Voice conversion (plan §8 / E14).
-    vc_model: Optional[str] = None
-    vc_out_dir: Optional[Path] = None
-    vc_errors: int = 0
 
     # Timing plan.
     timing_producer: Optional[str] = None
@@ -259,8 +253,6 @@ class PostMTResult:
     tts_out_dir: Optional[Path] = None
     tts_errors: int = 0
     tts_budget_violations: int = 0
-    vc_model: Optional[str] = None
-    vc_out_dir: Optional[Path] = None
     mix_wav: Optional[Path] = None
     mix_mp4: Optional[Path] = None
     lipsync_mp4: Optional[Path] = None
@@ -272,7 +264,6 @@ class PostMTResult:
     voice_engine: Optional[str] = None
     voice_assignments_json: Optional[Path] = None
     speaker_references_dir: Optional[Path] = None
-    vc_errors: int = 0
     lipsync_model: Optional[str] = None
     # Timing plan (stage 9f2). Deliberately NOT mirrored onto `PipelineResult`:
     # that dataclass is serialised verbatim into `pipeline.json`, and adding a
@@ -287,32 +278,30 @@ class PostMTResult:
 
 
 #: TTS engines that read from a stock voice catalog rather than cloning the
-#: source speaker. These are the ones stage 9d can actually cast.
+#: source speaker. Since IndicF5 was removed on 2026-10-28 that is every
+#: engine there is, so `voice_engine` is no longer a choice — it is the
+#: catalog name stage 9d casts from, derived from `--tts`.
 _CATALOG_ENGINES = {"bodhan": "indic-speak"}
 
 
 def _default_voice_engine(voice_engine: Optional[str],
                           tts_model: Optional[str]) -> Optional[str]:
-    """Give a stock-voice engine its catalog even when nobody asked.
+    """The voice catalog stage 9d casts from, or None when TTS is skipped.
 
-    `--voice-engine` and `--tts` are separate flags, and the gap between
-    them was a silent wrong output: `--tts bodhan` on its own skipped stage
-    9d's casting entirely, every speaker got `voice=None`, and
+    `--voice-engine` was a separate flag until 2026-10-28, and the gap
+    between it and `--tts` was a silent wrong output: `--tts bodhan` on its
+    own skipped 9d's casting entirely, every speaker got `voice=None`, and
     `bodhan_adapter._post_one` substituted its hardcoded `"voice": voice or
     "Amit"` — one Hindi male voice reading every line of every speaker, with
     the predicted genders computed and discarded. Nothing errored.
 
-    There is no reason to run a catalog engine without its catalog, so the
-    pairing is now implied. Passing `--voice-engine` explicitly still wins.
+    `voice_engine` is still a parameter because every `request.json` on disk
+    carries the key and the edit agent replays from it; an explicit value
+    still wins. Nothing offers a choice any more.
     """
     if voice_engine:
         return voice_engine
-    implied = _CATALOG_ENGINES.get((tts_model or "").lower())
-    if implied:
-        log.info("voices: --tts %s implies --voice-engine %s; casting from "
-                 "the catalog rather than leaving every speaker on the "
-                 "adapter's single default voice", tts_model, implied)
-    return implied
+    return _CATALOG_ENGINES.get((tts_model or "").lower())
 
 
 def _speaker_face_tracks(out_root: Path, video: Path) -> Dict[str, tuple]:
@@ -352,7 +341,7 @@ COORD_LIST_MODELS = ("musetalk",)
 #: Lip-sync models that honour a per-frame targets .npz (106 landmarks per
 #: frame). LatentSync's `lipsync_pipeline` reads the file and skips its own
 #: InsightFace pass for every frame that carries landmarks.
-TARGETS_NPZ_MODELS = ("latentsync", "latentsync15")
+TARGETS_NPZ_MODELS = ("latentsync15",)
 
 
 def _asd_coord_list(out_root: Path, video: Path, model: str, *,
@@ -782,8 +771,6 @@ def run_post_mt_stages(
     tts_speed_bounds: Tuple[float, float] = (0.85, 1.15),
     tts_speed_tolerance: float = 0.05,
     tts_speed_max_rounds: int = 2,
-    # 9f voice conversion
-    vc_model: Optional[str] = None,
     # 9f1 post-TTS forced alignment (method M5). Fills `segments[].tts_words[]`
     # so the word-anchored (M4) and DP (M7) timing producers have real TTS word
     # boundaries to cut on instead of falling back to pause_aware.
@@ -845,7 +832,7 @@ def run_post_mt_stages(
     chain is to hand each one its own copy of the merged JSON and its own
     `out_root` — never to thread per-stage output paths through the chain.
 
-    All outputs land under `out_root/{voices,tts,vc,mix,lipsync}`. The
+    All outputs land under `out_root/{voices,tts,mix,lipsync}`. The
     pipeline passes the run's job folder, so these land in
     `data/jobs/<job_id>/…` alongside the earlier stages; a variant run gets
     its own `exp/<base>/<variant_tag>/` subtree instead.
@@ -874,10 +861,9 @@ def run_post_mt_stages(
     out_root = Path(out_root)
     voices_dir = out_root / "voices"
     tts_dir = out_root / "tts"
-    vc_dir = out_root / "vc"
     mix_dir = out_root / "mix"
     lipsync_dir = out_root / "lipsync"
-    for d in (voices_dir, tts_dir, vc_dir, mix_dir, lipsync_dir):
+    for d in (voices_dir, tts_dir, mix_dir, lipsync_dir):
         d.mkdir(parents=True, exist_ok=True)
 
     video = Path(source_video)
@@ -1006,7 +992,7 @@ def run_post_mt_stages(
     voice_engine = _default_voice_engine(voice_engine, tts_model)
     speaker_voice_map: Dict[str, dict] = {}
     speaker_refs: Dict[str, Path] = {}
-    if voice_engine or tts_model or vc_model:
+    if voice_engine or tts_model:
         log.info("=== stage 9d: speaker voice assignment ===")
         # Build a speakers[] list from the diarization turns.
         from collections import defaultdict
@@ -1129,21 +1115,17 @@ def run_post_mt_stages(
                     "style": tts_style,
                 }
         else:
-            # No stock-voice catalog in use. Since Edge was removed this is
-            # the CLONING path only — IndicF5 or a VC model — where the
-            # speaker's own reference clip carries the timbre and there is no
-            # voice name to assign. `voice=None` is the correct answer here,
-            # not a missing one.
-            #
-            # A stock-voice engine must never reach this branch: it would get
-            # `voice=None` for every speaker and the adapter would fall back
-            # to its own single default, reading the whole dub in one voice.
-            # That is what `--tts bodhan` without `--voice-engine` used to do
-            # — 45 voices in the catalog and `Amit` on every line — which is
-            # why `_default_voice_engine` above now resolves it.
+            # Reachable only when TTS is skipped but 9d was entered anyway,
+            # or when a legacy `request.json` names an engine with no
+            # catalog. `voice=None` lets the adapter fall back to its own
+            # default rather than failing the run; the cloning path this
+            # branch used to serve (IndicF5, VC) is gone.
+            log.warning("voices: no voice catalog for tts=%r; every speaker "
+                        "will read in the adapter's default voice",
+                        tts_model)
             for spk in sorted(speaker_refs):
                 speaker_voice_map[spk] = {
-                    "engine": tts_model or vc_model,
+                    "engine": tts_model,
                     "voice": None,
                     "reference_audio": str(speaker_refs[spk]),
                     "style": tts_style,
@@ -1163,11 +1145,11 @@ def run_post_mt_stages(
                      sid, before, merged.get("voice"))
 
         # Persist the map whatever branch produced it. The `voices.json`
-        # above is written ONLY when `voice_engine` is set; the Edge /
-        # IndicF5 path builds `speaker_voice_map` in memory and left no
-        # record at all, so nothing downstream could say which voice spoke
-        # for which speaker. A separate filename, so `voice_assignments_json`
-        # keeps its existing meaning and no manifest key changes.
+        # above is written ONLY when `voice_engine` is set; the catalog-less
+        # path builds `speaker_voice_map` in memory and leaves no record at
+        # all, so nothing downstream could say which voice spoke for which
+        # speaker. A separate filename, so `voice_assignments_json` keeps
+        # its existing meaning and no manifest key changes.
         # Gender is computed here from the reference clips and then used only
         # to pick a voice — it was never written down, so the UI could not
         # show it or offer same-gender voices without re-running the
@@ -1216,30 +1198,6 @@ def run_post_mt_stages(
             tts_meta = json.loads(mt_json.read_text()).get("extra", {}).get("tts", {})
             out.tts_budget_violations = int(tts_meta.get("budget_violations", 0))
             out.tts_errors = int(tts_meta.get("errors", 0))
-
-    # 9f. Voice conversion (plan §8 / E14) — chains after TTS.
-    if vc_model:
-        if not out.tts_model:
-            log.warning("VC requested but TTS was skipped; nothing to convert")
-        elif not speaker_refs:
-            log.warning("VC requested but no speaker references extracted")
-        else:
-            log.info("=== stage 9f: voice conversion (%s) ===", vc_model)
-            vc_out = vc_dir / f"{video.stem}.{vc_model}"
-            convert_segments(
-                mt_json,
-                vc_model=vc_model,
-                language=target_language,
-                reference_audio=speaker_refs,
-                out_dir=vc_out,
-                vc_kwargs=_pick(adapter_kwargs,
-                                   ("repo_path", "checkpoint_dir",
-                                    "language", "task")),
-            )
-            out.vc_model = vc_model
-            out.vc_out_dir = vc_out
-            vc_meta = json.loads(mt_json.read_text()).get("extra", {}).get("vc", {})
-            out.vc_errors = int(vc_meta.get("errors", 0))
 
     # 9f1. Post-TTS forced alignment (method M5). Fills `segments[].tts_words[]`
     #      -- CLIP-RELATIVE word boundaries measured on the RAW TTS clip --
@@ -1502,7 +1460,7 @@ def run_post_mt_stages(
                                  "pads", "resize_factor", "wav2lip_batch_size",
                                  "face_det_batch_size", "inference_steps",
                                  "guidance_scale", "seed",
-                                 "model_arch", "lipgan_batch_size")),
+                                 "model_arch")),
                         # The named parameter wins over a generic
                         # `batch_size` that happened to be in adapter_kwargs.
                         **({"batch_size": lipsync_batch_size}
@@ -1845,7 +1803,7 @@ def _run_pipeline(
     # they are handed to `translate_asr` explicitly rather than through
     # `_pick`, which carries adapter CONSTRUCTOR kwargs. `translate_asr`
     # filters them against the chosen adapter's translate signature, so an
-    # adapter that never heard of them (bodhan, nllb) is unaffected.
+    # adapter that never heard of them (bodhan) is unaffected.
     # `mt_n_best=1` is the historical single-beam call, unchanged.
     mt_n_best: int = 1,
     mt_length_penalties: Optional[Sequence[float]] = None,
@@ -1866,7 +1824,7 @@ def _run_pipeline(
     condense_tolerance: float = 0.0,
     condense_batch_size: Optional[int] = None,
     # Voice assignment per speaker (plan §8).
-    voice_engine: Optional[str] = None,           # "indic-speak" | "indicf5"
+    voice_engine: Optional[str] = None,           # "indic-speak"; derived from --tts
     voice_catalog_json: Optional[Path] = None,
     allow_voice_reuse: bool = False,
     # TTS synthesis.
@@ -1886,8 +1844,6 @@ def _run_pipeline(
     tts_speed_bounds: Tuple[float, float] = (0.85, 1.15),
     tts_speed_tolerance: float = 0.05,
     tts_speed_max_rounds: int = 2,
-    # Voice conversion.
-    vc_model: Optional[str] = None,               # None → skip VC
     # Post-TTS forced alignment (method M5), stage 9f1 — fills
     # `segments[].tts_words[]` so the word_anchored (M4) and dp (M7) timing
     # producers have real TTS word boundaries instead of falling back.
@@ -1972,7 +1928,6 @@ def _run_pipeline(
             "target_script":   mt_target_script,
             "asr_language":    asr_language,
             "tts":             tts_model,
-            "vc":              vc_model,
             "voice_engine":    voice_engine,
             "lipsync":         lipsync_model,
             # 9i. Recorded because `ui/progress.plan_stages` branches on it:
@@ -2025,7 +1980,6 @@ def _run_pipeline(
     eval_dir = job.stage("eval")
     voices_dir = job.stage("voices")
     tts_dir = job.stage("tts")
-    vc_dir = job.stage("vc")
     mix_dir = job.stage("mix")
     lipsync_dir = job.stage("lipsync")
 
@@ -2376,7 +2330,6 @@ def _run_pipeline(
                     diversity_penalty=mt_diversity_penalty,
                     **_pick(adapter_kwargs, ("base_url", "api_key", "model",
                                               "timeout_s", "max_retries",
-                                              "model_id", "num_beams",
                                               "batch_size", "dtype",
                                               "max_new_tokens")),
                 )
@@ -2498,7 +2451,6 @@ def _run_pipeline(
         tts_speed_bounds=tts_speed_bounds,
         tts_speed_tolerance=tts_speed_tolerance,
         tts_speed_max_rounds=tts_speed_max_rounds,
-        vc_model=vc_model,
         tts_force_align=tts_force_align,
         tts_align_model=tts_align_model,
         attach_visemes_stage=attach_visemes_stage,
@@ -2539,9 +2491,6 @@ def _run_pipeline(
         result.tts_out_dir = post.tts_out_dir
         result.tts_budget_violations = post.tts_budget_violations
         result.tts_errors = post.tts_errors
-        result.vc_model = post.vc_model
-        result.vc_out_dir = post.vc_out_dir
-        result.vc_errors = post.vc_errors
         result.timing_producer = post.timing_producer
         result.timing_plan_json = post.timing_plan_json
         result.timing_summary = post.timing_summary

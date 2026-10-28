@@ -1,6 +1,5 @@
 {
   "_comment": "Generated 2026-10-24 by hand from the live host: every commit, revision and sha256 below was either read off this host's own git checkouts, cross-checked against huggingface_hub's own download cache metadata (*.cache/huggingface/download/*.metadata next to each file), or computed with sha256sum here and verified to match that metadata. Not guessed. scripts/fetch_assets.py is the only reader; keep both in sync by hand until something regenerates this.",
-
   "vendor_repos": [
     {
       "name": "wav2lip",
@@ -24,26 +23,24 @@
     },
     {
       "name": "latentsync",
-      "feature": "lipsync:latentsync",
+      "feature": "lipsync:latentsync15",
       "url": "https://github.com/bytedance/LatentSync",
       "commit": "a229c3948406bc2cf6eaf4873e662e70c6a04746",
       "dest": "models/lipsync/vendor/latentsync",
       "patch": "patches/LatentSync.patch",
       "license": "see upstream LICENSE",
-      "note": "patch adds the face-absent mask in lipsync_pipeline.py. Same checkout serves both latentsync (1.6) and latentsync15 — only the checkpoint+config differ."
+      "note": "patch adds the face-absent mask in lipsync_pipeline.py. Serves latentsync15 (1.5, 256x256). The latentsync (1.6) entry was removed on 2026-10-28; its checkpoint, if still in the checkout, is the bare latentsync_unet.pt and is now unreferenced."
     },
     {
-      "name": "talknet",
-      "feature": "asd:talknet",
-      "url": "https://github.com/TaoRuijie/TalkNet-ASD.git",
-      "commit": "6d6821479af485e251c4991487e40573b42181b4",
-      "dest": "models/asd/vendor/talknet",
-      "patch": null,
-      "license": "see upstream LICENSE",
-      "note": "clean checkout, no local patch needed."
+      "name": "loconet",
+      "feature": "asd:loconet",
+      "url": "https://github.com/SJTUwxz/LoCoNet_ASD",
+      "commit": "68d90c83fde956d60245d0715bbd18e9e5fd3bae",
+      "dest": "models/asd/vendor/loconet",
+      "license": "see upstream (LoCoNet_ASD)",
+      "note": "added 2026-10-28, when talknet/lightasd/lrasd were removed and loconet became the only ASD model -- it had never been in this lock, so a fresh checkout could not fetch the one ASD upstream the pipeline needs. commit read off this host's clone."
     }
   ],
-
   "weights": [
     {
       "id": "wav2lip_gan",
@@ -110,7 +107,7 @@
       "revision": "2bcb936e2fddb4d86db4c62fd45b387d0c061571",
       "filename": "musetalk/pytorch_model.bin",
       "optional": true,
-      "note": "only used with MUSETALK_VERSION=v1, which is not the default. ~3.2 GB — skip unless v1 is actually needed."
+      "note": "only used with MUSETALK_VERSION=v1, which is not the default. ~3.2 GB \u2014 skip unless v1 is actually needed."
     },
     {
       "id": "musetalk_v1_config",
@@ -233,21 +230,8 @@
       "optional": false
     },
     {
-      "id": "latentsync_unet_16",
-      "feature": "lipsync:latentsync",
-      "dest": "models/lipsync/vendor/latentsync/checkpoints/latentsync_unet.pt",
-      "bytes": 5072222488,
-      "sha256": "0a478e89eb660f82da4c35dbdde8a5adfb27f99d1b4e50edd03729e1e98316d3",
-      "source": "hf",
-      "repo": "ByteDance/LatentSync-1.6",
-      "revision": "c42c7e6c8e9c213626389fa7d9a3c444b8536353",
-      "filename": "latentsync_unet.pt",
-      "license": "see upstream LICENSE",
-      "optional": false
-    },
-    {
       "id": "latentsync_whisper_tiny",
-      "feature": "lipsync:latentsync",
+      "feature": "lipsync:latentsync15",
       "dest": "models/lipsync/vendor/latentsync/checkpoints/whisper/tiny.pt",
       "bytes": 75572083,
       "sha256": "65147644a518d12f04e32d6f3b26facc3f8dd46e5390956a9424a650c0ce22b9",
@@ -275,7 +259,7 @@
     {
       "id": "restore_gfpgan",
       "feature": "restore:gfpgan",
-      "dest": "models/weights/wav2lip_hd/GFPGANv1.4.pth",
+      "dest": "models/weights/restore/GFPGANv1.4.pth",
       "bytes": 348632874,
       "sha256": "e2cd4703ab14f4d01fd1383a8a8b266f9a5833dacee8e6a79d3bf21a1b6be5ad",
       "source": "url",
@@ -287,7 +271,7 @@
     {
       "id": "restore_realesrgan",
       "feature": "restore:gfpgan",
-      "dest": "models/weights/wav2lip_hd/RealESRGAN_x4plus.pth",
+      "dest": "models/weights/restore/RealESRGAN_x4plus.pth",
       "bytes": 67040989,
       "sha256": "4fa0d38905f75ac06eb49a7951b426670021be3018265fd191d2125df9d682f1",
       "source": "url",
@@ -299,7 +283,7 @@
     {
       "id": "restore_facexlib_detection",
       "feature": "restore:gfpgan",
-      "dest": "models/weights/wav2lip_hd/detection_Resnet50_Final.pth",
+      "dest": "models/weights/restore/detection_Resnet50_Final.pth",
       "bytes": 109497761,
       "sha256": "6d1de9c2944f2ccddca5f5e010ea5ae64a39845a86311af6fdf30841b0a5a16d",
       "source": "url",
@@ -310,7 +294,7 @@
     {
       "id": "restore_facexlib_parsing",
       "feature": "restore:gfpgan",
-      "dest": "models/weights/wav2lip_hd/parsing_parsenet.pth",
+      "dest": "models/weights/restore/parsing_parsenet.pth",
       "bytes": 85331193,
       "sha256": "3d558d8d0e42c20224f13cf5a29c79eba2d59913419f945545d8cf7b72920de2",
       "source": "url",
@@ -319,16 +303,16 @@
       "note": "URL confirmed directly from this host's installed facexlib package source (facexlib/parsing/__init__.py)."
     },
     {
-      "id": "talknet_checkpoint",
-      "feature": "asd:talknet",
-      "dest": "models/asd/vendor/talknet/pretrain_TalkSet.model",
-      "bytes": 63227827,
-      "sha256": "d985ddd07dca08864a28337726f5b7d91b6426bebc7327f0e9b21cf9ff1cc937",
-      "source": "gdrive",
-      "gdrive_id": "1AbN9fCf9IexMxEKXLQY2KYBlb-IhSEea",
-      "license": "see upstream (TalkNet-ASD) LICENSE",
+      "id": "loconet_ava",
+      "feature": "asd:loconet",
+      "dest": "models/asd/vendor/loconet/loconet_ava.model",
+      "bytes": 137470241,
+      "sha256": "e7aa6a388e424747d5b0b204b383ec53cc466a37b7f1c4c7e34a9fc766ce11f2",
+      "source": null,
+      "url": null,
+      "license": "see upstream (LoCoNet_ASD)",
       "optional": false,
-      "note": "Google Drive, quota-limited -- scripts/setup.py already uses gdown for this one. Worth mirroring to a project-controlled HF repo or GitHub release, same as musetalk_face_parse above."
+      "note": "AVA-trained checkpoint. sha256 and byte count measured on this host 2026-10-28. source/url left null ON PURPOSE: upstream distributes it via a Google Drive link from its README, which is not a stable programmatic source -- fill these in once a mirror is pinned, and do NOT guess one."
     }
   ]
 }

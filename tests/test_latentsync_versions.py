@@ -24,19 +24,20 @@ from models.lipsync import available_models, get_lipsync          # noqa: E402
 from models.lipsync import latentsync_adapter as LS               # noqa: E402
 
 
-def test_both_versions_are_registered():
-    """1.5 is its OWN registry id, not a kwarg.
+def test_only_1_5_is_registered():
+    """1.6 was removed on 2026-10-28 -- it needed ~18 GB against 16 GiB
+    cards, so it was the one registered model that could not run here.
 
-    The UI replay (`edit_agent._rerun_lipsync_only`) forwards only
-    `batch_size`, so a version passed as an adapter kwarg could not be
-    reached from the one place the model is actually chosen.
+    The id stays `latentsync15` rather than reverting to `latentsync`,
+    because the id names the (checkpoint, resolution) pair. Reverting it
+    would make a future 1.6 a silent prefix alias for this one.
     """
-    assert "latentsync" in available_models()
     assert "latentsync15" in available_models()
+    assert "latentsync" not in available_models()
+    assert sorted(LS.VERSIONS) == ["1.5"]
 
 
 @pytest.mark.parametrize("model_id,version,resolution", [
-    ("latentsync", "1.6", 512),
     ("latentsync15", "1.5", 256),
 ])
 def test_each_id_resolves_its_own_pair(monkeypatch, model_id, version, resolution):
@@ -50,11 +51,11 @@ def test_each_id_resolves_its_own_pair(monkeypatch, model_id, version, resolutio
     assert a.unet_ckpt_path == LS.VERSIONS[version][1]
 
 
-def test_the_two_checkpoints_have_different_names():
-    """Upstream ships both as `latentsync_unet.pt`. If they shared a name
-    here, fetching 1.5 would silently convert every 1.6 run into a
-    mismatched one."""
-    assert LS.VERSIONS["1.5"][1] != LS.VERSIONS["1.6"][1]
+def test_the_checkpoint_keeps_its_disambiguated_name():
+    """Upstream shipped 1.5 and 1.6 both as `latentsync_unet.pt`. 1.6 is
+    gone, but its checkpoint may still sit in the vendor checkout under the
+    bare name -- so 1.5 keeps the suffixed one rather than reclaiming it."""
+    assert LS.VERSIONS["1.5"][1].endswith("latentsync_unet_1.5.pt")
 
 
 def test_the_reported_model_name_follows_the_version():
@@ -81,10 +82,14 @@ def _fake_repo(tmp_path: Path, cfg_name: str, resolution: int,
 
 
 def test_a_version_config_mismatch_is_refused(tmp_path):
-    """1.5's checkpoint under 1.6's 512 config. The whole point."""
+    """1.5's checkpoint under a 512 config. The whole point.
+
+    Still reachable with 1.6 gone: `LATENTSYNC_UNET_CONFIG` can point at a
+    hand-edited 512 yaml, and the architecture is identical, so the
+    mismatch loads without error and renders a soft mouth."""
     cfg, ckpt, _res = LS.VERSIONS["1.5"]
     root = _fake_repo(tmp_path, "configs/unet/stage2_512.yaml", 512, ckpt)
-    a = LS.LatentSync15Sync(repo_path=str(root),
+    a = LS.LatentSyncSync(repo_path=str(root),
                             unet_config_path="configs/unet/stage2_512.yaml",
                             unet_ckpt_path=ckpt, python_bin=sys.executable)
     with pytest.raises(RuntimeError, match="resolution"):
@@ -94,7 +99,7 @@ def test_a_version_config_mismatch_is_refused(tmp_path):
 def test_a_matching_pair_loads(tmp_path):
     cfg, ckpt, res = LS.VERSIONS["1.5"]
     root = _fake_repo(tmp_path, cfg, res, ckpt)
-    a = LS.LatentSync15Sync(repo_path=str(root), python_bin=sys.executable)
+    a = LS.LatentSyncSync(repo_path=str(root), python_bin=sys.executable)
     a._ensure_loaded()
     assert a._loaded
 
@@ -105,18 +110,18 @@ def test_an_unreadable_resolution_warns_rather_than_refusing(tmp_path, caplog):
     cfg, ckpt, _res = LS.VERSIONS["1.5"]
     root = _fake_repo(tmp_path, cfg, 256, ckpt)
     (root / cfg).write_text("data:\n  something_else: 1\n")
-    a = LS.LatentSync15Sync(repo_path=str(root), python_bin=sys.executable)
+    a = LS.LatentSyncSync(repo_path=str(root), python_bin=sys.executable)
     a._ensure_loaded()
     assert a._loaded
 
 
 def test_the_missing_checkpoint_error_names_the_right_hf_repo(tmp_path):
-    """1.5 and 1.6 ship the same filename from different repos, so the
-    error has to say WHICH one."""
+    """1.5 and 1.6 shipped the same filename from different repos, so the
+    error names the repo, not just the file."""
     cfg, ckpt, res = LS.VERSIONS["1.5"]
     root = _fake_repo(tmp_path, cfg, res, ckpt)
     (root / ckpt).unlink()
-    a = LS.LatentSync15Sync(repo_path=str(root), python_bin=sys.executable)
+    a = LS.LatentSyncSync(repo_path=str(root), python_bin=sys.executable)
     with pytest.raises(RuntimeError, match="LatentSync-1.5"):
         a._ensure_loaded()
 

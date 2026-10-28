@@ -1,13 +1,13 @@
 """CLI entry point:
 
     python -m backend.cli --input <url_or_path> \
-        [--model pyannote|diarizen] \
+        [--model pyannote] \
         [--face-detector retinaface|mediapipe --face-tracker bytetrack] \
-        [--asd talknet|ts_talknet] \
-        [--asr bodhan|whisperx|indicconformer|indictranscribe_core|indictranscribe_flex --asr-language hi] \
-        [--align mms_fa|whisperx] \
-        [--mt bodhan|nllb --mt-target-language hi
-              --mt-target-script codemix|native|roman --mt-model-id <hf repo id>]
+        [--asd loconet] \
+        [--asr bodhan --asr-language hi] \
+        [--align mms_fa] \
+        [--mt bodhan --mt-target-language hi
+              --mt-target-script codemix|native|roman]
         [--timing-method m2|m4|m7 [--timing-tempo-cap 1.50]]
 """
 from __future__ import annotations
@@ -32,20 +32,19 @@ from models.faces.track import available_trackers as _trackers
 from models.lipsync import available_models as _lipsync_models
 
 
-#: Bodhan is the house implementation for the three hosted stages, so a bare
-#: `--asr` / `--mt` / `--tts` picks it. This is the DEFAULT IMPLEMENTATION, not
-#: a default-on stage: the flag being absent still means "skip", because the
-#: whole dependency chain in `_validate` keys off None, and defaulting these
-#: to a model would force every run to supply --mt-target-language.
-#: Falls back to the registry's first entry if bodhan is not installed.
+#: Default IMPLEMENTATION for a bare `--asr` / `--mt` / `--tts`, not a
+#: default-on stage: an absent flag still means skip, because `_validate`'s
+#: dependency chain keys off None and a real default here would force every
+#: run to supply --mt-target-language. Falls back to the registry's first
+#: entry when bodhan is not installed.
 _PREFERRED_IMPL = "bodhan"
 
 
 def _speed_bounds(s: str) -> tuple:
     """`"0.85,1.15"` -> `(0.85, 1.15)`, validated.
 
-    argparse cannot express a bounded pair, and a silently reversed or
-    inverted range would clamp every rate to one end without complaining.
+    argparse cannot express a bounded pair, and a reversed or inverted range
+    clamps every rate to one end without complaining.
     """
     try:
         lo, hi = (float(x) for x in str(s).split(","))
@@ -79,15 +78,15 @@ def _default_impl(stage: str) -> str:
 def _tts_styles():
     """Styles the Bodhan TTS engine accepts, plus `auto` and `neutral`.
 
-    Neither of the two extras is a Bodhan value:
+    Neither extra is a Bodhan value:
 
       * `auto` asks `backend.classify` to pick the register from the video's
-        own metadata (and, failing that, an LLM read of the transcript). It is
-        resolved to a real style, or to None, before anything is synthesized.
-      * `neutral` is the explicit opposite — send no style at all, which is
-        the voice's plain reading. `models.tts.resolve_style` maps it to None
-        at synthesis. It is listed here so the CLI offers exactly what the UI
-        dropdowns do.
+        metadata, or an LLM read of the transcript, and resolves to a real
+        style or None before synthesis.
+      * `neutral` sends no style at all -- the voice's plain reading.
+        `models.tts.resolve_style` maps it to None.
+
+    Listed here so the CLI offers exactly what the UI dropdowns do.
     """
     from models.tts import NEUTRAL_STYLE
     try:
@@ -98,7 +97,6 @@ def _tts_styles():
 from models.mt import available_models as _mt_models
 from models.translit import available_models as _translit_models
 from models.tts import available_models as _tts_models
-from models.vc import available_models as _vc_models
 
 from .pipeline import DEFAULT_DATA_DIR, REPO_ROOT, run_pipeline
 
@@ -106,8 +104,8 @@ from .pipeline import DEFAULT_DATA_DIR, REPO_ROOT, run_pipeline
 def _check_env_permissions() -> None:
     """Refuse to start if `.env` is group- or world-readable.
 
-    On a shared box (e.g. /data1/), a mode-644 .env leaks whatever HF /
-    Bodhan token lives in it to every account on the host.
+    On a shared box a mode-644 .env leaks its HF / Bodhan tokens to every
+    account on the host.
     """
     env_path = REPO_ROOT / ".env"
     if not env_path.exists():
@@ -121,23 +119,22 @@ def _check_env_permissions() -> None:
         )
 
 
-# Characters that only ever appear in a *list* of inputs, never in one path
-# or URL we would accept. Catching them turns "the pipeline silently ran on
-# one of my three files" into an error at parse time.
+# Characters that only appear in a LIST of inputs, never in one acceptable
+# path or URL. Catching them turns a silent run on one of three files into a
+# parse-time error.
 _MULTI_INPUT_HINTS = (",", "\n", "\t", "|", ";")
 
-#: Shell globs that reached us unexpanded (quoted, or no match) — each stands
-#: for a set of files, not one.
+#: Shell globs that arrived unexpanded (quoted, or no match): each stands for
+#: a set of files, not one.
 _GLOB_CHARS = ("*", "?", "[")
 
 
 class _SingleInput(argparse.Action):
     """Accept exactly one video/audio input per run.
 
-    The pipeline is built around a single input: one job folder, one video
-    stem, one set of stage outputs. Several inputs would quietly collide in
-    that one folder, so every way of naming more than one is rejected here
-    rather than halfway through stage 9.
+    One job folder, one video stem, one set of stage outputs -- several
+    inputs collide in that folder, so every way of naming more than one is
+    rejected at parse time rather than halfway through stage 9.
     """
 
     def __call__(self, parser, namespace, value, option_string=None):
@@ -183,13 +180,12 @@ def _reject_extra_inputs(argv: list[str]) -> None:
     """Catch bare paths left over from an unquoted glob.
 
     `--input *.mp4` expands before argparse sees it, so the first file binds
-    to --input and the rest arrive as positionals. argparse would reject them
-    with "unrecognized arguments"; this says what actually went wrong.
+    to --input and the rest arrive as positionals. argparse would only say
+    "unrecognized arguments".
     """
     media = (".mp4", ".mkv", ".webm", ".mov", ".avi", ".m4a", ".wav", ".mp3", ".flac")
-    # Only true positionals count. A value that follows an option belongs to
-    # that option, so `--input A --input B` is the action's repeat error, not
-    # this one — otherwise it would be blamed on a glob it never saw.
+    # Only true positionals count: a value following an option belongs to
+    # that option, so `--input A --input B` is the action's repeat error.
     strays = [a for i, a in enumerate(argv)
               if not a.startswith("-")
               and not (i and argv[i - 1].startswith("-"))
@@ -330,11 +326,6 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                          "material is spoken and stays consistent across "
                          "segments; native re-scripts, but Bodhan leaves Latin "
                          "remnants at random when it does.")
-    ap.add_argument("--mt-model-id", default=None,
-                    help="HuggingFace model id to force (nllb). "
-                         "Default: adapter picks (NLLB-600M-distilled).")
-    ap.add_argument("--mt-num-beams", type=int, default=None,
-                    help="Beam count for local MT models (nllb).")
 
     # Code-mix / script normalisation -----------------------------------
     ap.add_argument("--translit", default=None, choices=_translit_models(),
@@ -388,9 +379,6 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                          "segment alone.")
 
     # Voice assignment per speaker --------------------------------------
-    ap.add_argument("--voice-engine", default=None,
-                    choices=("indic-speak", "indicf5"),
-                    help="TTS engine the voice catalog is drawn from.")
     ap.add_argument("--voice-catalog", default=None, type=Path,
                     help="Override JSON of voice rows (overrides defaults).")
     ap.add_argument("--allow-voice-reuse", action="store_true",
@@ -460,17 +448,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                          "stretch, so a downstream timing plan owns all "
                          "stretching instead of compounding with it.")
 
-    # Voice conversion --------------------------------------------------
-    ap.add_argument("--vc", default=None, choices=_vc_models(),
-                    help="Voice-conversion model. Requires --tts.")
-
     # Timing method — top 3 from the eight-method sweep -------------------
-    # DEFAULT None, not "segment", and the difference is load-bearing:
-    # `resolve_speed_setup` refuses --speed-mode segment together with
-    # --timing-method, so a literal default would make every research-arm
-    # invocation die at startup. None lets the resolver tell "the operator
-    # asked for segment" apart from "nobody said", and only the first
-    # collides.
+    # DEFAULT None, not "segment": `resolve_speed_setup` refuses
+    # --speed-mode segment alongside --timing-method, so a literal default
+    # kills every research-arm invocation at startup. None distinguishes "the
+    # operator asked for segment" from "nobody said".
     ap.add_argument("--speed-mode", default=None,
                     choices=("global", "segment", "warp"),
                     help="How the dub is re-paced to fit the source timeline. "
@@ -649,11 +631,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                          "`timing_plan` renders per-piece placement from a "
                          "timing plan (set automatically by --timing-method).")
     ap.add_argument("--mix-clip-source", default="auto",
-                    choices=("auto", "raw", "stretched", "vc"),
-                    help="Which per-segment clip the mix reads. 'auto' keeps "
-                         "the historical vc_audio-or-tts_audio behaviour; "
-                         "'raw' takes the unstretched clip, which is what you "
-                         "want when the mix applies its own tempo.")
+                    choices=("auto", "raw", "stretched"),
+                    help="Which per-segment clip the mix reads. 'auto' takes "
+                         "the stretched clip the TTS stage wrote; 'raw' takes "
+                         "the unstretched one, which is what you want when the "
+                         "mix applies its own tempo.")
     ap.add_argument("--mix-tempo-cap", type=float, default=1.5,
                     help="Upper bound for the global atempo factor "
                          "(global_tempo strategy). Default 1.5x.")
@@ -662,7 +644,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
     # Lip sync ----------------------------------------------------------
     ap.add_argument("--lipsync", default=None, choices=_lipsync_models(),
-                    help="Lip-sync model (lipgan | wav2lip | musetalk | latentsync). "
+                    help="Lip-sync model (wav2lip | musetalk | latentsync15). "
                          "Requires --mix.")
     ap.add_argument("--restore", default=None, choices=("gfpgan",),
                     help="Stage 9i: face restoration over the finished "
@@ -704,14 +686,14 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap.add_argument("--no-eval", action="store_true",
                     help="Skip transcript download and ASR/MT evaluation.")
 
-    # Adapter-specific kwargs — forwarded via **adapter_kwargs. Each adapter
+    # Adapter-specific kwargs, forwarded via **adapter_kwargs. Each adapter
     # drops what it does not recognise, so a wide union is safe.
     ap.add_argument("--hf-token", default=None,
-                    help="HuggingFace token (pyannote / diarizen adapters).")
+                    help="HuggingFace token (pyannote adapter).")
     ap.add_argument("--checkpoint", default=None,
                     help="Override checkpoint for whichever adapter uses one.")
     ap.add_argument("--batch-size", type=int, default=None,
-                    help="Batch size (indicconformer / whisperx).")
+                    help="Batch size, for whichever adapter uses one.")
     ap.add_argument("--allow-insecure-env", action="store_true",
                     help="Skip the .env file-permission check on startup.")
     ap.add_argument("-v", "--verbose", action="store_true")
@@ -722,10 +704,10 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 # Speed / timing resolution
 # ---------------------------------------------------------------------------
 
-#: What `resolve_speed_setup` returns. Named so `backend.edit_agent` can
-#: replay a run's timing setup instead of re-deriving it and getting the
-#: producer's defaults — which would quietly turn a `--speed-mode segment`
-#: run into a 1.10x-capped, 0.10 s-margin one on the first edit.
+#: What `resolve_speed_setup` returns. Named so `backend.edit_agent` replays
+#: a run's timing setup rather than re-deriving it and landing on the
+#: producer's defaults, which turns a `--speed-mode segment` run into a
+#: 1.10x-capped, 0.10 s-margin one on the first edit.
 SpeedSetup = namedtuple("SpeedSetup", [
     "timing_producer", "timing_params", "tts_apply_stretch",
     "tts_force_align", "mix_strategy", "mix_tempo_cap", "mix_clip_source",
@@ -747,14 +729,12 @@ def resolve_speed_setup(args) -> "SpeedSetup":
     mix_tempo_cap = args.mix_tempo_cap
     mix_clip_source = args.mix_clip_source
 
-    # --speed-mode is the plain-language front end to the same machinery the
-    # research arms use: `segment` IS naive_slot rendered through the timing
-    # plan, with a zero margin and a symmetric cap. `global` leaves every
-    # default exactly where it was.
-    # `warp` became the default on 2026-10-26. `--speed-mode` still parses
-    # to None when nobody passed it, so the two cases stay distinguishable:
-    # an EXPLICIT mode beside `--timing-method` is a contradiction and is
-    # refused, while the default quietly yields to the arm, which sets
+    # --speed-mode is the plain-language front end to the research arms'
+    # machinery: `segment` IS naive_slot through the timing plan, with a zero
+    # margin and a symmetric cap; `global` leaves every default alone; `warp`
+    # is the default. `--speed-mode` parses to None when nobody passed it, so
+    # an EXPLICIT mode beside `--timing-method` is refused as a
+    # contradiction, while the default yields to the arm, which sets
     # mix_strategy / tts_apply_stretch / mix_clip_source itself.
     speed_mode = args.speed_mode or ("global" if args.timing_method else "warp")
 
@@ -769,8 +749,8 @@ def resolve_speed_setup(args) -> "SpeedSetup":
         _speed.validate_absorb_bounds(
             args.speed_borrow_gap, args.speed_borrow_frac,
             args.absorb_max_frac)
-        # The values themselves live in `backend/speed.py`, which `ui/presets`
-        # also calls — they used to be a hand-kept copy on each side.
+        # The values live in `backend/speed.py`, which `ui/presets` also
+        # calls, so the two cannot drift.
         _seg = _speed.segment_timing_kwargs(
             speed_cap=args.speed_cap,
             speed_floor=args.speed_floor,
@@ -814,13 +794,10 @@ def resolve_speed_setup(args) -> "SpeedSetup":
         mix_strategy = _warp["mix_strategy"]
         mix_clip_source = _warp["mix_clip_source"]
 
-    # Both knobs reach the pipeline ONLY through `segment_timing_params`, so
-    # anywhere else they are silently inert — and a flag that is accepted and
-    # then ignored is how an operator concludes a feature does not work.
-    # `global` builds no timing plan at all; the research arms set their own
-    # `timing_params` wholesale, a few lines below; and `warp` does both of
-    # these things by construction, so asking for them again is a
-    # contradiction rather than a no-op.
+    # Both knobs reach the pipeline ONLY through `segment_timing_params` and
+    # are inert anywhere else, so asking for them is refused rather than
+    # ignored: `global` builds no timing plan, the research arms set
+    # `timing_params` wholesale below, and `warp` does both by construction.
     if speed_mode != "segment" and (args.absorb_pauses
                                     or args.speed_borrow_gap > 0):
         asked = [n for n, on in (("--absorb-pauses", args.absorb_pauses),
@@ -913,8 +890,6 @@ def main(argv: list[str] | None = None) -> int:
             "are no estimates to act on.")
     if args.tts and not args.mt:
         raise SystemExit("--tts requires --mt.")
-    if args.vc and not args.tts:
-        raise SystemExit("--vc requires --tts.")
     if args.emotion and not args.tts:
         raise SystemExit("--emotion sets a per-segment TTS style; "
                          "it requires --tts.")
@@ -940,8 +915,6 @@ def main(argv: list[str] | None = None) -> int:
             ("checkpoint", args.checkpoint),
             ("batch_size", args.batch_size),
             ("render_mode", args.render_mode),
-            ("model_id", args.mt_model_id),
-            ("num_beams", args.mt_num_beams),
         ) if v is not None
     }
     # Lip-sync-specific knobs are forwarded via the same adapter_kwargs
@@ -1032,7 +1005,6 @@ def main(argv: list[str] | None = None) -> int:
         condense_speed_cap=args.condense_speed_cap,
         condense_tolerance=args.condense_tolerance,
         condense_batch_size=args.condense_batch_size,
-        voice_engine=args.voice_engine,
         voice_catalog_json=args.voice_catalog,
         allow_voice_reuse=args.allow_voice_reuse,
         tts_model=args.tts,
@@ -1049,7 +1021,6 @@ def main(argv: list[str] | None = None) -> int:
         stretch_backend=args.stretch_backend,
         tts_apply_stretch=tts_apply_stretch,
         tts_force_align=tts_force_align,
-        vc_model=args.vc,
         mix=args.mix,
         mix_sample_rate=args.mix_sample_rate,
         mix_tts_gain_db=args.mix_tts_gain_db,
@@ -1109,9 +1080,6 @@ def main(argv: list[str] | None = None) -> int:
     if result.tts_model:
         print(f"tts            : {result.tts_model} → {result.tts_out_dir}  "
               f"(errors={result.tts_errors}, cap_hits={result.tts_budget_violations})")
-    if result.vc_model:
-        print(f"vc             : {result.vc_model} → {result.vc_out_dir}  "
-              f"(errors={result.vc_errors})")
     if result.timing_producer:
         print(f"timing         : {result.timing_producer} → {result.timing_plan_json}")
         if result.timing_summary:

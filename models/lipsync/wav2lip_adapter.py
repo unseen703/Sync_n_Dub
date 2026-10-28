@@ -44,29 +44,16 @@ log = logging.getLogger(__name__)
 DEFAULT_REPO = "third_party/Wav2Lip"
 DEFAULT_CKPT = "third_party/Wav2Lip/checkpoints/wav2lip_gan.pth"
 
-#: The default output ceiling, in scanlines. A source at or below this renders
-#: at NATIVE resolution; anything above it is halved. Overridable per process
-#: with `WAV2LIP_MAX_HEIGHT`.
+#: Output ceiling in scanlines. At or below it a source renders NATIVE;
+#: above it is halved. Override per process with `WAV2LIP_MAX_HEIGHT`.
 #:
-#: This replaced a flat `resize_factor = 2` on 2026-10-22. That default cost
-#: every run half its resolution to protect against one case: a 4K source,
-#: where `inference.py:118` raises "Image too big to run face detection on
-#: GPU" (measured 2026-10-18 — shard 1 of a 2-GPU split died there while
-#: shard 2 succeeded). But that error is **an OOM fallback, not a pixel
-#: limit** — the loop above it halves `face_det_batch_size` on every
-#: RuntimeError and only gives up at a batch of 1. So the constraint is VRAM
-#: against frame size, and a flat 2 was answering it by downscaling 1080p
-#: sources that never needed it.
-#:
-#: 1080 is the ceiling because 2 is the only factor applied: 2160/2 is
-#: exactly 1080, so a 4K source lands on the ceiling rather than under it.
-#:
-#: Wav2Lip repaints a 96x96 mouth crop at ANY factor, so the mouth itself is
-#: unaffected either way — what the old default cost was the other 99% of the
-#: frame. VRAM tracks the change and is the thing to watch: ~1.2 GiB at
-#: factor 2 versus ~4.0 GiB at 1 on 720p, and 1080p is 2.25x the pixels of
-#: 720p. The OOM fallback absorbs the overshoot by halving the detection
-#: batch, so the failure mode is a slower render, not a dead one.
+#: 1080 because 2 is the only factor applied, so 2160/2 lands exactly on the
+#: ceiling. `inference.py:118` ("Image too big to run face detection on GPU")
+#: is an OOM fallback, not a pixel limit -- the loop above it halves
+#: `face_det_batch_size` on every RuntimeError down to 1 -- so the real
+#: constraint is VRAM against frame size: ~1.2 GiB at factor 2 vs ~4.0 GiB at
+#: 1 on 720p. Wav2Lip repaints a 96x96 mouth crop at any factor, so a lower
+#: factor costs only the rest of the frame.
 MAX_OUTPUT_HEIGHT = int(os.getenv("WAV2LIP_MAX_HEIGHT") or 1080)
 
 
@@ -74,16 +61,13 @@ def cap_dims(dims: tuple[int, int],
              max_height: int = MAX_OUTPUT_HEIGHT) -> tuple[int, int]:
     """Scale `(w, h)` down to `max_height`, keeping aspect, both sides even.
 
-    A CEILING, never an upscale: a 720p source stays 720p. Inventing pixels
-    to reach a nominal 1080p would make every small source render slower and
-    look no better.
+    A ceiling, never an upscale: a 720p source stays 720p.
     """
     w, h = int(dims[0]), int(dims[1])
     if h <= max_height or h <= 0:
         return (w, h)
     scale = max_height / float(h)
-    # Even on both axes -- libx264 with yuv420p refuses odd dimensions, and
-    # this is the one place a derived size can land on one.
+    # Even on both axes: libx264 with yuv420p refuses odd dimensions.
     return (max(2, int(round(w * scale)) // 2 * 2),
             max(2, int(round(h * scale)) // 2 * 2))
 
@@ -96,15 +80,12 @@ def resolve_resize_factor(
 ) -> tuple[int, str]:
     """`(factor, reason)` for one source video.
 
-    `explicit` wins untouched. Otherwise: at or below the ceiling render
-    native (1), above it halve (2).
+    `explicit` wins untouched. Otherwise: native (1) at or below the ceiling,
+    halve (2) above it.
 
-    **A failed probe returns 2, not 1.** `_video_dims` answers None when
-    ffprobe is missing or the file is unreadable, and None is a silent answer
-    in every caller here (CLAUDE.md §1). Guessing "native" on an unknown
-    source risks the OOM at stage 9h, after ASR, MT, TTS and the mix have all
-    been paid for; guessing "halve" costs resolution on a file we could not
-    read. The cheap mistake is the right default.
+    A FAILED PROBE RETURNS 2, not 1. Guessing native on an unknown source
+    risks an OOM at stage 9h, after ASR, MT, TTS and the mix are already
+    paid for; guessing halve only costs resolution.
     """
     if explicit is not None:
         return int(explicit), f"explicit resize_factor={int(explicit)}"
@@ -118,9 +99,8 @@ def resolve_resize_factor(
         return 1, f"source {w}x{h} is within the {max_height}p ceiling"
     out_h = h // 2
     if out_h > max_height:
-        # 8K and up. The rule applies only factor 2, so this lands above the
-        # ceiling. Said out loud rather than silently escalating to 4, which
-        # would quarter a source nobody asked to quarter.
+        # 8K and up. Only factor 2 is applied, so this lands above the
+        # ceiling; it says so rather than silently escalating to 4.
         return 2, (f"source {w}x{h} is above {max_height}p; factor 2 gives "
                    f"{w // 2}x{out_h}, still above the ceiling — face "
                    f"detection may fall back to a smaller batch")
@@ -139,31 +119,25 @@ class Wav2LipSync(BaseLipSync):
         checkpoint: Optional[str] = None,
         python_bin: Optional[str] = None,
         pads: str = "0,10,0,0",
-        # None means AUTO: cap the output at 1080p. See
-        # `resolve_resize_factor` for the rule and why it replaced a flat 2.
-        # An explicit int still wins and is passed through untouched, so the
-        # adapter-kwarg path (`--adapter-kwargs`, `experiment.py`) is
-        # unchanged in meaning.
+        # None means AUTO: cap the output at 1080p, per
+        # `resolve_resize_factor`. An explicit int wins and is passed through
+        # untouched.
         resize_factor: Optional[int] = None,
         wav2lip_batch_size: int = 16,
         face_det_batch_size: int = 4,
-        # Reuse per-frame face boxes across runs of the same clip. Wav2Lip
-        # has no upstream caching, so `--use_saved_coord`/`--saved_coord`
-        # were added to the vendored inference.py with the same names
-        # MuseTalk uses, and both adapters share one cache keyed on the
-        # file plus the parameters that move a box.
+        # Reuse per-frame face boxes across runs. Wav2Lip has no upstream
+        # caching, so `--use_saved_coord`/`--saved_coord` were added to the
+        # vendored inference.py under MuseTalk's names; both adapters share
+        # one cache keyed on the file plus whatever moves a box.
         use_coord_cache: bool = True,
         cuda_device: Optional[int] = None,
     ):
         super().__init__(device=device, cuda_device=cuda_device)
         self.repo_path = resolve_vendor_repo(
             "wav2lip", "WAV2LIP_REPO", repo_path, legacy=DEFAULT_REPO)
-        # DERIVED from the resolved repo, not a second hardcoded path.
-        # `DEFAULT_CKPT` named `third_party/Wav2Lip/...` outright, so after
-        # the vendor move the repo would resolve to its new home while the
-        # weights still pointed at the old one -- and the failure is the
-        # expensive kind: `_ensure_loaded` raises at stage 9h, after ASR,
-        # MT, TTS and the mix have been paid for.
+        # DERIVED from the resolved repo, not a second hardcoded path, or a
+        # vendor move leaves the weights pointing at the old home and
+        # `_ensure_loaded` raises at stage 9h with everything else paid for.
         self.checkpoint = Path(
             checkpoint or os.getenv("WAV2LIP_CHECKPOINT")
             or (self.repo_path / "checkpoints" / "wav2lip_gan.pth"))
@@ -198,11 +172,8 @@ class Wav2LipSync(BaseLipSync):
         out = Path(request.out_path)
         out.parent.mkdir(parents=True, exist_ok=True)
 
-        # Resolved PER VIDEO now, not read off the instance. `backend/
-        # lipsync.py` shards a render across the GPUs by time, so every shard
-        # is a cut of the same source and resolves the same factor -- but the
-        # value has to be computed here, where the video is known, rather
-        # than at construction, where it is not.
+        # Resolved PER VIDEO, not at construction: the video is only known
+        # here. Shards are cuts of one source, so they all resolve alike.
         resize_factor, why = resolve_resize_factor(
             Path(request.video), self.resize_factor)
         log.info("wav2lip[gpu=%s]: resize_factor=%d (%s)",
@@ -221,15 +192,11 @@ class Wav2LipSync(BaseLipSync):
             "--nosmooth",
         ]
 
-        # The boxes depend on pads and resize_factor (both change the box),
-        # and on nosmooth (we always pass it, so it is constant -- recorded
-        # anyway so the key stays correct if that ever changes).
-        #
-        # The RESOLVED factor, not `self.resize_factor`. Keying on the
-        # instance attribute would write every auto-resolved run under the
-        # same `None`, so a 4K render's half-size boxes would be loaded for a
-        # 720p clip and painted at the wrong scale -- at exit code 0, since
-        # upstream only checks the box COUNT against the frame count.
+        # Boxes depend on pads, resize_factor and nosmooth, so all three are
+        # in the key. Use the RESOLVED factor, never `self.resize_factor`:
+        # keying on the instance attribute files every auto run under `None`,
+        # so one clip's boxes get painted on another at the wrong scale --
+        # at exit code 0, since upstream only checks the box COUNT.
         coord_params = {"pads": self.pads,
                         "resize_factor": resize_factor,
                         "nosmooth": True}
@@ -237,8 +204,8 @@ class Wav2LipSync(BaseLipSync):
         coord_file = None
         if self.use_coord_cache:
             # Beside the output, not in the scratch dir below: that one is
-            # created after this point and destroyed with the run, so the
-            # fresh boxes could never be copied back out of it.
+            # destroyed with the run, so fresh boxes could never be copied
+            # back out.
             coord_file = out.parent / f"{out.stem}.coords.pkl"
             cached = coords.load(video_abs, "wav2lip", coord_params)
             if cached is not None:
@@ -246,22 +213,16 @@ class Wav2LipSync(BaseLipSync):
                 cmd += ["--use_saved_coord"]
             cmd += ["--saved_coord", "--coord_path", str(coord_file)]
         log.info("wav2lip[gpu=%s]: %s", self.cuda_device, " ".join(cmd))
-        # Each invocation gets its OWN working directory, because upstream
-        # writes two intermediates at paths relative to the cwd:
-        # `temp/temp.wav` (inference.py:232) and `temp/result.avi` (:269),
-        # both hardcoded. With `cwd=self.repo_path` every concurrent call
-        # shared them — and `backend/lipsync.py` shards one render across
-        # every visible GPU and runs the shards AT THE SAME TIME, so two
-        # wav2lip processes raced on one `temp/result.avi`. The loser's
-        # final mux read a half-written file and died with "Invalid data
-        # found when processing input", then exited 0 with no output
-        # (CLAUDE.md section 1). Observed on 2026-10-17: a 2-GPU job lost
-        # shard 0 and still reported done at 100%.
+        # Each invocation gets its OWN working directory. Upstream hardcodes
+        # two cwd-relative intermediates, `temp/temp.wav` (inference.py:232)
+        # and `temp/result.avi` (:269), and shards run concurrently, so a
+        # shared cwd makes two processes race on one `temp/result.avi`. The
+        # loser muxes a half-written file and exits 0 with no output.
         #
-        # `inference.py` is passed by absolute path, so Python still puts
-        # the REPO on sys.path (it uses the script's directory, not the
-        # cwd) and the local `models` / `face_detection` imports resolve.
-        # s3fd's weights resolve through `__file__`, also unaffected.
+        # `inference.py` is passed by absolute path, so Python puts the REPO
+        # on sys.path (the script's directory, not the cwd) and the local
+        # `models` / `face_detection` imports still resolve. s3fd's weights
+        # resolve through `__file__`.
         with tempfile.TemporaryDirectory(prefix="wav2lip-") as scratch:
             (Path(scratch) / "temp").mkdir()
             cmd[1] = str((self.repo_path / "inference.py").resolve())
@@ -275,10 +236,10 @@ class Wav2LipSync(BaseLipSync):
                 model_name="wav2lip", out_video=out, duration_s=0.0, fps=0.0,
                 error=f"wav2lip rc={proc.returncode}: {proc.stderr.strip()[-3000:]}",
             )
-        # rc=0 does not mean it wrote anything. `inference.py:289` muxes
-        # temp/result.avi onto --outfile with subprocess.call() and throws the
-        # return code away, so a failing ffmpeg loses the render *after* all
-        # the GPU work and still exits 0. Check the file, not the code.
+        # rc=0 does not mean it wrote anything: `inference.py:289` muxes
+        # onto --outfile with subprocess.call() and discards the return code,
+        # so a failing ffmpeg loses the render and still exits 0. Check the
+        # file, not the code.
         if self.use_coord_cache and coord_file and coord_file.is_file():
             try:
                 blob = pickle.loads(coord_file.read_bytes())
@@ -310,12 +271,11 @@ class Wav2LipSync(BaseLipSync):
     def sync_many(self, requests):
         """Render many pieces in ONE process, loading the net once.
 
-        Wav2Lip's vendored `inference.py` loads the net inside its render loop,
-        so a segmented render reloaded it per piece. For more than one piece
-        this shells out to `_wav2lip_worker.py`, which loads once and loops. A
-        single piece keeps the proven per-call path. The coord cache is handled
-        here, as in `sync()`: stage a hit before the run, copy the fresh boxes
-        out after -- per piece.
+        The vendored `inference.py` loads the net inside its render loop, so
+        more than one piece shells out to `_wav2lip_worker.py`, which loads
+        once and loops; a single piece keeps the per-call path. The coord
+        cache works as in `sync()`, per piece: stage a hit before the run,
+        copy fresh boxes out after.
         """
         if not requests:
             return []
@@ -332,8 +292,7 @@ class Wav2LipSync(BaseLipSync):
             out = Path(request.out_path)
             out.parent.mkdir(parents=True, exist_ok=True)
             video_abs = Path(request.video).resolve()
-            # Per video, as in sync(): the resolved factor moves the box, so it
-            # is part of the cache key.
+            # Per video, as in sync(): the resolved factor moves the box.
             resize_factor, why = resolve_resize_factor(
                 video_abs, self.resize_factor)
             log.info("wav2lip[gpu=%s]: piece %s resize_factor=%d (%s)",
@@ -394,8 +353,8 @@ class Wav2LipSync(BaseLipSync):
 
         results = []
         for out, video_abs, coord_params, coord_file in staged:
-            # Copy fresh boxes into the cache and clean up, whatever the
-            # outcome -- a cache write must never fail a good render.
+            # Copy fresh boxes into the cache whatever the outcome -- a
+            # cache write must never fail a good render.
             if self.use_coord_cache and coord_file and coord_file.is_file():
                 try:
                     blob = pickle.loads(coord_file.read_bytes())

@@ -398,9 +398,9 @@ def test_stage_order_matches_the_pipeline():
     import inspect
     from backend import pipeline
     src = inspect.getsource(pipeline.run_post_mt_stages)
-    markers = ["9b.", "9c.", "9d.", "9e.", "9f.", "9f2.", "9g.", "9h."]
+    markers = ["9b.", "9c.", "9d.", "9e.", "9f2.", "9g.", "9h."]
     assert all(m in src for m in markers)
-    assert E.STAGE_ORDER == ("codemix", "duration", "voices", "tts", "vc",
+    assert E.STAGE_ORDER == ("codemix", "duration", "voices", "tts",
                              "timing", "mix", "lipsync")
 
 
@@ -562,6 +562,9 @@ def _job(tmp_path: Path, **cfg_over) -> Path:
     merged = _merged(root / "mt")
     cfg = {"diarization": "pyannote", "asr": "bodhan", "mt": "bodhan",
            "target_language": "hi", "target_script": "codemix",
+           # `vc` is a key only a pre-2026-10-28 run carries. Kept in the
+           # fixture on purpose: a legacy manifest must still replay now that
+           # stage 9f and `vc_model` are gone.
            "asr_language": "en", "tts": "bodhan", "vc": None,
            "voice_engine": None, "lipsync": "musetalk", "restore": None,
            "stem_model": "htdemucs", "skip_stems": False,
@@ -605,7 +608,7 @@ def test_rerun_drives_only_the_dirty_stages(tmp_path, monkeypatch):
     assert seen["lipsync_model"] == "musetalk"  # dirty
     assert seen["translit_model"] is None       # NOT dirty: no re-code-mix
     assert seen["duration_adjust"] is False
-    assert seen["vc_model"] is None
+    assert "vc_model" not in seen            # stage 9f is gone entirely
     assert seen["timing_producer"] is None
     assert seen["out_root"] == root
 

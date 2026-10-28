@@ -1,10 +1,10 @@
 """Which languages this install can actually dub into.
 
 There is no authoritative list in the repo — `--mt-target-language` is a
-free-form string with no `choices=`, and four partially-overlapping tables
-exist (`voices.DEFAULT_INDIC_SPEAK`, `nllb_adapter._ISO_TO_FLORES_NATIVE`,
-`jobs._LANG_RE`). A dropdown built from a hand-copied fourth list would drift
-the first time an adapter gained a voice.
+free-form string with no `choices=`, and two partially-overlapping tables
+exist (`voices.DEFAULT_INDIC_SPEAK`, `jobs._LANG_RE`). A dropdown built from
+a hand-copied third list would drift the first time an adapter gained a
+voice.
 
 So this builds the list **from the adapters at import time**. A language is
 offered only when the chosen TTS engine can actually speak it, because the
@@ -82,10 +82,8 @@ def languages_for(tts: Optional[str]) -> List[str]:
     eng = (tts or "").strip().lower()
     if eng in ("bodhan", "indic-speak", ""):
         return _catalog_languages("indic-speak")
-    if eng == "indicf5":
-        # Zero-shot cloning from a reference clip — not voice-table bound, so
-        # it is not this module's place to narrow it.
-        return sorted(LANGUAGES)
+    # A retired engine named by a job on disk (`edge`, `indicf5`). No catalog
+    # to narrow by, so offer everything rather than an empty dropdown.
     return _catalog_languages(eng) or sorted(LANGUAGES)
 
 

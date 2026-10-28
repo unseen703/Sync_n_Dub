@@ -81,7 +81,7 @@ def test_patch_file_exists_for_every_vendor_repo_that_names_one(manifest):
     ("lipsync:wav2lip", ["lipsync:musetalk"], False),
     ("lipsync:wav2lip", ["restore"], False),
     ("restore:gfpgan", ["restore"], True),
-    ("asd:talknet", ["asd:talknet"], True),
+    ("asd:loconet", ["asd:loconet"], True),
 ])
 def test_feature_matching(item_feature, wanted, expected):
     assert FA._matches_feature(item_feature, wanted) is expected

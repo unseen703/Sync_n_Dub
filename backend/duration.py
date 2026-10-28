@@ -1,23 +1,20 @@
-"""Duration-aware text adjustment (plan §7).
+"""Duration-aware text adjustment: rank translation candidates by fit.
 
-Problem: Indic translations run 1.1–1.4× longer than English; Indic-Translate
-has no length control. Solution: generate a handful of candidates per segment,
-rank them with a fitted linear duration model, synthesise the winner, and
-WSOLA-stretch the residual with a ±10% cap.
+Indic translations run 1.1-1.4x longer than English and the MT engine has no
+length control, so candidates are ranked by a fitted linear duration model,
+the winner is synthesised, and the residual is WSOLA-stretched under a +-10%
+cap.
 
-This module stops just short of synthesis — it writes `candidates[]`,
-`est_duration_s`, `target_duration_s`, and the winning `final_text` per
-segment, so the TTS stage can pick up the chosen text directly.
+Stops short of synthesis: writes `candidates[]`, `est_duration_s`,
+`target_duration_s` and the winning `final_text` per segment for the TTS
+stage to pick up.
 
-The linear model is `duration ≈ a·chars + b·words + c`, per (language,
-voice). Coefficients live under `data/duration_model/<lang>.<voice>.json`;
-`fit_duration_model` builds one from a (text, measured_duration_s) list
-produced from an actual TTS calibration run.
+The model is `duration ~= a*chars + b*words + c` per (language, voice), with
+coefficients under `data/duration_model/<lang>.<voice>.json`.
+`fit_duration_model` builds one from a real TTS calibration run.
 
-Candidate generation is interface-only here: upstream fills `candidates[]`
-on each segment with alternative translations (Path A, Path B with more
-retains, length-prompted variants). We score what the manifest already
-holds — this stage is the ranker, not the generator.
+This is the RANKER, not the generator -- upstream fills `candidates[]` with
+alternative translations and this scores what the manifest already holds.
 """
 from __future__ import annotations
 
@@ -71,8 +68,8 @@ class DurationModel:
         )
 
 
-# Rough fall-back when we have not calibrated this (language, voice) yet.
-# Based on Indic-Speak at ~15 chars/s and ~2.5 words/s with a 0.1 s pad.
+# Fallback for an uncalibrated (language, voice): Indic-Speak at ~15 chars/s
+# and ~2.5 words/s, plus a 0.1 s pad.
 DEFAULT_MODEL = DurationModel(
     a_chars=1.0 / 15.0, b_words=1.0 / 2.5 * 0.1, c_bias=0.10,
     language="default", voice="default", n_fit=0, mae_s=0.0,
@@ -94,8 +91,8 @@ def fit_duration_model(
 ) -> DurationModel:
     """Least-squares fit over (text, measured_duration_s) pairs.
 
-    Needs ~200 utterances for a stable fit per plan §7; works on fewer but
-    the MAE field tells the caller how trustworthy the result is.
+    Needs ~200 utterances for a stable fit; works on fewer, and the MAE field
+    says how far to trust it.
     """
     import numpy as np
     if len(samples) < 3:
@@ -154,8 +151,7 @@ QualityFn = Callable[[str, str], float]
 def sacrebleu_chrf(cand: str, ref: str) -> float:
     """Real chrF (sacrebleu, chrF++ word order 2), scaled to 0..1.
 
-    `_chrf_quick` is a 3-gram set-overlap stand-in; this is the metric it is
-    standing in for. Falls back to `_chrf_quick` if sacrebleu is absent so the
+    Falls back to the `_chrf_quick` stand-in when sacrebleu is absent, so the
     caller never has to branch.
     """
     if not cand or not ref:
@@ -175,8 +171,10 @@ _CHRF_METRIC = None
 
 
 def _chrf_quick(cand: str, ref: str) -> float:
-    """Cheap character n-gram overlap; a placeholder when sacrebleu is not
-    worth paying for in a tight inner loop. 0..1."""
+    """Cheap character n-gram overlap, 0..1.
+
+    Stands in for `sacrebleu_chrf` in a tight inner loop.
+    """
     if not cand or not ref:
         return 0.0
     cs = {cand[i:i+3] for i in range(max(0, len(cand) - 2))}
@@ -201,19 +199,17 @@ def rank_candidates(
 ) -> List[Candidate]:
     """Rank `candidates` (same source segment, different wordings).
 
-    `score = w_duration · |Δ|/target + w_quality · (1 − quality)
-           + w_terms · (missing_terms / expected_terms)`
+    `score = w_duration * |delta|/target + w_quality * (1 - quality)
+           + w_terms * (missing_terms / expected_terms)`
 
-    Lower is better. Returns candidates sorted by `score` ascending.
+    Lower is better; returns candidates sorted ascending.
 
-    `quality_fn(candidate, reference_text) -> 0..1` overrides the default
-    `_chrf_quick`. Note what `reference_text` means to the caller: scoring
-    against the beam-1 output makes the quality term a pure *deviation*
-    penalty -- every alternative is punished for not being beam-1, however
-    good it is. Passing the SOURCE text with `quality_fn=sacrebleu_chrf`
-    scores adequacy instead, which is what the term is supposed to mean.
-    `plan_segment_durations` still defaults to the beam-1 reference; this hook
-    is how a caller opts out.
+    `quality_fn(candidate, reference_text) -> 0..1` overrides `_chrf_quick`.
+    What `reference_text` is matters: against the beam-1 output the quality
+    term is a pure DEVIATION penalty, punishing every alternative for not
+    being beam-1. Passing the SOURCE text with `quality_fn=sacrebleu_chrf`
+    scores adequacy instead. `plan_segment_durations` defaults to beam-1;
+    this hook is how a caller opts out.
     """
     out: List[Candidate] = []
     retain_lc = [t.lower() for t in (retain_terms or []) if t]
@@ -258,12 +254,11 @@ def plan_segment_durations(
     safety_margin_s: float = 0.10,
     out_json: Optional[Path] = None,
 ) -> dict:
-    """Fill `target_duration_s`, `est_duration_s`, `candidates[]` on every
+    """Fill `target_duration_s`, `est_duration_s` and `candidates[]` on every
     segment of the merged ASR+MT+codemix JSON.
 
-    If a segment already carries `candidates[]` (upstream generated alt
-    translations), those get ranked too; otherwise we score just the single
-    `final_text` and record it as the winning candidate.
+    A segment that already carries `candidates[]` has them ranked; otherwise
+    `final_text` alone is scored and recorded as the winner.
     """
     merged_json = Path(merged_json)
     data = json.loads(merged_json.read_text())
@@ -335,12 +330,11 @@ def wsola_stretch_cap(
     max_stretch: float = 0.10,
     backend: str = "auto",
 ) -> Tuple[float, bool]:
-    """Stretch `wav_in` so its length matches `target_duration_s`, capped
-    at ±`max_stretch`. Returns (applied_factor, budget_violation).
+    """Stretch `wav_in` to `target_duration_s`, capped at +-`max_stretch`.
 
-    Kept as a shim because `backend.tts` unpacks this exact tuple. The real
-    work — and the record of *which* backend ran, which this signature cannot
-    carry — lives in `backend.stretch`.
+    Returns (applied_factor, budget_violation). A shim: `backend.tts` unpacks
+    this exact tuple, while the real work -- and the record of which backend
+    ran, which this signature cannot carry -- is in `backend.stretch`.
     """
     from .stretch import stretch_to_duration
     res = stretch_to_duration(
@@ -361,7 +355,7 @@ def _iter_merged_paths(merged_json) -> List[Path]:
     out: List[Path] = []
     for item in items:
         s = str(item)
-        # Quoted globs reach us unexpanded by design, so expand them here.
+        # Quoted globs arrive unexpanded by design, so expand them here.
         if any(ch in s for ch in "*?["):
             out.extend(sorted(Path(p) for p in glob.glob(s)))
         else:
@@ -378,9 +372,8 @@ def collect_duration_samples(
 ) -> List[Tuple[str, float]]:
     """Pair each segment's text with the measured length of its raw TTS wav.
 
-    Raw, not stretched: the stretched copy has already been forced towards
-    the target, so fitting on it would teach the model the cap rather than
-    the voice's natural pace.
+    Raw, not stretched: a stretched copy has been forced toward its target,
+    so fitting on it teaches the model the cap, not the voice's pace.
     """
     import soundfile as sf
     samples: List[Tuple[str, float]] = []
@@ -398,9 +391,8 @@ def collect_duration_samples(
             wav = seg.get(audio_field)
             if not wav or not Path(wav).exists():
                 continue
-            # Manifests written before the duration stage existed carry no
-            # `final_text`; the text that was actually synthesised is then
-            # whatever the TTS stage picked, same fallback chain as tts.py.
+            # Manifests predating the duration stage carry no `final_text`,
+            # so fall back the same way tts.py does to find what was spoken.
             text = seg.get(text_field) or seg.get("mt_text") or seg.get("text") or ""
             if not text.strip():
                 continue

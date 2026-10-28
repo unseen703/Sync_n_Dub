@@ -12,11 +12,12 @@ there. Together they're a from-scratch recipe for that env, line for line.
 | `dubbing` | `dubbing.yml` + `dubbing.pip.txt` | The main pipeline + UI env — everything in `backend/`, `models/` (except the three below) and `ui/` runs here. |
 | `musetalk` | `musetalk.yml` + `musetalk.pip.txt` + `build_mmcv_musetalk.sh` | diffusers/mmcv/mmdet/mmpose pins conflict with `dubbing`. |
 | `latentsync` | `latentsync.yml` + `latentsync.pip.txt` | diffusers/transformers/insightface pins conflict with `dubbing`. |
-| `restore` (on disk: `wav2liphd`) | `restore.yml` + `restore.pip.txt` | `basicsr`/`gfpgan` need a dead-import patch `dubbing` doesn't carry — see `restore.yml` for whether this needs its own env at all. |
+| `restore` | `restore.yml` + `restore.pip.txt` | `basicsr`/`gfpgan` need a dead-import patch `dubbing` doesn't carry — see `restore.yml` for whether this needs its own env at all. Renamed from `wav2liphd` on 2026-10-28; the adapter still accepts the old name with a warning. |
 | `dubui` | `dubui.yml` | Node, for building `ui/web/` — never a runtime dependency of the server. |
 
 **Deliberately excluded**: `lipgan` (vestigial — its adapter was removed
-2026-10-23, see `tests/test_lipsync_env_python.py`) and
+2026-10-23 and its last display row on 2026-10-28, see
+`tests/test_lipsync_env_python.py`) and
 `.venv-diarization` (CLAUDE.md records it as the "wrong interpreter" trap,
 not a real deploy target). `chemformer`, `chemformer-gpu` and `vllm` on this
 host are unrelated projects.

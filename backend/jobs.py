@@ -5,7 +5,7 @@ Every end-to-end run owns a self-contained tree under `data/jobs/<job_id>/`:
     data/jobs/<job_id>/
       manifest.json          <- status + config + stage inventory
       videos/ audio/ stems/ diarization/ faces/ asd/ asr/ align/ mt/
-      eval/ voices/ tts/ vc/ mix/ lipsync/ exp/
+      eval/ voices/ tts/ mix/ lipsync/ exp/
 
 Nothing a run produces escapes its job folder, so a job can be inspected,
 moved, tarred or deleted on its own without disturbing any other run.
@@ -117,7 +117,7 @@ JOB_LAYOUT_VERSION = 2
 #: root it is handed changes.
 STAGE_DIRS: tuple[str, ...] = (
     "videos", "audio", "stems", "diarization", "faces", "asd",
-    "asr", "align", "mt", "eval", "voices", "tts", "vc", "mix",
+    "asr", "align", "mt", "eval", "voices", "tts", "mix",
     "lipsync", "exp",
 )
 
@@ -293,7 +293,7 @@ _RESULT_FIELDS = (
     "num_aligned_words", "mt_model", "mt_target_language", "mt_target_script",
     "translit_model", "codemix_retained_terms", "duration_model_language",
     "duration_model_voice", "duration_estimated_violations", "voice_engine",
-    "tts_model", "tts_budget_violations", "tts_errors", "vc_model",
+    "tts_model", "tts_budget_violations", "tts_errors",
     "lipsync_model", "lipsync_error",
     # Stage 9b1's answer and the tier that produced it. `PipelineResult` has
     # carried these as named fields since 2026-10-17, but this allow-list is

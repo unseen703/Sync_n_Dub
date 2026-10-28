@@ -2,7 +2,7 @@
 
 The operator corrects the active speaker by WATCHING, so they need to see
 what the pipeline saw. This draws one box per tracked face per frame, green
-where TalkNet scored it above the speaking threshold and red where it did
+where ASD scored it above the speaking threshold and red where it did
 not, labelled with the track id, the speaker that track belongs to, and the
 score itself.
 

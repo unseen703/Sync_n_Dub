@@ -68,7 +68,7 @@ PRE_STAGES = ["meta", "fetch", "cut", "probe"]
 #: so without this map a re-render shows an empty stage list.
 EDIT_STAGE_KEYS = {
     "codemix": "9b", "duration": "9c", "voices": "9d", "tts": "9e",
-    "vc": "9f", "timing": "9f2", "mix": "9g", "lipsync": "9h",
+    "timing": "9f2", "mix": "9g", "lipsync": "9h",
 }
 
 
@@ -420,6 +420,8 @@ def _run_rerun(job_id: str, job_root: Path, jobs_dir: Path) -> int:
         writer.begin("6", "active speaker detection")
         writer.begin("9h", "lip-sync")
     _install_sigterm()
+    jv_v, jv_moves = _jv_begin(job_root, mix_tag, "edit",
+                               "lipsync" in res.dirty_stages)
     state, error = "done", None
     try:
         edit_agent.rerun(
@@ -436,11 +438,55 @@ def _run_rerun(job_id: str, job_root: Path, jobs_dir: Path) -> int:
         state, error = "failed", f"{type(e).__name__}: {e}"
         log.exception("re-render %s failed", job_id)
     finally:
+        _jv_end(job_root, jv_v, jv_moves, state, error)
         logging.getLogger().removeHandler(writer)
         writer.finish(state, error)
         writer.close()
         _pump(jobs_dir)
     return 0 if state == "done" else 1
+
+
+def _jv_begin(job_root: Path, edit_id: str, kind: str, will_lipsync: bool):
+    """Open this render's row in `versions/index.json`, and move the live
+    lip-sync render aside if a new one is about to overwrite it.
+
+    Returns `(version, moves)`. A record, never a dependency: any failure is
+    logged and the render runs without one.
+    """
+    try:
+        from backend import job_versions as jv
+        v = jv.begin_render(job_root, edit_id=edit_id, kind=kind)
+        moves = jv.stash_lipsync(job_root) if will_lipsync else []
+        return v, moves
+    except Exception as e:                           # noqa: BLE001
+        log.warning("versions: could not open a row for %s (%s)", edit_id, e)
+        return None, []
+
+
+def _jv_end(job_root: Path, v, moves, state: str, error) -> None:
+    """Close the row: link what the render produced, or put the old lip-sync
+    render back if this one failed."""
+    if v is None:
+        return
+    try:
+        from backend import job_versions as jv
+        if state != "done" and moves:
+            jv.unstash_lipsync(job_root, moves)
+        jv.finish_render(job_root, v, state, error)
+    except Exception as e:                           # noqa: BLE001
+        log.warning("versions: could not close v%s (%s)", v, e)
+
+
+def _jv_original(job_root: Path) -> None:
+    """Record phase one (everything up to the MT gate) as version 0."""
+    try:
+        from backend import job_versions as jv
+        if jv.find_by_edit_id(job_root, "original") is None:
+            jv.append(job_root, "original", edit_id="original",
+                      status="applied",
+                      artifacts=jv.link_transcript(job_root, "original"))
+    except Exception as e:                           # noqa: BLE001
+        log.warning("versions: could not record the original run (%s)", e)
 
 
 def _clear_awaiting_cast(job_root: Path) -> None:
@@ -515,6 +561,8 @@ def _run_cast(job_id: str, job_root: Path, jobs_dir: Path) -> int:
                             kind="cast")
     _attach(writer)
     _install_sigterm()
+    # Cast has no `commit()` behind it, so its row is created here.
+    jv_v, jv_moves = _jv_begin(job_root, "cast", "cast", False)
     state, error = "done", None
     try:
         edit_agent.rerun(
@@ -529,6 +577,7 @@ def _run_cast(job_id: str, job_root: Path, jobs_dir: Path) -> int:
         state, error = "failed", f"{type(e).__name__}: {e}"
         log.exception("cast %s failed", job_id)
     finally:
+        _jv_end(job_root, jv_v, jv_moves, state, error)
         logging.getLogger().removeHandler(writer)
         writer.finish(state, error)
         writer.close()
@@ -646,6 +695,7 @@ def run(job_id: str, *, rerun: bool = False, cast: bool = False,
         kwargs["stop_after_mt"] = True
         result = run_pipeline(str(clip), job_id=job_id, data_dir=DATA_DIR,
                               **kwargs)
+        _jv_original(job_root)
 
         # A lip-sync failure does NOT raise. `_run_pipeline` catches it into
         # `result.lipsync_error` and returns normally, on the reasoning that

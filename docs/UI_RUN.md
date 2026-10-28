@@ -131,7 +131,7 @@ is deliberate: the form sets only what it means.
 | `tts_model` | 9e | `bodhan` | needs BODHAN_TTS_KEY |
 | `tts_style` | 9b1 | `auto` | 'auto' = classify register from metadata |
 | `viseme_backend` | 9f1b | `mms_char` |  |
-| `voice_engine` | 9d | `indic-speak` | the voice CATALOG, not the engine |
+| `voice_engine` | 9d | `indic-speak` | the voice CATALOG, not the engine; derived from `tts`, no longer selectable |
 
 ## 5. What the operator actually chooses
 
@@ -150,8 +150,9 @@ is deliberate: the form sets only what it means.
 
 **Every hosted stage is one vendor.** ASR, MT and TTS are all Bodhan, so an
 outage takes the whole run rather than most of it — and these endpoints answer
-`internal_error` 5xx, not 429. There is no automatic fallback;
-`DUBBING_UI_ASR_MODEL=whisperx` is the manual one. ASR also needs its own
+`internal_error` 5xx, not 429. Since 2026-10-28 there is no fallback at all
+— the local ASR adapters were deleted, so `DUBBING_UI_ASR_MODEL` can only
+name a model the registry no longer has. ASR also needs its own
 `BODHAN_ASR_KEY`, separate from the MT and TTS keys.
 
 **A TTS outage still reports green.** `bodhan_adapter.synthesize` catches per

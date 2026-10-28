@@ -1,21 +1,24 @@
-"""Diarization model registry.
+"""Diarization model registry — pyannote community-1 only.
 
-Add a new model by importing its class here and adding it to `_REGISTRY`.
-The rest of the codebase should only ever call `get_diarizer(name, ...)` —
-never import an adapter directly.
+Add a new model by adding it to `_REGISTRY_SPEC`. The rest of the codebase
+should only ever call `get_diarizer(name, ...)` — never import an adapter
+directly.
+
+`diarizen` (BUT-FIT DiariZen) and `nemotron` (NVIDIA NeMo) were removed on
+2026-10-28. Both were alternatives nobody ran: the default has been
+`pyannote` at every call site since the CLI was written, and each dragged in
+a conflicting dependency chain that needed its own venv. In git at b823223
+if they are wanted back.
 """
 from __future__ import annotations
 
 from .._registry import make_registry
 from .base import BaseDiarizer, DiarizationResult, Turn
 
-# Each adapter lives in its own venv (pyannote / nemo / diarizen) because
-# their dependency chains conflict. Import lazily so a venv that only has
-# one adapter installed can still `import models.diarization`.
+# Imported lazily so `import models.diarization` costs nothing until a
+# diarizer is actually asked for.
 _REGISTRY_SPEC: dict[str, tuple[str, str]] = {
     "pyannote": (".pyannote_adapter", "PyannoteDiarizer"),
-    "diarizen": (".diarizen_adapter", "DiariZenDiarizer"),
-    "nemotron": (".nemotron_adapter", "NemotronDiarizer"),
 }
 
 _registry = make_registry(
@@ -24,9 +27,9 @@ _registry = make_registry(
     noun="diarization model",
     base=BaseDiarizer,
     import_noun="Diarizer",
-    import_detail="is not installed in this environment. Activate the "
-                  "matching venv (e.g. .venv-{key}) or install "
-                  "requirements-{key}.txt.",
+    import_detail="is not installed in this environment. pyannote runs in "
+                  "the main `dubbing` env; `pip install pyannote.audio` and "
+                  "set HF_TOKEN.",
     verbose_warning=True,
     get_doc="Instantiate a diarizer by name. Weights load lazily on first "
             "`diarize()`.\n\n    Unknown kwargs are dropped with a warning, "

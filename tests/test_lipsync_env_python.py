@@ -125,23 +125,22 @@ def test_the_removed_adapters_are_gone_from_both_sides():
         assert not (root / "models" / "lipsync" / f).exists(), f"{f} remains"
 
 
-def test_retired_models_still_resolve_for_old_jobs():
-    """Display-only rows, and they are load-bearing.
+def test_the_facts_table_matches_the_registry_exactly():
+    """No drift in either direction.
 
-    `"wav2lip_hd".startswith("wav2lip")` is True and `normalise()` matches on
-    prefix, so dropping the FACTS row would resolve three finished HD jobs on
-    disk to plain `wav2lip` -- the silent downgrade CLAUDE.md S4 records for
-    exactly this pair. `options()` reads the registry, so nothing retired is
-    ever offered.
+    The retired display-only rows (`wav2lip_hd`, `lipgan`, `latentsync`)
+    were dropped on 2026-10-28 by request, so FACTS and the registry now
+    hold the same three ids and nothing else. Before that the table
+    deliberately carried more than the registry did; `unregistered()`
+    excused those rows via `RETIRED`, which is now empty.
     """
     import ui.lipsync_models as L
+    from models.lipsync import available_models
 
-    for name in ("wav2lip_hd", "lipgan"):
-        assert L.normalise(name) == name, f"{name} no longer resolves"
-        assert name in L.RETIRED
-        assert name not in {r["id"] for r in L.options()}, (
-            f"{name} is retired but still offered")
+    assert set(L.FACTS) == set(available_models())
+    assert L.RETIRED == frozenset()
     assert L.unregistered() == {"missing_facts": [], "stale_facts": []}
+    assert {r["id"] for r in L.options()} == set(available_models())
 
 
 def test_env_example_documents_both_interpreters():
@@ -217,8 +216,8 @@ def test_an_unprobeable_source_keeps_the_safe_factor(monkeypatch):
     ((1079, 1081), (1078, 1080)),   # both sides forced even
 ])
 def test_cap_dims_is_a_ceiling_with_even_sides(dims, expected):
-    """`wav2lip_hd` restores to this, so it decides the HD output size too.
-    Odd dimensions matter: libx264 with yuv420p refuses them."""
+    """Stage 9i restores to this cap, so it decides the enhanced output
+    size too. Odd dimensions matter: libx264 with yuv420p refuses them."""
     from models.lipsync.wav2lip_adapter import cap_dims
     assert cap_dims(dims) == expected
 

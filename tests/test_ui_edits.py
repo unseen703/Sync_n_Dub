@@ -152,12 +152,14 @@ def test_tone_edit_starts_at_tts_not_voices(client):
 
 
 def test_tone_on_an_engine_that_ignores_style_is_refused_409(client):
-    """IndicF5 drops the style hint, so staging one would buy a GPU hour of
-    identical output. The refusal has to happen at staging time — a stale
+    """An engine that drops the style hint makes staging one buy a GPU hour
+    of identical output. The refusal has to happen at staging time — a stale
     client must not be able to park a no-op in `pending.json`.
 
-    This used to be the Edge case; with Edge gone, IndicF5 is the engine
-    that reads neither `style` nor `rate`."""
+    The check is an exclusion (`not in ("bodhan", "indic-speak")`), so it
+    still fires for a job on disk recorded against Edge or IndicF5, which is
+    the only way to reach it now that Bodhan is the only registered engine.
+    `indicf5` here is such a legacy job, not a current choice."""
     root = _job(client.data_dir, tts="indicf5")
     r = client.post(f"/api/jobs/{root.name}/edits",
                     json={"edits": [{"speaker_id": "SPEAKER_00",

@@ -1,30 +1,21 @@
-"""Talking Head page: a photo, a language, a line — and a face check first.
+"""Talking Head page: animate a still portrait against a chosen audio clip.
 
-The dubbing pipeline re-voices an existing performance. This page does the
-other thing: it animates a STILL portrait against a chosen clip. MuseTalk
-supports a single image natively (`get_file_type` accepts .jpg/.png and the
-frame cycle reuses the one frame for every audio chunk), verified on this
-host: one 1280x720 PNG plus 7 s of audio produced a 7.0 s / 25 fps render.
+MuseTalk takes a single image natively -- `get_file_type` accepts .jpg/.png
+and the frame cycle reuses the one frame for every audio chunk.
 
-TWO MEASURED CONSTRAINTS ARE ENCODED HERE, NOT GUESSED
-------------------------------------------------------
-1. **A 4K still fails.** Measured 2026-10-19: a 3840x2160 portrait made
-   MuseTalk's S3FD return `[None]` -- no face at that size -- and with zero
-   detections `average_range_minus` is empty, so a *print statement* at
-   `preprocessing.py:135` divides by zero. The render dies after the model
-   has loaded. `MAX_EDGE` downscales before that can happen, and the probe
-   reports it rather than letting the user discover it in a failed job.
-2. **Only the mouth moves.** MuseTalk inpaints the occluded lower face and
-   copies everything else through: measured 0.87% of the frame changing
-   between output frames. There is no head motion, no blinking, no gaze.
-   `ANIMATION_NOTE` says so on the page, because a user expecting SadTalker's
-   head movement will read a correct render as a broken one.
+Two constraints are encoded here:
 
-The dialogue catalogue is DATA (`data/talking_head/dialogues.json`), not code,
-so lines and their audio links can be added without a deploy. Every entry
-ships with `audio_url: null` deliberately -- the clips are supplied later, and
-an entry without one is offered-but-marked rather than hidden, so adding the
-link is the only step that makes it playable.
+1. A 4K still fails. S3FD returns `[None]` at 3840x2160, and with zero
+   detections a print statement at `preprocessing.py:135` divides by zero,
+   after the model has loaded. `MAX_EDGE` downscales first and the probe
+   reports it.
+2. Only the mouth moves. MuseTalk inpaints the occluded lower face and copies
+   the rest through -- no head motion, no blinking, no gaze. `ANIMATION_NOTE`
+   says so on the page.
+
+The dialogue catalogue is data (`data/talking_head/dialogues.json`), so lines
+and audio links can be added without a deploy. An entry with no `audio_url`
+is offered and marked unplayable rather than hidden.
 """
 from __future__ import annotations
 
@@ -43,29 +34,22 @@ log = logging.getLogger(__name__)
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CATALOGUE = REPO_ROOT / "data" / "talking_head" / "dialogues.json"
 
-#: Named in the "wrong interpreter" message below. `DUBBING_PY`, when set
-#: (`ui.server.main()` defaults it to its own `sys.executable`), is trusted
-#: first; otherwise derived the way `models/lipsync/base.py::resolve_env_python`
-#: derives a sibling env — from the conda prefix two levels above whichever
-#: python is running — so it stays right if the install moves. None rather
-#: than a literal `/data1/...` fallback: on any install where the sibling
-#: derivation fails too, that path does not exist on the operator's machine
-#: either, and a message pointing at it is worse than one admitting it does
-#: not know.
+#: Named in the "wrong interpreter" message below. `DUBBING_PY` wins when
+#: set; otherwise derived from the conda prefix two levels up, the way
+#: `models/lipsync/base.py::resolve_env_python` does, so it survives a move.
+#: None rather than a hard-coded path, which would not exist either.
 _sibling_dubbing_py = (Path(sys.executable).resolve().parent.parent.parent
                         / "dubbing" / "bin" / "python")
 _DUBBING_PY = (
     os.environ.get("DUBBING_PY")
     or (str(_sibling_dubbing_py) if _sibling_dubbing_py.exists() else None))
 
-#: Longest edge we hand to the renderer. Above this MuseTalk's S3FD finds no
-#: face at all and the run dies on a divide-by-zero; 1280 is the width that
-#: was verified working end to end.
+#: Longest edge handed to the renderer. Above this S3FD finds no face and
+#: the run dies on a divide-by-zero; 1280 is verified end to end.
 MAX_EDGE = 1280
 
-#: Below this a face is too small for a 256x256 crop to be anything but
-#: upscaled guesswork, which MuseTalk will inpaint detail into that was never
-#: in the source.
+#: Below this the 256x256 crop is upscaled guesswork and MuseTalk inpaints
+#: detail that was never in the source.
 MIN_FACE_PX = 96
 
 ANIMATION_NOTE = (
@@ -95,9 +79,8 @@ def categories() -> List[Dict[str, str]]:
 def dialogues_for(language: str) -> List[Dict[str, Any]]:
     """Lines offered for one language, newest shape first.
 
-    An entry with no `audio_url` is RETURNED, flagged `playable: False`.
-    Hiding it would make a half-populated catalogue look empty and give no
-    hint that the only missing piece is a link.
+    An entry with no `audio_url` is returned flagged `playable: False`, so a
+    half-populated catalogue does not look empty.
     """
     doc = _load()
     rows = doc.get("dialogues", {}).get((language or "").strip().lower()) or []
@@ -134,34 +117,18 @@ def _detector(device: str = "cpu"):
         ensure_onnxruntime_cuda()
     except Exception:                                   # noqa: BLE001
         log.debug("talking head: ort cuda preload failed", exc_info=True)
-    # `import torch` FIRST, and it is not decoration. cv2's bundled
-    # libtbb.so.12 wants CXXABI_1.3.15, which the system
-    # /lib/x86_64-linux-gnu/libstdc++.so.6 does not have and the conda one
-    # does; whichever library loads first decides which the process gets.
-    # Importing insightface on its own raises
-    #   libstdc++.so.6: version `CXXABI_1.3.15' not found
-    # and torch pulls the conda copy in first (CLAUDE.md section 1).
-    #
-    # The LD_PRELOAD that normally covers this is exported by
-    # `scripts/ui_run_job.sh`, which launches pipeline JOBS -- the UI SERVER
-    # is started by hand and has no such wrapper, so the preload is simply
-    # absent from its environment. A lazy import inside a request then turned
-    # the whole upload into a bare 500 with the reason only in the server's
-    # stderr. Verified on this host: `import torch` first and the import
-    # succeeds with no preload at all.
+    # `import torch` FIRST. cv2's bundled libtbb.so.12 needs CXXABI_1.3.15,
+    # which only the conda libstdc++ has, and whichever loads first wins --
+    # importing insightface alone raises `CXXABI_1.3.15' not found. torch
+    # pulls the conda copy in. The LD_PRELOAD that normally covers this is
+    # set by `scripts/ui_run_job.sh`, which launches jobs, not the UI server.
     import torch  # noqa: F401
     try:
         from insightface.app import FaceAnalysis
     except ImportError as e:
-        # NOT the same failure as a detector that loads and then misbehaves,
-        # and the two need different things from whoever reads it. This one is
-        # "the server is running in the wrong interpreter", and the only fact
-        # that identifies which is `sys.executable` — so say it.
-        #
-        # Seen on this host 2026-10-21: `python -m ui.server` was started from
-        # `.venv-diarization` (a uv venv with torch and cv2 but no
-        # insightface) rather than from `envs/dubbing`, and every photo upload
-        # answered "ModuleNotFoundError" with nothing pointing at the cause.
+        # The server is running in the wrong interpreter -- a different
+        # failure from a detector that loads and misbehaves. `sys.executable`
+        # is the only fact that identifies which, so name it.
         hint = (f"{_DUBBING_PY} -m ui.server" if _DUBBING_PY
                 else "the dubbing env's python -m ui.server "
                      "(set DUBBING_PY in .env if it cannot be found)")
@@ -179,9 +146,8 @@ def _detector(device: str = "cpu"):
 def probe_image(path: Path, *, device: str = "cpu") -> Dict[str, Any]:
     """Is there a usable human face in this picture?
 
-    Answers the page's gate. `ok` is the only thing the UI branches on; the
-    rest explains WHY, because "no face found" and "the face is 40 px wide"
-    need different things from the user.
+    The UI branches on `ok` alone; the rest says why, since "no face found"
+    and "the face is 40 px wide" need different fixes.
     """
     import cv2
 
@@ -195,19 +161,15 @@ def probe_image(path: Path, *, device: str = "cpu") -> Dict[str, Any]:
     try:
         faces = _detector(device).get(img)
     except ImportError as e:
-        # The wrong-interpreter case, kept separate because it is the only
-        # one the reader can act on and `type(e).__name__` is useless for it:
-        # "ModuleNotFoundError" names the exception class, not the mistake.
-        # `_detector` has already built the sentence, naming the python that
-        # is running and the one that should be, so pass it through verbatim.
+        # The wrong-interpreter case. `type(e).__name__` is useless here --
+        # "ModuleNotFoundError" names the class, not the mistake -- and
+        # `_detector` already built the sentence, so pass it through verbatim.
         log.error("talking head: %s", e)
         return {"ok": False, "reason": "detector_not_installed", "width": w,
                 "height": h, "message": str(e)}
     except Exception as e:                              # noqa: BLE001
         # A detector that cannot load is an environment fault, not a bad
-        # photo, and the two need different things from whoever reads it.
-        # Answering 500 put the reason in the server's stderr only, where
-        # the person uploading never sees it.
+        # photo. A 500 would leave the reason in the server's stderr only.
         log.exception("talking head: face detector unavailable")
         return {"ok": False, "reason": "detector_unavailable", "width": w,
                 "height": h,

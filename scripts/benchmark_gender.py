@@ -8,7 +8,7 @@ Design, and why each step is there:
   3. `predict_gender_face` on each track -> the REFERENCE label. This is
      itself a model (insightface genderage.onnx), not truth, so the result
      below is agreement with it, not accuracy.
-  4. ASD (TalkNet) scores each track per frame for "is this face speaking".
+  4. ASD (LoCoNet) scores each track per frame for "is this face speaking".
      This is what pairs a face with a VOICE: without it, the audio under a
      face track is whoever happened to be talking, and the whole comparison
      measures nothing. Only tracks that actually speak are kept.
@@ -29,10 +29,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-# TALKNET_REPO and TALKNET_CHECKPOINT live in .env and nothing puts them in
-# the environment on its own; without this the ASD stage dies with "TalkNet
-# repo not found", which reads like a missing clone rather than an unloaded
-# file. The path is explicit because bare `load_dotenv()` searches upward
+# LOCONET_REPO and the other vendor-path overrides live in .env and nothing
+# puts them in the environment on its own; without this the ASD stage dies
+# with "repo not found", which reads like a missing clone rather than an
+# unloaded file. The path is explicit because bare `load_dotenv()` searches upward
 # from the CALLING FILE — run from outside the repo it silently finds
 # nothing and the failure looks identical. Same convention as
 # `scripts/clip_dub_audio.py`.
@@ -49,7 +49,7 @@ from backend.media_io import _ffmpeg_bin, probe_duration
 OUT = ROOT / "data/gender_bench"
 CLIP_S = 90.0
 MIN_SPEAK_FRAMES = 25          # ~1 s at 25 fps: shorter is not a voice sample
-ASD_SPEAK_THRESHOLD = 0.5      # talknet score above which a face is speaking
+ASD_SPEAK_THRESHOLD = 0.5      # ASD score above which a face is speaking
 
 
 def cut(src: Path, dst: Path, start: float, dur: float, *, audio_only=False):
@@ -58,7 +58,7 @@ def cut(src: Path, dst: Path, start: float, dur: float, *, audio_only=False):
     dst.parent.mkdir(parents=True, exist_ok=True)
     cmd = [_ffmpeg_bin(), "-y", "-v", "error", "-ss", f"{start:.3f}",
            "-t", f"{dur:.3f}", "-i", str(src)]
-    # `-r 25` is not cosmetic. TalkNet pairs 100 fps audio features with
+    # `-r 25` is not cosmetic. The ASD frontends pair audio features with
     # video frames 4:1; on a variable-frame-rate source the frame count
     # drifts from the audio length and the model dies with
     # "size of tensor a (111) must match tensor b (106)". The repo's own
@@ -78,11 +78,11 @@ def run_one(name: str, src: Path) -> list:
     span = min(CLIP_S, dur)
     work = OUT / name
     clip = cut(src, work / "clip.mp4", start, span)
-    # The audio is cut LONGER than the video on purpose. The TalkNet adapter
+    # The audio is cut LONGER than the video on purpose. An ASD adapter
     # takes `audio[track_start : track_start + n_frames * 640]` and clamps the
     # end to `len(audio)`, so a face track running to the last video frame
-    # gets a short slice whose MFCC falls a few frames under the 4:1 the
-    # model's frontend expects — and the whole call dies with "size of tensor
+    # gets a short slice that falls a few frames under the 4:1 the model's
+    # frontend expects — and the whole call dies with "size of tensor
     # a (19) must match the size of tensor b (20)". A tail of spare audio
     # means the clamp never bites. Nothing reads past the track's own span.
     wav = cut(src, work / "clip.16k.wav", start, span + 2.0, audio_only=True)
@@ -98,7 +98,7 @@ def run_one(name: str, src: Path) -> list:
                                   tracker="bytetrack", every_n=1,
                                   min_score=0.5, tracks_out=npz)
     print(f"  tracks: {len(tracks.tracks)}", flush=True)
-    asd = score_asd(clip, wav, tracks, model="talknet")
+    asd = score_asd(clip, wav, tracks, model="loconet")
 
     rows = []
     for tr in tracks.tracks:

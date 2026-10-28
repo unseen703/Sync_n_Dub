@@ -3,10 +3,11 @@
 The problem this solves
 -----------------------
 Stage 9d writes `voices/<stem>.<engine>.voices.json` **only inside
-`if voice_engine:`**. A cloning run (IndicF5, VC) takes the `else` branch,
-builds `speaker_voice_map` in memory, and persists nothing. Older jobs on
-disk predate the catalog default and have no `*.voices.json` at all, so a UI
-that only read that file would show an empty speaker table on most of them.
+`if voice_engine:`**. A run with no voice catalog takes the `else` branch,
+builds `speaker_voice_map` in memory, and persists nothing — that was the
+cloning path (IndicF5, VC) until both were removed, and it is still how a
+pre-catalog job on disk looks. Older jobs have no `*.voices.json` at all, so
+a UI that only read that file would show an empty speaker table on most.
 
 Four sources are tried in order of how directly they record the decision:
 
@@ -188,10 +189,8 @@ def _replay_else_branch(job_root: Path, config: Dict[str, Any]) -> Dict[str, dic
     if not refs:
         return {}
     tts = (config.get("tts") or "").lower()
-    # Since Edge was removed, that branch assigns no voice at all: it is
-    # reached only by the cloning engines (IndicF5, VC), where the reference
-    # clip IS the voice and there is no name to report. Say so rather than
-    # inventing one.
+    # That branch assigns no voice at all -- there is no catalog to cast
+    # from, so there is no name to report. Say so rather than inventing one.
     return {sid: {"engine": tts or None, "voice": None, "score": None,
                   "rationale": None, "source": "derived"}
             for sid in refs}
@@ -476,7 +475,8 @@ def _segment_tones(merged: Dict[str, Any]) -> Dict[str, str]:
 def _engine_label(engine: str) -> str:
     return {"bodhan": "Bodhan Indic voices",
             "indic-speak": "Bodhan Indic voices",
-            "indicf5": "IndicF5 (cloned from the speaker)"}.get(
+            # Retired, kept so a job recorded on it still reads.
+            "indicf5": "IndicF5 (cloned from the speaker, removed)"}.get(
                 (engine or "").lower(), engine or "—")
 
 

@@ -14,7 +14,7 @@ Free is `backend.gpu.free_devices()`, not a memory threshold: it already
 knows to ignore this process group's own PIDs, so the watcher does not see
 itself or anything it launched as a blocker.
 
-    $PY scripts/gpu_watcher.py --minutes 30 -- bash scripts/run_wav2liphd_clips.sh
+    $PY scripts/gpu_watcher.py --minutes 30 -- bash scripts/run_lipsync.sh musetalk <stem>
 
 Writes a line on every state change, not every poll, so the log stays
 readable across a multi-hour wait and still records exactly when the

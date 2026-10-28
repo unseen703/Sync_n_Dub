@@ -356,9 +356,11 @@ roughly 5×.
 `ui/presets.py` defaults ASR, MT and TTS all to `bodhan` (ASR moved off
 `whisperx` by request). That removes the one stage that used to run locally,
 so an outage — which these endpoints answer as `internal_error` 5xx, not as
-rate limiting — now takes the whole run rather than most of it. There is no
-automatic fallback; `DUBBING_UI_ASR_MODEL=whisperx` is the manual one, and
-ASR needs its own `BODHAN_ASR_KEY`, separate from the MT and TTS keys.
+rate limiting — takes the whole run rather than most of it. Since 2026-10-28
+there is no fallback at all, manual or automatic: the local adapters were
+deleted, so Bodhan is the only name in the ASR, MT, translit and TTS
+registries. ASR needs its own `BODHAN_ASR_KEY`, separate from the MT and TTS
+keys.
 
 **Code-mixing is the MT call's job, and stage 9b is not in a UI run.**
 The UI asks for `mt_target_script="codemix"`, which is

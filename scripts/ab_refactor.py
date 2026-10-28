@@ -69,7 +69,6 @@ _REGISTRIES = [
     ("models.asr",          "get_asr",            "available_models"),
     ("models.mt",           "get_mt",             "available_models"),
     ("models.tts",          "get_tts",            "available_models"),
-    ("models.vc",           "get_vc",             "available_models"),
     ("models.translit",     "get_transliterator", "available_models"),
     ("models.lipsync",      "get_lipsync",        "available_models"),
     ("models.diarization",  "get_diarizer",       "available_models"),
@@ -148,7 +147,6 @@ def capture_probes() -> dict:
     # The adapters' own copies, while they still exist.
     for mod_path in ("models.lipsync.wav2lip_adapter",
                      "models.lipsync.musetalk_adapter",
-                     "models.lipsync.lipgan_adapter",
                      "models.lipsync.latentsync_adapter"):
         try:
             m = importlib.import_module(mod_path)

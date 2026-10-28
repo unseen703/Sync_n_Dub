@@ -1,18 +1,14 @@
-"""Time-stretch backends, chosen explicitly and measured (plan §7).
+"""Time-stretch backends, chosen explicitly and measured.
 
-Duration fitting only buys us a few percent; the rest of the lip-sync budget
-is paid by stretching the synthesised audio. *How* it is stretched decides
-whether the dub sounds like the speaker or like a chipmunk, so this module
-makes the backend a named, inspectable variable instead of a silent fallback.
+How the synthesised audio is stretched decides whether the dub sounds like
+the speaker or a chipmunk, so the backend is a named, inspectable variable
+rather than a silent fallback. A missing pyrubberband swallowed by a bare
+`except` lands every stretch on an `np.interp` resample -- a pitch shifter,
+not a time stretcher -- with nothing logged.
 
-The history here matters: `duration.wsola_stretch_cap` used to `try: import
-pyrubberband` inside a bare `except Exception`, and pyrubberband is not
-installed on any of our hosts. Every stretch therefore landed on an
-`np.interp` resample — a pitch shifter, not a time stretcher — and nothing
-logged it. Picking an ffmpeg binary without checking that it carries the
-filter you want is the same bug one level down: the ffmpeg on PATH here has
-`atempo` but no `rubberband`, while the imageio-ffmpeg build has both. So
-`ffmpeg_with_filter` probes for the *filter*, not the binary.
+`ffmpeg_with_filter` probes for the FILTER, not the binary: the ffmpeg on
+PATH here has `atempo` but no `rubberband`, while the imageio-ffmpeg build
+has both.
 
 Backend semantics are uniform: `factor > 1` means speed up (shorter output),
 matching `actual_duration / desired_duration`.
@@ -41,15 +37,11 @@ _ATEMPO_MIN = 0.5
 _ATEMPO_MAX = 2.0
 
 # ffmpeg's `rubberband` filter drops its final output block when the input
-# frame count is an exact multiple of 1024: measured on ffmpeg 7.0.2
-# (imageio-ffmpeg) with a 24 kHz mono clip of 71680 frames (70 x 1024) at
-# factor 1.10, the output came back 1645 frames (68.5 ms) short, while the
-# same clip with one frame added or removed came back exact. Every segment
-# the `bodhan` TTS writes is a whole number of 1024-frame blocks, so this
-# fired on 9 of 9 bodhan segments and 0 of 14 edge segments — a 68 ms silent
-# truncation, above the 55 ms ground-truth timing floor, on an entire
-# engine's output. We pad the input with silence so the block that gets
-# dropped is padding, then trim back to the exact target length.
+# frame count is an exact multiple of 1024 -- measured ~68 ms short on a
+# 24 kHz clip at factor 1.10, exact with one frame added or removed. Every
+# `bodhan` segment is a whole number of 1024-frame blocks, so it hits all of
+# them. Pad the input with silence so the dropped block is padding, then trim
+# back to the exact target length.
 _RB_TAIL_PAD_FRAMES = 8192
 
 
@@ -83,10 +75,9 @@ def _require(pkg: str, pip_name: Optional[str] = None):
 def _candidate_ffmpeg_bins() -> List[str]:
     """ffmpeg builds worth probing, best-stocked first.
 
-    The bundled imageio-ffmpeg static build leads because it is the only one
-    on this host compiled with librubberband; the PATH ffmpeg comes last
-    among the real candidates precisely because preferring it is what hid the
-    missing filter.
+    The bundled imageio-ffmpeg static build leads -- the only one here built
+    with librubberband -- and the PATH ffmpeg comes last, since preferring it
+    is what hides the missing filter.
     """
     cands: List[str] = []
 
@@ -118,8 +109,8 @@ def _binary_has_filter(binary: str, name: str) -> bool:
     except Exception as e:
         log.debug("filter probe failed for %s: %s", binary, e)
         return False
-    # Rows read " ..C rubberband  A->A  Apply ..." — anchor on the name column
-    # so a mention inside another filter's description cannot match.
+    # Rows read " ..C rubberband  A->A  Apply ...". Anchor on the name
+    # column so a mention in another filter's description cannot match.
     pat = re.compile(rf"^\s*\S+\s+{re.escape(name)}\s", re.MULTILINE)
     return bool(pat.search(proc.stdout or "") or pat.search(proc.stderr or ""))
 
@@ -158,8 +149,7 @@ def available_backends() -> List[str]:
 def resolve_backend(name: str = "auto") -> str:
     """Resolve `name` to a usable backend, or raise.
 
-    A named backend never downgrades silently — that is the whole point of
-    this module. Only "auto" is allowed to choose.
+    A named backend never downgrades silently; only "auto" may choose.
     """
     avail = available_backends()
     if name == "auto":
@@ -203,8 +193,8 @@ def ffmpeg_stretch_filter(factor: float, *, backend: str) -> str:
     if factor <= 0:
         raise ValueError(f"factor must be positive, got {factor}")
     if backend == "rubberband":
-        # pitch=1 keeps the speaker's voice; crisp transients stop consonants
-        # smearing at the small factors we actually use.
+        # pitch=1 keeps the speaker's voice; crisp transients stop
+        # consonants smearing at the small factors used here.
         return f"rubberband=tempo={factor:.6f}:pitch=1:transients=crisp"
     if backend == "ffmpeg_atempo":
         return ",".join(f"atempo={s:.6f}" for s in _atempo_chain(factor))
@@ -233,12 +223,10 @@ def _run_ffmpeg(binary: str, wav_in: Path, wav_out: Path, filt: str,
 def _resample_to(audio, sr_in: int, sr_out: Optional[int]):
     """Actually resample `audio` from `sr_in` to `sr_out`.
 
-    The ffmpeg backends get this for free from `-ar`; the in-process backends
-    do not. Writing the same samples under a different header instead — which
-    is what `sf.write(..., sample_rate)` alone does — rescales both duration
-    and pitch, i.e. exactly the bug this module exists to kill. `None` or an
-    unchanged rate returns the array untouched, so the default path is
-    byte-identical.
+    The ffmpeg backends get this from `-ar`; the in-process ones do not.
+    `sf.write(..., sample_rate)` alone writes the same samples under a new
+    header, which rescales both duration and pitch. `None` or an unchanged
+    rate returns the array untouched.
     """
     import numpy as np
     if not sr_out or int(sr_out) == int(sr_in) or len(audio) == 0:

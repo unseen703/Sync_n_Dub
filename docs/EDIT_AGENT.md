@@ -49,12 +49,17 @@ is replayed.
 | `set_speaker` | reattribute dialogue to another existing speaker | `speaker` | — | `voices` |
 | `set_voice` | pin a specific TTS voice | `voice` | `engine` | `voices` |
 | `set_speed` | re-fit speech into a shorter/longer slot | `factor` (0.5–2.0) | — | `tts` |
-| `lipsync_window` | lip-sync only a time window | — | `model` (`wav2lip`\|`musetalk`\|`latentsync`) | `lipsync` |
+| `lipsync_window` | lip-sync only a time window | — | `model` (`wav2lip`\|`musetalk`\|`latentsync15`) | `lipsync` |
 | `mute_cue` | silence scoped cues, release the slot as pause | — | — | `timing` |
 | `set_target_language` | switch the dub's output language via Bodhan MT | `target_language` (ISO code of a supported Indic language) | `target_script` | `codemix` (whole dub) or `tts` (per-cue) |
 
 Stage order for replay:
-`codemix → duration → voices → tts → vc → timing → mix → lipsync`.
+`codemix → duration → voices → tts → timing → mix → lipsync`.
+
+> `vc` (stage 9f, voice conversion) was removed from the chain on
+> **2026-10-28** along with `models/vc/` and `backend/voice_convert.py`. No
+> run on disk ever set it — the registry had been empty since 2026-10-23 —
+> so a legacy `request.json` carrying `"vc": null` still replays unchanged.
 
 > **`set_speaker` was invisible until 2026-10-19.** It has been registered in
 > `backend/edits.py` all along, but the generated `op_catalogue()` advertised
@@ -173,7 +178,7 @@ correct.
 |---|---|
 | `set_tone` on a non-Bodhan engine | *"tts engine 'indicf5' ignores the style hint … the tone change will come from the rewritten wording alone"* — only the Bodhan adapter forwards `instructions.style` |
 | per-segment rate | only engines with `supports_rate = True` honour it; since Edge was removed that is Bodhan alone |
-| IndicF5 | reads neither style nor rate — a tone edit changes the wording and nothing about the delivery |
+| IndicF5 (removed 2026-10-28) | read neither style nor rate — on a job recorded against it a tone edit changes the wording and nothing about the delivery |
 | `set_gender` | a hard filter on the voice catalog, not a weight; if the same-gender pool is exhausted it crosses gender and says so |
 
 ## 6. Accepted, but the stage is not in this job

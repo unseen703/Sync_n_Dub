@@ -41,7 +41,7 @@ need. Long form:
 PY=/data1/dipak_data/miniconda3/envs/dubbing/bin/python
 ```
 
-Aux envs `musetalk`, `latentsync`, `lipgan` exist for upstream pin conflicts; adapters shell into them via
+Aux envs `musetalk`, `latentsync` exist for upstream pin conflicts; adapters shell into them via
 `<MODEL>_PYTHON` (all in `.env.example`). Node (`dubui` env) is for the UI build only; bare `npm` is broken.
 
 **libstdc++ preload.** Anything touching faces/ASD needs this, or `import insightface` fails on
@@ -51,7 +51,8 @@ Aux envs `musetalk`, `latentsync`, `lipgan` exist for upstream pin conflicts; ad
 export LD_PRELOAD=/data1/dipak_data/miniconda3/envs/dubbing/lib/libstdc++.so.6
 ```
 
-**GPUs.** 2 × NVIDIA RTX PRO 2000 Blackwell, 16311 MiB each (sm_120). 16 GiB rules out LatentSync at 512
+**GPUs.** 2 × NVIDIA RTX PRO 2000 Blackwell, 16311 MiB each (sm_120). 16 GiB ruled out LatentSync at 512
+— which is why 1.6 was removed on 2026-10-28, leaving `latentsync15` at 256 —
 and leaves MuseTalk ~100 MiB at `batch_size=20`. Pin with `CUDA_VISIBLE_DEVICES` or `DUBBING_GPUS=0,1`.
 A card is "free" when idle (`backend/gpu.py::free_devices`: util under 10% AND foreign memory under 10%);
 `DUBBING_GPU_ALLOW_SHARED=1` overrides. onnxruntime silently falls back to CPU unless
@@ -88,7 +89,10 @@ interpreter's dir, and `BaseLipSync._subprocess_env()` puts it on PATH, because 
   needs `--condense-overlong`.
 - **Edit replays read the run's own `request.json`**, not argparse defaults. A new `SpeedSetup` field also
   goes in `plan_config`; `tests/test_ui_backend_sync.py` greps both.
-- **Bodhan is the only TTS engine.** `--tts bodhan` implies `--voice-engine indic-speak`.
+- **Bodhan is the only adapter left in every hosted-stage registry** — ASR, MT, transliteration and
+  TTS (2026-10-28). `--voice-engine` is gone: the voice catalog follows from `--tts`
+  (`pipeline._default_voice_engine`). Diarization is pyannote community-1 alone, alignment is `mms_fa`
+  alone, and `models/vc/` plus stage 9f no longer exist.
 
 ### Canonical implementations — find these, don't rewrite them
 
@@ -104,7 +108,7 @@ A new caller imports the canonical one. A new adapter inherits. A case that does
 | best-effort JSON read of a job file | `ui/_io.py::read_json` |
 | lip-sync model ids the edit agent advertises | `models.lipsync.available_models()`, via `edits._lipsync_model_ids` |
 | delivery styles the TTS engine accepts | `backend/edits.py::tone_styles` (reads `INDIC_SPEAK_STYLES`) |
-| ASD face crops, int16-scale MFCC, VRAM windowing | `models/asd/_mfcc_av.py` |
+| ASD face crops, VRAM windowing | `models/asd/_av_frontend.py` |
 | where a vendored upstream lives, either side of the move | `models/_vendor.py::resolve_vendor_repo` |
 
 Don't break these: `_REGISTRY_SPEC` stays a module-level dict literal (`repo_checkup.py` parses it), registry

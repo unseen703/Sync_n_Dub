@@ -23,22 +23,19 @@ The chain:
     render                backend.rate_ramp.apply_warp
       -> `tts_warped_audio`, exactly `out_slot` long
 
-WHY THE PRODUCER RENDERS AUDIO. A `TimingPlan` is `(file, trim, delay,
-tempo)`; there is no way to spell a time-varying rate in it. So the plan this
-producer emits -- one Piece, `local_tempo = 1.0` -- is only meaningful against
-files that already exist. Keeping the render in a separate stage would mean
-emitting a plan that cannot be rendered until something else has run, which
-is a worse contract than a slow producer. Stage 9f2 is therefore minutes
-rather than milliseconds on this path, and the log says so per cue.
+THIS PRODUCER RENDERS AUDIO. A `TimingPlan` is `(file, trim, delay, tempo)`
+and cannot spell a time-varying rate, so the plan it emits -- one Piece,
+`local_tempo = 1.0` -- is only meaningful against files that already exist.
+Stage 9f2 is therefore minutes rather than milliseconds here, and the log
+says so per cue.
 
-WHY TWO PASSES AND NOT ONE. `plan_tempo` decides how time is shared BETWEEN
-cues; `allocate` decides how one cue's slot is split between its speech and
-its silence. Running the allocator second, against the slot the planner
-fixed, means island conservation holds by construction -- `out_slot` is never
-touched again -- while the realised speech rate is still chosen silence-first.
-The cost is that the realised rate can drift off the planner's by a little,
-so the slew limit is VERIFIED on the realised tempos and reported as
-`tempo_step_max` rather than asserted.
+TWO PASSES, NOT ONE. `plan_tempo` shares time BETWEEN cues; `allocate` splits
+one cue's slot between its speech and its silence. Running the allocator
+second, against the slot the planner fixed, keeps island conservation true by
+construction (`out_slot` is never touched again) while the realised speech
+rate is still chosen silence-first. The realised rate can then drift off the
+planner's, so the slew limit is VERIFIED on the realised tempos and reported
+as `tempo_step_max` rather than asserted.
 """
 from __future__ import annotations
 
@@ -71,10 +68,8 @@ def _silence_spans(cp, duration_s: float, *, edge: bool = True
                    ) -> List[Tuple[float, float]]:
     """Every silent span in the clip: lead, internal gaps, tail.
 
-    Edges are included as ordinary gaps. The engine's run-up is not prosody --
-    the slot already decides where the cue starts -- so there is no reason to
-    protect it more than a breath, and treating it uniformly keeps one code
-    path instead of two.
+    Edges count as ordinary gaps: the slot already decides where the cue
+    starts, so the engine's run-up is not prosody worth protecting.
     """
     spans: List[Tuple[float, float]] = []
     if not cp.speech:
@@ -126,10 +121,9 @@ def plan_warped(
     data = json.loads(merged_json.read_text())
     segs = list(data.get("segments", []))
 
-    # Preflight, before a single cue is planned. Finding out that nothing on
-    # this host can render a time map AFTER the whole file has been planned
-    # is the expensive way to learn it, and `backend/stretch.py` records that
-    # pyrubberband has been missing here before.
+    # Preflight before any cue is planned: discovering that nothing here can
+    # render a time map after the whole file is planned is the expensive way
+    # to find out.
     chosen = (_ramp.available_backend() if warp_backend == "auto"
               else warp_backend)
     if chosen is None:
@@ -178,14 +172,14 @@ def plan_warped(
             speech_s = max(1e-3, raw - sum(e - s for s, e in spans))
         else:
             spans, speech_s = [], raw
-        # Both bounds apply, so the floor is the LARGER of them: a gap may
-        # not fall below its tier floor, and it may not give up more than
-        # `absorb_max_frac` of itself. `allocate` enforces the same pair.
+        # Both bounds apply, so the floor is the LARGER: a gap may not fall
+        # below its tier floor, nor give up more than `absorb_max_frac` of
+        # itself. `allocate` enforces the same pair.
         floors = [max(_absorb.pause_floor(e - s),
                       (e - s) * (1.0 - absorb_max_frac)) for s, e in spans]
-        # `fixed_s` is the TIGHTEST the silence may be, which is what gives
-        # the planner the most room. Whatever slot it then hands back is
-        # re-split by `allocate` below, so nothing is lost by being greedy.
+        # `fixed_s` is the TIGHTEST the silence may be, giving the planner
+        # the most room. `allocate` re-splits whatever slot comes back, so
+        # being greedy here costs nothing.
         fixed_s = float(sum(max(f, 0.0) for f in floors))
 
         meta[sid] = {"clip": str(clip), "raw": raw, "spans": spans,
@@ -241,14 +235,13 @@ def plan_warped(
         realised[c.id] = a.speech_tempo
         allocs[c.id] = a
 
-    # lead/trail must follow the REALISED rates, or the joints are matched
-    # against numbers nothing rendered.
+    # lead/trail follow the REALISED rates, or the joints match numbers
+    # nothing rendered.
     #
-    # Neighbours are ISLAND-LOCAL. Taking them in global order would couple
-    # the last cue of one island to the first of the next -- across a scene
-    # cut, a speaker change or a second of silence, which are precisely the
-    # places the planner refused to couple. The ramp would then ease toward a
-    # rate the next cue does not have.
+    # Neighbours are ISLAND-LOCAL. Global order would couple the last cue of
+    # one island to the first of the next -- across a cut, a speaker change
+    # or a second of silence, exactly where the planner refused to couple --
+    # and the ramp would ease toward a rate the next cue does not have.
     from .tempo_plan import _islands
 
     for group in _islands(cues, cfg):
@@ -290,18 +283,16 @@ def plan_warped(
             sf.write(str(dest), np.asarray(out, dtype="float32"), sr)
             got = float(len(out)) / sr
         except Exception as exc:                            # noqa: BLE001
-            # One bad cue must not cost the dub. Fall back to this cue's
-            # steady tempo over the raw clip -- exactly what `naive_slot`
-            # would have rendered.
+            # One bad cue must not cost the dub: fall back to this cue's
+            # steady tempo over the raw clip, what `naive_slot` would render.
             #
-            # `tts_warped_audio` is POINTED AT THE RAW FILE rather than left
-            # unset, and that is load-bearing: the mix runs with
-            # `clip_source="warped"`, and `mix._resolve_clip` raises on a
-            # segment that carries other clips but not the requested one --
-            # which `_build_plan_pieces` turns into a SKIP. An unset field
-            # here would drop the line from the dub entirely, silently, over
-            # a stretcher hiccup. With the field set the mix reads the raw
-            # clip and applies `local_tempo` in its own graph.
+            # Point `tts_warped_audio` AT THE RAW FILE rather than leaving it
+            # unset. The mix runs with `clip_source="warped"`, and
+            # `mix._resolve_clip` raises on a segment carrying other clips but
+            # not the requested one, which `_build_plan_pieces` turns into a
+            # SKIP -- so an unset field drops the line from the dub silently.
+            # With it set, the mix reads the raw clip and applies
+            # `local_tempo` in its own graph.
             n_failed += 1
             log.warning("warp: %s failed (%s: %s); falling back to a constant "
                         "%.3fx over the raw clip", sid, type(exc).__name__,
@@ -353,14 +344,13 @@ def plan_warped(
              for a_, b in zip(tempos, tempos[1:])]
     step_max = float(np.exp(max(steps)) - 1.0) if steps else 0.0
 
-    # `summarize` already derives speech_tempo_max/mean and
-    # speech_untouched_segments from `qc["speech_tempo"]`, and its version is
-    # the better one -- it includes cues that fell back to a constant tempo,
-    # which `tempos` (the cue plans) does not.
+    # `summarize` derives speech_tempo_max/mean and
+    # speech_untouched_segments from `qc["speech_tempo"]`, and includes cues
+    # that fell back to a constant tempo, which `tempos` does not.
     plan_obj.summary = summarize(plan_obj)
     plan_obj.summary.update({
-        # The headline for this producer: the realised boundary step, against
-        # the limit asked for, beside what the naive fit would have done.
+        # The headline: the realised boundary step, the limit asked for, and
+        # what the naive fit would have done.
         "tempo_step_max": round(step_max, 4),
         "tempo_step_limit": max_rel_step,
         "tempo_step_ok": bool(step_max <= max_rel_step + 1e-3),
@@ -376,11 +366,10 @@ def plan_warped(
     data["segments"] = segs                    # carry tts_warped_audio back
     if out_json:
         plan_obj.write(Path(out_json))
-    # This producer REWRITES the merged JSON in place (it adds
-    # `tts_warped_audio` per segment), so it owes a version -- CLAUDE.md §2,
-    # and `tests/test_mt_versions.py::test_every_mutating_stage_snapshots`
-    # greps for exactly this. The snapshot is taken of what is about to be
-    # written, never of whatever is on disk afterwards.
+    # This producer rewrites the merged JSON in place (adding
+    # `tts_warped_audio` per segment), so it owes a version;
+    # `tests/test_mt_versions.py::test_every_mutating_stage_snapshots` greps
+    # for this. Snapshot what is about to be written, not what lands on disk.
     merged_json.write_text(json.dumps(data, indent=2, ensure_ascii=False))
     try:
         from .mt_versions import snapshot as _mt_snapshot

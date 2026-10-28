@@ -33,7 +33,7 @@ def diarize(
 
     Args:
       audio: mono 16 kHz WAV.
-      model: one of `available_models()` — pyannote, diarizen.
+      model: one of `available_models()` — pyannote.
       device: 'cuda' | 'cpu' | 'mps' | None (auto).
       num_speakers / min_speakers / max_speakers: hints, honored per-adapter.
       rttm_out: if given, also writes an RTTM file to this path.
@@ -41,7 +41,6 @@ def diarize(
         are dropped with a warning, so it is safe to pass the union of what
         any adapter might want. Per-adapter accepted keys:
           pyannote:  checkpoint, hf_token
-          diarizen:  checkpoint, hf_token
 
     Returns a `DiarizationResult`.
     """

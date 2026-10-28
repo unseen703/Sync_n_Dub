@@ -19,7 +19,7 @@ So this module turns `EditResult.dirty_stages` into three things:
 
 The labels come from `ui.progress.STAGE_LABELS` wherever the keys line up.
 They do not line up directly — `backend.edits.STAGE_ORDER` names the stages
-`codemix, duration, voices, tts, vc, timing, mix, lipsync` while the progress
+`codemix, duration, voices, tts, timing, mix, lipsync` while the progress
 table keys them by the pipeline's own marker ids (`9b`, `9c`, `9d`, …) — so
 `_PROGRESS_KEY` maps one onto the other and the label is read from the single
 table rather than written out a second time here. One table, two spellings.
@@ -27,9 +27,9 @@ table rather than written out a second time here. One table, two spellings.
 Where the numbers come from
 ---------------------------
 `.claude/skills/clip-run`, measured on this host's 2x16 GiB Blackwell cards,
-as multiples of clip length: wav2lip 3–5x, musetalk 8–21x, latentsync ~83x,
-wav2lip_hd 6–24x (Wav2Lip plus a per-frame restoration pass on top, so its
-cost tracks frame SIZE as well as length). TTS is roughly 0.6 s per segment.
+as multiples of clip length: wav2lip 3–5x, musetalk 8–21x. latentsync15 has
+no measured band on this host and says so rather than guessing. TTS is
+roughly 0.6 s per segment.
 The midpoint of each range is used, and an estimate is omitted (`None`)
 rather than invented for a stage with no measured rate — a made-up number in
 a consent dialog is worse than a blank, because the user will plan around it.
@@ -48,16 +48,14 @@ _PROGRESS_KEY: Dict[str, str] = {
     "duration": "9c",
     "voices":   "9d",
     "tts":      "9e",
-    "vc":       "9f",
     "timing":   "9f2",
     "mix":      "9g",
     "lipsync":  "9h",
 }
 
-#: Stages that hold a GPU for minutes. Lip-sync is the headline; voice
-#: conversion also runs a model on the card, and a dialog that marked only
-#: one of them would understate a VC job.
-_GPU_STAGES = frozenset({"lipsync", "vc"})
+#: Stages that hold a GPU for minutes. Lip-sync is the only one left: every
+#: other post-MT stage is either a network call or ffmpeg.
+_GPU_STAGES = frozenset({"lipsync"})
 
 #: Upstream of the merged JSON. `run_post_mt_stages` never touches these, so
 #: they are listed verbatim as the things the edit cannot put at risk.
@@ -66,10 +64,11 @@ _UPSTREAM_KEYS: Sequence[str] = ("1", "2", "3", "4", "5", "6", "7", "8", "9")
 #: Lip-sync wall time as a multiple of clip length, measured 2026-10-12.
 #: Midpoints of the bands in `ui/lipsync_models.py`.
 #:
-#: Derived, not written out again. `wav2lip_hd` was missing here — the line
-#: below this table was an orphan comment with no entry after it, which is
-#: what a dropped row looks like. A restoration pass is a *second* pass over
-#: the render, not a cheaper one, and it now carries its own measured band.
+#: Derived, not written out again. `wav2lip_hd` was once missing here — the
+#: line below this table was an orphan comment with no entry after it, which
+#: is what a dropped row looks like. Deriving from FACTS is what stops that
+#: recurring; a model with no band is absent on purpose and reads as
+#: "not measured".
 LIPSYNC_RATES: Dict[str, float] = {
     k: (v["rate"][0] + v["rate"][1]) / 2.0
     for k, v in _ls_models.FACTS.items() if v.get("rate")
@@ -121,8 +120,8 @@ def _estimate(stage: str, *, clip_s: Optional[float],
             return None
         total = clip_s * rate
         return round(total, 1)
-    # codemix (one network call per cue), duration, timing, vc: no rate has
-    # been measured on this host. Say so by omission.
+    # codemix (one network call per cue), duration, timing: no rate has been
+    # measured on this host. Say so by omission.
     return None
 
 

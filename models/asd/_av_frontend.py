@@ -1,15 +1,19 @@
-"""Shared MFCC + face-crop front end for the MFCC-based ASD adapters.
+"""Shared face-crop + VRAM-windowing front end for the ASD adapters.
 
-TalkNet and Light-ASD are different architectures taking the same two
-inputs: 112x112 grayscale face crops at the track frame rate, and 13-d MFCC
-over int16-valued PCM. Everything up to the first `forward_*` call is here.
+An ASD adapter needs 112x112 grayscale face crops at the track frame rate,
+decoded once for every track in the video, and a way to cut a long video
+into windows that fit the card. Both live here so an adapter does not
+re-derive them.
 
-Audio must stay on the int16 value scale. Both upstreams read their wav with
+**The MFCC half was removed on 2026-10-28**, with the three MFCC-based
+adapters (talknet, light_asd, lr_asd). LoCoNet takes VGGish audio, not MFCC,
+so it shares only the crop half. If an MFCC adapter ever comes back, the
+rule that made it work is worth repeating: the audio must stay on the
+**int16 value scale**. Those upstreams read their wav with
 `scipy.io.wavfile.read` (int16 for 16-bit PCM) and pass it straight to
-`python_speech_features.mfcc`. Read the same file as floats in [-1, 1] and
+`python_speech_features.mfcc`; read the same file as floats in [-1, 1] and
 every score collapses toward zero without raising -- measured mean 0.044 vs
-0.411 on the same clip. Use `load_audio_int16`; do not rescale in an
-adapter. See docs/ROUGH_EDGES.md.
+0.411 on the same clip. See docs/ROUGH_EDGES.md.
 """
 from __future__ import annotations
 
@@ -21,51 +25,6 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import numpy as np
 
 log = logging.getLogger(__name__)
-
-#: `python_speech_features.mfcc` emits one row per 10 ms, whatever the fps.
-MFCC_HZ = 100.0
-
-#: int16 full scale, so the call site reads as a unit conversion.
-INT16_SCALE = 32768.0
-
-
-def load_audio_int16(audio_path: Path, *, model_name: str = "asd") -> np.ndarray:
-    """Mono 16 kHz audio on the int16 value scale the MFCC front-ends expect.
-
-    Returns float32: what has to match is the magnitude, not the storage
-    type.
-    """
-    import soundfile as sf
-
-    audio, sr = sf.read(str(audio_path), dtype="float32", always_2d=False)
-    if audio.ndim == 2:
-        audio = audio.mean(axis=1)
-    if sr != 16000:
-        raise ValueError(
-            f"{model_name} expects 16 kHz audio; got {sr}. Resample upstream."
-        )
-    return audio * INT16_SCALE
-
-
-def mfcc_features(audio: np.ndarray, *, fps: Optional[float] = None) -> np.ndarray:
-    """13-d MFCC, optionally with the window scaled to a non-25 fps video.
-
-    `fps=None` keeps `winlen=0.025 / winstep=0.010` fixed, which is what
-    TalkNet's upstream does (it resamples the video to 25 fps first).
-    Light-ASD instead scales both by `25 / fps`, so pass `fps` for that
-    family.
-
-    The asymmetry is deliberate -- each adapter matches the upstream it
-    wraps, and at 25 fps the two are identical.
-    """
-    from python_speech_features import mfcc as mfcc_fn   # upstream dep
-
-    winlen, winstep = 0.025, 0.010
-    if fps:
-        winlen = winlen * 25.0 / float(fps)
-        winstep = winstep * 25.0 / float(fps)
-    return mfcc_fn(audio, 16000, numcep=13, winlen=winlen, winstep=winstep)
-
 
 def window_bounds(n_frames: int, window_frames: int,
                   *, min_tail: int = 8) -> List[Tuple[int, int]]:
@@ -86,22 +45,6 @@ def window_bounds(n_frames: int, window_frames: int,
         bounds[-2] = (bounds[-2][0], bounds[-1][1])
         bounds.pop()
     return bounds
-
-
-def align_pair(audio_embed, video_embed, *, who: str = "asd"):
-    """Trim two (B, T, ...) embeddings to their common T.
-
-    The audio frontend downsamples 100 Hz MFCC by 4 and the visual one emits
-    one embedding per crop, so the two disagree by up to a frame.
-
-    Mandatory for Light-ASD, whose `forward_audio_visual_backend` is
-    `x = x1 + x2`: a mismatch there raises rather than degrading.
-    """
-    t = min(audio_embed.shape[1], video_embed.shape[1])
-    if audio_embed.shape[1] != video_embed.shape[1]:
-        log.debug("%s: trimming a=%d v=%d -> %d", who,
-                  audio_embed.shape[1], video_embed.shape[1], t)
-    return audio_embed[:, :t], video_embed[:, :t]
 
 
 def crop_all_tracks(
@@ -176,12 +119,7 @@ def crop_one(frame: np.ndarray, bb, size: int, cv2) -> np.ndarray:
 
 
 __all__ = [
-    "INT16_SCALE",
-    "MFCC_HZ",
-    "align_pair",
     "crop_all_tracks",
     "crop_one",
-    "load_audio_int16",
-    "mfcc_features",
     "window_bounds",
 ]

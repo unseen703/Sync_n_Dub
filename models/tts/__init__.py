@@ -1,7 +1,12 @@
-"""Text-to-speech adapter registry.
+"""Text-to-speech adapter registry — Bodhan Indic-Speak only.
 
-  - bodhan   : Bodhan Indic-Speak via REST (POST /v1/audio/speech)
-  - indicf5  : AI4Bharat IndicF5 — zero-shot cloning TTS (local transformers)
+  - bodhan : Bodhan Indic-Speak via REST (POST /v1/audio/speech)
+
+`indicf5` (AI4Bharat IndicF5, zero-shot cloning) was removed on 2026-10-28.
+It read neither style nor rate, so a tone or speed edit changed the wording
+and nothing about the delivery, and it was the only engine without a stock
+voice catalog — which is what the whole `voice_engine` cloning branch
+existed for. In git at b823223.
 
 Edge (Microsoft Edge-Read-Aloud) was removed on 2026-10-17. It spoke 11 of the
 23 languages this project offers and had exactly one voice per gender per
@@ -38,7 +43,6 @@ NEUTRAL_STYLE = "neutral"
 
 _REGISTRY_SPEC: dict[str, tuple[str, str]] = {
     "bodhan": (".bodhan_adapter", "BodhanTTS"),
-    "indicf5": (".indicf5_adapter", "IndicF5TTS"),
 }
 
 

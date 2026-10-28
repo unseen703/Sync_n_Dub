@@ -27,7 +27,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-MODELS = ["talknet", "lr_asd", "loconet"]
+#: One model since 2026-10-28; the list shape stays so a second one can be
+#: compared against it again without reworking the script.
+MODELS = ["loconet"]
 THRESHOLDS = [0.3, 0.5, 0.7]
 
 

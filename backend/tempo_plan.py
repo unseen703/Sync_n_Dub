@@ -1,18 +1,13 @@
 """Slew-limited speaking-rate planner over a sequence of cues.
 
-Ported from `third_party/mixing methods..zip` (`cue_types.py` +
-`tempo_plan.py`), with four changes that matter here and are marked PORT:
-below. The design is the author's; the bugs fixed were theirs too and are
-named so a diff against the original is readable.
+A naive dub assigns each cue `tempo_i = tts_duration_i / slot_i`: every cue
+fits and the chain lurches, 1.2x -> 1.9x -> 0.95x, each step several times
+the ~10% just-noticeable difference for speech tempo (Quene 2007). This
+solves one constrained problem per ISLAND of cues, picking tempos and pauses
+that keep sync, bound the per-boundary change and keep onsets near their
+original times.
 
-The naive dub assigns each cue `tempo_i = tts_duration_i / slot_i`. Every cue
-fits, and the chain lurches: 1.2x -> 1.9x -> 0.95x is three steps the listener
-hears, each several times the ~10% just-noticeable difference for speech tempo
-(Quene 2007). This module solves one constrained problem per ISLAND of cues:
-pick tempos and pauses that keep sync, bound the per-boundary change, and keep
-onsets near their original times.
-
-What is enforced vs. preferred:
+Enforced vs preferred:
 
   HARD  no tempo outside [tempo_min, tempo_max] (relaxed to tempo_hard_max
         only on cues flagged `budget_violation`)
@@ -24,27 +19,15 @@ What is enforced vs. preferred:
 
 ISLANDS ARE THE SYNC CONTRACT. Where a long pause, a speaker change or a
 scene cut makes neighbour-coupling meaningless, the chain splits and each
-side solves independently. Drift can therefore only exist INSIDE an island
-and only up to `pause_borrow_s`; it can never accumulate across a clip.
+side solves independently, so drift exists only INSIDE an island and only up
+to `pause_borrow_s`.
 
-PORT: changes from the original
-  1. `max_rel_step` defaults to 0.30 (bumped from 0.20 on 2026-10-26 after the
-     tighter bound fell straight through to the fallback on 60 s Indic clips --
-     the slew limit was not binding anything there). Still well under the
-     "lurch" threshold a listener catches.
-  2. `Cue` carries `speech_s` and `fixed_s` so the optimiser's variable is the
-     SPEECH rate, not the blob rate. Without this the planner smooths a number
-     that includes the engine's own silence -- the quantity this project
-     specifically does not want bounded. `fixed_s` is the floor of that
-     silence; whatever the solve leaves over is handed back to the gaps when
-     the envelope is built (`backend.rate_ramp`).
-  3. A single-cue island returns before `minimize` instead of solving and
-     throwing the answer away. On speaker-alternating dialogue with
-     `break_on_speaker`, most islands are single cues.
-  4. The end-pin adjusts the last cue's TEMPO rather than only its `out_end`,
-     so `out_slot == speech_s/tempo + fixed_s` keeps holding. The original
-     moved the endpoint and left the two inconsistent; the residue is ~1e-9
-     today, but nothing downstream checks it.
+Ported from `third_party/mixing methods..zip` (`cue_types.py` +
+`tempo_plan.py`). Four deliberate differences, marked PORT: in the code --
+the 0.30 `max_rel_step` default, `speech_s`/`fixed_s` making the optimiser's
+variable the SPEECH rate rather than the blob rate, the single-cue
+early return, and the end-pin adjusting the last tempo rather than only
+`out_end`.
 """
 from __future__ import annotations
 
@@ -76,13 +59,11 @@ class Cue:
     speaker: str | None = None
     scene: int = 0               # shot index; tempo never smooths across a change
 
-    #: PORT: seconds of actual SPEECH in the clip (VAD). The optimiser's `d`.
-    #: None means "not measured" and falls back to `tts_duration`, which
-    #: reproduces the original module exactly.
+    #: PORT: seconds of actual SPEECH in the clip (VAD), the optimiser's `d`.
+    #: None means not measured and falls back to `tts_duration`.
     speech_s: float | None = None
-    #: PORT: internal silence that survives absorption at its floor. Added to
-    #: every duration term but never scaled by the tempo -- silence does not
-    #: have a speaking rate.
+    #: PORT: internal silence surviving absorption at its floor. Added to
+    #: every duration term, never scaled by tempo -- silence has no rate.
     fixed_s: float = 0.0
 
     @property
@@ -132,16 +113,15 @@ class TempoConfig:
     pause_min_s: float = 0.08
     # --- island segmentation ---
     island_gap_s: float = 1.00
-    # False lets a speaker-change still share an island so the planner has a
-    # neighbour to ramp into. The 2026-10-25 A/B showed True produced many
-    # single-cue islands with no shape (flat lead/trail), which is the
-    # specific failure mode this knob exists to avoid.
+    # False lets a speaker change still share an island, so the planner has
+    # a neighbour to ramp into. True produces many single-cue islands with no
+    # shape, which is the failure this knob exists to avoid.
     break_on_speaker: bool = False
     break_on_scene: bool = True
-    #: PORT: cost is ~O(n^2) per SLSQP iteration (the onset loop is numerically
-    #: differentiated over 2n-1 variables). Islands are small in practice, but
-    #: pyannote UNDER-clustering makes them bigger -- fewer speaker labels is
-    #: fewer breaks -- so there is a hard split.
+    #: PORT: cost is ~O(n^2) per SLSQP iteration, since the onset loop is
+    #: numerically differentiated over 2n-1 variables. Islands are usually
+    #: small, but pyannote under-clustering makes them bigger, so this is a
+    #: hard split.
     max_island_cues: int = 40
     # --- objective weights ---
     w_rate: float = 1.0
@@ -215,8 +195,8 @@ def _solve_island(cues, cfg, tempo_max_vec, slew_cap):
     pause_lo = np.minimum(np.maximum(cfg.pause_min_s, g - cfg.pause_borrow_s),
                           pause_hi)
 
-    # PORT (3): a one-cue island has no neighbour and therefore no choice to
-    # make. Solving it costs an SLSQP run whose answer is discarded below.
+    # PORT (3): a one-cue island has no neighbour and no choice to make;
+    # solving it costs an SLSQP run whose answer is discarded.
     if n == 1:
         room = max(cues[0].slot - cues[0].fixed_s, 1e-6)
         t = float(np.clip(d[0] / room, cfg.tempo_min, tempo_max_vec[0]))
@@ -370,10 +350,9 @@ def _plans_from_solution(cues, cfg, x, p, flags_per_cue):
     tempos = np.exp(x)
 
     # PORT (4): pin the island END by adjusting the LAST CUE'S TEMPO, so
-    # `out_slot == rate_duration/tempo + fixed_s` keeps holding. The original
-    # moved `out_end` alone and left the plan internally inconsistent -- the
-    # renderer would have produced a clip of a different length than the plan
-    # claimed, at a residue nothing downstream checks.
+    # `out_slot == rate_duration/tempo + fixed_s` keeps holding. Moving
+    # `out_end` alone leaves the plan claiming a length the renderer will
+    # not produce.
     durs = d / tempos + fx
     span = float(np.sum(durs) + np.sum(p))
     T = cues[-1].end - cues[0].start
@@ -433,8 +412,7 @@ def _solve_one_island(cues: list[Cue], cfg: TempoConfig) -> list[CuePlan]:
     plans = _plans_from_solution(cues, cfg, x, p, flags)
 
     # Verify rather than assume: the end-pin above can nudge the last tempo
-    # out of the slew band, and a constraint that silently stops holding is
-    # worse than one that reports.
+    # out of the slew band.
     if n >= 2:
         for i in range(1, n):
             step = abs(math.log(plans[i].tempo) - math.log(plans[i - 1].tempo))

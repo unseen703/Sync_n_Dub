@@ -6,7 +6,7 @@ unrelated whole-frame instance. This module picks the face and the box on our
 side and hands the result over through MuseTalk's own `--use_saved_coord`
 pickle, so nothing upstream is forked.
 
-  * `speaking_track_per_frame` folds TalkNet scores over the tracker's face
+  * `speaking_track_per_frame` folds ASD scores over the tracker's face
     tracks into one chosen track per frame.
   * `musetalk_box` reproduces `get_landmark_and_bbox`'s arithmetic from
     InsightFace `landmark_3d_68` run on that track's box.

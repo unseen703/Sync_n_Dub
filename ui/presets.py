@@ -93,8 +93,8 @@ def default_asr() -> str:
     Two things to know:
 
     1. ASR, MT, TTS and the transliterator are all Bodhan, so an outage
-       takes the whole run. There is no automatic fallback --
-       `DUBBING_UI_ASR_MODEL=whisperx` is the manual one.
+       takes the whole run, and since 2026-10-28 there is no local adapter
+       to fall back to -- the registries hold Bodhan alone.
     2. It needs `BODHAN_ASR_KEY`, a different key from the MT and TTS ones.
        An install with only `BODHAN_MT_KEY` fails at stage 7.
 
@@ -108,26 +108,23 @@ def default_mt() -> str:
 
 
 def default_tts() -> str:
-    """Bodhan indic-speak. The UI offers no other engine.
+    """Bodhan indic-speak -- the only engine there is.
 
     45 voices over the 22 scheduled languages, matched per speaker by
-    `voice_engine_for` turning on stage 9d's catalog, and the only engine
-    that reads `--tts-style`.
-
-    Needs `BODHAN_TTS_KEY`. `DUBBING_UI_TTS_MODEL=indicf5` works for an
-    install with no credentials, at the cost of cloning rather than casting.
+    `voice_engine_for` turning on stage 9d's catalog, and the one engine
+    that reads `--tts-style`. Needs `BODHAN_TTS_KEY`.
     """
     return _env("DUBBING_UI_TTS_MODEL", "bodhan")
 
 
 def voice_engine_for(tts: str) -> Optional[str]:
-    """Stage 9d's engine, which is not the TTS engine.
+    """Stage 9d's voice catalog, which is named differently from the engine.
 
-    `voice_engine` selects a voice catalog. A cloning engine has none --
-    IndicF5's "voices" are reference clips -- so 9d takes its `else` branch
-    and the speaker's own clip carries the timbre.
+    Still a lookup rather than a constant so that an unknown `tts` returns
+    None and 9d skips casting, instead of casting from a catalog the engine
+    cannot speak.
     """
-    return {"bodhan": "indic-speak", "indicf5": "indicf5"}.get((tts or "").lower())
+    return {"bodhan": "indic-speak"}.get((tts or "").lower())
 
 
 #: Defaults for the stages the UI used to leave unset. `plan_stages` keys off
@@ -142,7 +139,7 @@ UI_STAGE_DEFAULTS: Dict[str, Any] = {
     # loconet is the default: the only joint multi-speaker model, so it can
     # tell competing faces apart rather than scoring each in isolation. Its
     # weights are AVA-only and over-fire on dubbed footage, which is why the
-    # on-screen threshold below is 0.5 rather than TalkNet's 0.3.
+    # on-screen threshold below is 0.5 rather than the CLI default 0.3.
     "asd_model": "loconet",             # 6   ASD + Hungarian assignment
     "asd_on_screen_threshold": 0.5,
     # No `render_mode`: the hosted indic-transcribe endpoint returns
@@ -242,10 +239,6 @@ def build_kwargs(preset: str, *, target_language: str,
         # stage 4 would also hand to the diarizer.
         "lipsync_batch_size": 8,
     }
-    # Voice conversion (9f) is deliberately absent: `models/vc` has no
-    # registered adapter, so `get_vc(...)` raises. It is also an alternative
-    # to stage 9d, not an addition -- VC overrides the stock voice just
-    # assigned. Enable only with a deliberate `vc_model`.
     kw.update(UI_STAGE_DEFAULTS)
     # An explicit delivery type from the form replaces the `"auto"` default
     # (stage 9b1 classifying the register from metadata). `plan_stages` keys
@@ -286,7 +279,6 @@ def plan_config(kwargs: Dict[str, Any]) -> Dict[str, Any]:
         "duration_adjust": kwargs.get("duration_adjust"),
         "voice_engine":    kwargs.get("voice_engine"),
         "tts":             kwargs.get("tts_model"),
-        "vc":              kwargs.get("vc_model"),
         "face_detector":   kwargs.get("face_detector"),
         "asd":             kwargs.get("asd_model"),
         "lipsync":         kwargs.get("lipsync_model"),

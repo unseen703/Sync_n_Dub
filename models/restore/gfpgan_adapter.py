@@ -1,23 +1,28 @@
 """GFPGAN v1.4 (+ Real-ESRGAN) over a finished render.
 
-Shells into `scripts/face_enhance.py`, which runs in the `wav2liphd` conda
+Shells into `scripts/face_enhance.py`, which runs in the `restore` conda
 env. That env exists because `basicsr` imports
 `torchvision.transforms.functional_tensor`, removed in torchvision 0.17,
 while `dubbing` is on 0.23 -- and it cannot simply be pinned back, because
 these are Blackwell sm_120 cards needing torch >= 2.7 / cu128.
 
-**The env keeps its name, the variable does not.** `RESTORE_PYTHON` is what
-this reads; the sibling-env fallback still resolves `envs/wav2liphd/bin/python`
-because that directory is a real thing on disk. Renaming the env would mean
-rebuilding it for no gain, but a variable called `WAV2LIPHD_PYTHON` pointing
-at the interpreter that restores a *MuseTalk* render is a lie the next
-reader has to unpick.
+**Renamed from `wav2liphd` on 2026-10-28**, env and weights directory both.
+Everything about the old name was a lie after restoration became its own
+stage: `wav2lip_hd` is not a lip-sync model here any more, and the
+interpreter it named restores a *MuseTalk* render as often as a Wav2Lip one.
+The spec was already `envs/restore.yml` and the variable already
+`RESTORE_PYTHON`; only the on-disk names lagged.
 
-**The weights directory keeps its historical name too** --
-`models/weights/wav2lip_hd/` holds `GFPGANv1.4.pth`,
+`resolve_env_python` is passed `legacy_env_names=("wav2liphd",)`, so a
+checkout where `conda rename` has not been run still resolves -- with a
+warning naming the rename command, rather than silently falling back to the
+`dubbing` interpreter, where `import basicsr` fails after the render has
+already been paid for.
+
+Weights live in `models/weights/restore/`: `GFPGANv1.4.pth`,
 `RealESRGAN_x4plus.pth`, `detection_Resnet50_Final.pth` and
-`parsing_parsenet.pth`, none of which are Wav2Lip's. Moving 600 MB to a
-better-named directory is a separate change; `RESTORE_WEIGHTS` overrides it.
+`parsing_parsenet.pth`, none of which were ever Wav2Lip's.
+`RESTORE_WEIGHTS` overrides the location.
 """
 from __future__ import annotations
 
@@ -39,7 +44,7 @@ log = logging.getLogger(__name__)
 ROOT = Path(__file__).resolve().parents[2]
 ENHANCER = ROOT / "scripts" / "face_enhance.py"
 DIFF_MASK = ROOT / "scripts" / "lipsync_diff_mask.py"
-DEFAULT_WEIGHTS_DIR = "models/weights/wav2lip_hd"
+DEFAULT_WEIGHTS_DIR = "models/weights/restore"
 WEIGHT_FILES = ("GFPGANv1.4.pth", "RealESRGAN_x4plus.pth")
 
 _SUMMARY_RE = re.compile(
@@ -97,7 +102,8 @@ class GFPGANRestore(BaseRestore):
             if not (self.weights_dir / w).is_file():
                 out.append(f"weight missing at {self.weights_dir / w}")
         try:
-            py = resolve_env_python("restore", "wav2liphd", self.python_bin)
+            py = resolve_env_python("restore", "restore", self.python_bin,
+                                legacy_env_names=("wav2liphd",))
             if not Path(py).is_file():
                 out.append(f"interpreter not found at {py}; set RESTORE_PYTHON")
         except Exception as e:                            # noqa: BLE001
@@ -121,7 +127,8 @@ class GFPGANRestore(BaseRestore):
         """
         from backend.media_io import _ffprobe_bin
 
-        py = resolve_env_python("restore", "wav2liphd", self.python_bin)
+        py = resolve_env_python("restore", "restore", self.python_bin,
+                                legacy_env_names=("wav2liphd",))
         cmd = [py, str(DIFF_MASK), "--before", str(before),
                "--after", str(after), "--out", str(out)]
         p = subprocess.run(cmd, cwd=str(ROOT), capture_output=True, text=True)
@@ -155,7 +162,8 @@ class GFPGANRestore(BaseRestore):
         from backend.media_io import _ffmpeg_bin, _ffprobe_bin
         ffmpeg = _ffmpeg_bin() or "ffmpeg"
         ffprobe = _ffprobe_bin() or "ffprobe"
-        py = resolve_env_python("restore", "wav2liphd", self.python_bin)
+        py = resolve_env_python("restore", "restore", self.python_bin,
+                                legacy_env_names=("wav2liphd",))
 
         mask_doc = None
         mask_path = out.parent / f"{out.stem}.changed_frames.json"

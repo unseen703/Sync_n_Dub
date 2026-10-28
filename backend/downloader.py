@@ -64,6 +64,11 @@ def _ffmpeg_dir() -> Optional[str]:
     yt-dlp's postprocessors need ffmpeg. Prefer the system binary; fall back
     to the one imageio-ffmpeg bundles so `sudo apt install ffmpeg` is not a
     prerequisite for the pipeline to work.
+
+    Deliberately not `media_io._ffmpeg_bin()`: yt-dlp wants a *directory* to
+    search, not a binary, and skipping the interpreter-dir step is the point —
+    remuxing needs no filter the imageio build lacks, so there is no reason to
+    insist on the env's 7.1 here.
     """
     if shutil.which("ffmpeg"):
         return None   # let yt-dlp find it on PATH

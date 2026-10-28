@@ -19,6 +19,11 @@ def _ensure_ffmpeg_on_path() -> None:
     """Demucs shells out to `ffmpeg` for any non-wav input. When the system
     has no ffmpeg installed, fall back to the one bundled by imageio-ffmpeg
     by prepending its directory to PATH for the current process.
+
+    Deliberately not `media_io._ffmpeg_bin()`: demucs calls bare `ffmpeg`
+    itself, so what it needs is a PATH entry, not a path we hold. Decoding
+    needs no filter the imageio build lacks, so landing on 7.0.2 rather than
+    the env's 7.1 is fine here.
     """
     if shutil.which("ffmpeg"):
         return

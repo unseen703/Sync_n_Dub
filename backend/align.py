@@ -99,34 +99,27 @@ def apply_alignment_to_asr(asr_result: ASRResult,
 # M5 -- forced-align the TTS OUTPUT (not the source)
 # ===========================================================================
 #
-# SCHEMA WARNING -- READ THIS BEFORE CONSUMING EITHER FIELD.
+# TIME BASES. The two word fields are not interchangeable, and mixing them
+# gives a plan that is wrong by one segment offset and still renders cleanly:
 #
-#   segments[].words[]      ABSOLUTE seconds on the SOURCE timeline.
-#                           Produced by `align_asr` above against the source
-#                           dialogue stem. `w["start"]` is a wall-clock time
-#                           in the input video.
+#   segments[].words[]      ABSOLUTE seconds on the SOURCE timeline, from
+#                           `align_asr` above against the source dialogue stem.
+#   segments[].tts_words[]  CLIP-RELATIVE seconds; 0.0 is the first sample of
+#                           that segment's raw TTS wav. Same frame as a
+#                           Piece's `src_span`. They say nothing about where
+#                           the segment lands on the output timeline.
 #
-#   segments[].tts_words[]  CLIP-RELATIVE seconds. 0.0 is the first sample of
-#                           that segment's raw TTS wav. They say NOTHING about
-#                           where the segment lands on the output timeline --
-#                           that is `backend.timing`'s job, and a Piece's
-#                           `src_span` lives in exactly this clip-relative
-#                           frame (see backend/timing.py's header).
+# Only add `segments[].start` to a tts_word once you have decided the segment
+# sits at its slot start, which pause-aware placement does not.
 #
-# Mixing the two produces a plan that is wrong by one segment offset and still
-# renders without error, so it is the most expensive confusion in this phase.
-# Add `segments[].start` to a tts_word only if you have first decided the
-# segment is placed at its slot start, which pause-aware placement does not.
-#
-# Why this is a reuse and not a new capability: `BaseAligner.align` takes
-# (audio_path, requests) and never asks where the audio came from. TTS output
-# is just another wav with known text. Two real constraints:
-#   * mms_fa hard-raises when sr != 16000 and edge-tts writes 24 kHz, so every
-#     clip is resampled first, through `backend.media_io`'s ffmpeg resolver
-#     rather than a bare `ffmpeg` (the imageio fallback is the only binary on
-#     some of these boxes).
-#   * The aligner instance is built ONCE and threaded through every clip.
-#     Constructing per segment reloads the ~1 GB MMS_FA bundle each time.
+# `BaseAligner.align` takes (audio_path, requests) and does not care where the
+# audio came from, so TTS output is just another wav with known text. Two
+# constraints:
+#   * mms_fa raises when sr != 16000 and edge-tts writes 24 kHz, so every clip
+#     is resampled first, through `backend.media_io`'s ffmpeg resolver rather
+#     than a bare `ffmpeg`.
+#   * The aligner is built ONCE and threaded through every clip; per-segment
+#     construction reloads the ~1 GB MMS_FA bundle each time.
 
 import hashlib
 import math
@@ -138,16 +131,15 @@ from typing import Dict, Iterable, List, Sequence, Tuple
 
 ALIGN_SAMPLE_RATE = 16_000
 
-# Below this a clip cannot carry a single CTC frame worth of evidence; the
-# mms_fa adapter already declines <50 ms, we decline earlier and say why.
+# Shortest alignable clip. Below this there is not a CTC frame's worth of
+# evidence; the mms_fa adapter declines <50 ms, this declines earlier.
 MIN_ALIGNABLE_S = 0.06
 
 
 def _resample_16k(audio: Path, *, work_dir: Optional[Path] = None) -> Path:
     """Return a 16 kHz mono wav for `audio`, converting only when needed.
 
-    Uses `media_io._ffmpeg_bin()` so we inherit the imageio-ffmpeg fallback
-    instead of assuming `ffmpeg` is on PATH.
+    Uses `media_io._ffmpeg_bin()` rather than assuming `ffmpeg` is on PATH.
     """
     import soundfile as sf
 
@@ -160,10 +152,9 @@ def _resample_16k(audio: Path, *, work_dir: Optional[Path] = None) -> Path:
 
     work_dir = Path(work_dir) if work_dir else Path(tempfile.mkdtemp(prefix="ttsalign_"))
     work_dir.mkdir(parents=True, exist_ok=True)
-    # Hash the resolved source path into the name: every TTS clip in this
-    # pipeline is called SEG_0000.wav, so a bare stem collides the moment two
-    # merged JSONs (or two engines) share a work_dir, and the loser silently
-    # gets aligned against the winner's audio.
+    # Hash the resolved source path into the name: every TTS clip is called
+    # SEG_NNNN.wav, so a bare stem collides as soon as two merged JSONs share
+    # a work_dir and one gets aligned against the other's audio.
     tag = hashlib.sha1(str(audio.resolve()).encode()).hexdigest()[:10]
     out = work_dir / f"{audio.stem}.{tag}.16k.mono.wav"
     cmd = [
@@ -202,8 +193,7 @@ def align_audio_to_text(
 ) -> List[Word]:
     """Word timings for one standalone clip, CLIP-RELATIVE to its first sample.
 
-    Never raises on an unalignable clip -- returns `[]`. A sweep over 40
-    segments must not die because one TTS clip came back 20 ms long.
+    Never raises on an unalignable clip; returns `[]`.
     """
     import soundfile as sf
 
@@ -227,8 +217,8 @@ def align_audio_to_text(
         return []
 
     al = _warm_aligner(model, device, aligner, **model_kwargs)
-    # start=0.0 is what makes the returned times clip-relative: the mms_fa
-    # adapter offsets every word by `req.start`.
+    # start=0.0 makes the returned times clip-relative: the mms_fa adapter
+    # offsets every word by `req.start`.
     req = AlignRequest(id=segment_id, start=0.0, end=dur, text=text,
                        language=language)
     try:
@@ -256,10 +246,9 @@ def align_tts_segments(
     `tts_words[]` entries are `{text,start,end,score}` with **clip-relative**
     times (see the schema warning at the top of this section).
 
-    Defaults to `tts_raw_audio` because `tts_audio` may already have been
-    time-stretched by the TTS stage, and word timings measured on a stretched
-    clip cannot be used to cut the raw clip -- which is precisely what
-    `Piece.src_span` does.
+    Defaults to `tts_raw_audio`: `tts_audio` may already have been stretched
+    by the TTS stage, and times measured on a stretched clip cannot be used to
+    cut the raw clip, which is what `Piece.src_span` does.
 
     Degrades per segment: a clip that will not align gets `tts_words = []`
     plus `qc["tts_align"]` naming the reason, and the run continues.
@@ -337,30 +326,25 @@ def align_tts_segments(
 # M6 -- viseme events
 # ===========================================================================
 #
-# What a viseme event is here: a time-stamped, coarse MOUTH SHAPE class. Not a
-# phoneme -- lip-sync is judged by eye, and the eye resolves maybe nine shapes,
-# of which "lips closed" (BILABIAL) is by far the most salient. A dub that puts
-# its /m/ 300 ms away from the source's /m/ reads as broken even when every
-# word boundary matches.
+# A viseme event here is a time-stamped, coarse MOUTH SHAPE class, not a
+# phoneme: the eye resolves about nine shapes, of which "lips closed"
+# (BILABIAL) is the most salient.
 #
-# Where the events come from, at zero install cost: torchaudio's MMS_FA aligner
-# already emits one `TokenSpan` per CHARACTER of uroman-ROMANIZED text, and
-# `mms_fa_adapter` computes exactly that and then throws away everything but
-# each word's first/last span. We re-run the same call and keep the characters.
-#
-# Why romanized characters are a legitimate cross-language comparison: uroman
-# maps English source and Devanagari target into ONE Latin inventory, so a
-# Devanagari म and an English "m" both arrive as 'm' and land in BILABIAL. We
-# are not claiming the phoneme sequences are equal -- they are not, and the
-# sequences have different lengths on purpose. We are asking whether the
-# visually salient events happen at the same TIMES. That is what DTW over
+# The `mms_char` backend gets them free. torchaudio's MMS_FA aligner emits one
+# `TokenSpan` per CHARACTER of uroman-romanized text, and `mms_fa_adapter`
+# computes exactly that before discarding everything but each word's
+# first/last span. `_mms_char_spans` re-runs the same call and keeps the
+# characters. uroman maps English source and Devanagari target into one Latin
+# inventory, so a Devanagari म and an English "m" both land in BILABIAL -- the
+# claim is not that the phoneme sequences are equal, but that the visually
+# salient events happen at the same TIMES, which is what DTW over
 # (onset, class) measures.
 #
-# Caveat worth stating: uroman is orthographic, not phonetic. Devanagari's
-# inherent schwa means "कर" romanizes with a vowel that Hindi speech may delete,
-# and English "know" keeps its silent k. So class sequences carry some noise.
-# The `allosaurus` backend below avoids this by reading phones straight off the
-# audio with no text and no G2P; it is the better signal where it is installed.
+# uroman is orthographic, not phonetic, so the class sequences carry noise:
+# Devanagari's inherent schwa romanizes a vowel Hindi speech may delete, and
+# English "know" keeps its silent k. The `allosaurus` backend reads phones
+# straight off the audio with no text and no G2P, and is the better signal
+# where it is installed.
 
 VISEME_CLASSES = (
     "BILABIAL",     # p b m   -- lips fully closed; the loudest visual event
@@ -399,8 +383,8 @@ _IPA_VISEME: Dict[str, str] = {
     **{c: "SIBILANT" for c in "szʃʒʂʐɕʑtʃdʒ"},
 }
 
-# Mismatch and skip costs are scaled by class. BILABIAL dominates because a
-# missing lip closure is the error a viewer actually sees.
+# Mismatch and skip costs are scaled by class; BILABIAL dominates because a
+# missing lip closure is the most visible error.
 DEFAULT_CLASS_WEIGHTS: Dict[str, float] = {
     "BILABIAL": 2.0,
     "LABIODENTAL": 1.3,
@@ -439,23 +423,16 @@ def _merge_runs(events: List[VisemeEvent], *, min_class_dur_s: float
                 ) -> List[VisemeEvent]:
     """Collapse consecutive same-class chars, then drop what is too brief to see.
 
-    "mm" or "nn" is one mouth shape held, not two events, and a shape shorter
-    than ~30 ms does not survive a single 25 fps video frame -- keeping it would
-    let orthographic noise (uroman's inherent schwas) outvote real closures.
+    "mm" is one mouth shape held, not two events, and a shape shorter than
+    ~30 ms does not survive a single 25 fps frame.
 
-    THE DURATION THAT GETS THRESHOLDED IS THE HOLD, onset -> next onset, not
-    `e.dur`. For the `mms_char` backend `e.dur` is the width of the emission
-    frames CTC assigned to one character, and MMS_FA's frame period is 20 ms:
-    measured over 13 real TTS clips, 92.1% of character spans are exactly one
-    20 ms frame wide. Thresholding `e.dur` at the documented 30 ms therefore
-    deleted 89.8% of all events and 96.8% of BILABIAL events -- the one class
-    this module weights 2.0 and reports `bilabial_onset_mae_s` for -- leaving
-    `viseme_cost` with sequences too sparse to match anything (matched=0,
-    onset_mae=None on every segment of a real file). A CTC span is an ONSET
-    MARKER, not an articulation; how long a shape is visibly held is how long
-    it is before the mouth moves to the next shape. On the same 13 clips the
-    hold rule at the same 30 ms keeps 94.9% of events and 92.6% of bilabials.
-    The last event has no successor, so it falls back to its own span.
+    THE THRESHOLDED DURATION IS THE HOLD -- this onset to the next -- not
+    `e.dur`. For `mms_char`, `e.dur` is the width of the CTC emission frames
+    for one character and MMS_FA's frame period is 20 ms, so most spans are
+    exactly one frame wide; thresholding `e.dur` at 30 ms deletes almost every
+    event, BILABIAL worst of all, and leaves `viseme_cost` nothing to match.
+    A CTC span is an onset marker, not an articulation. The last event has no
+    successor, so it falls back to its own span.
     """
     if not events:
         return []
@@ -483,10 +460,9 @@ def _merge_runs(events: List[VisemeEvent], *, min_class_dur_s: float
 def _mms_char_spans(aligner, clip, sr: int, text: str) -> List[Tuple[str, float, float, float]]:
     """(char, t0, t1, score) per romanized character, clip-relative seconds.
 
-    Reaches into `mms_fa_adapter` on purpose: `_align_clip` is the exact call
-    `align()` makes, and the per-character spans it returns are discarded one
-    line later. Re-running the model through the public `align()` would give us
-    only word boundaries back.
+    Calls `mms_fa_adapter._align_clip` directly -- the same call `align()`
+    makes -- because the public `align()` discards the per-character spans and
+    returns only word boundaries.
     """
     import torch
 
@@ -602,8 +578,8 @@ def extract_viseme_events(
                 tmp = wav16
             else:                       # allosaurus reads a path, not an array
                 # Same collision as in `_resample_16k`: side="source" cuts
-                # EVERY segment out of one dialogue stem, so a bare stem would
-                # name every cut the same file.
+                # every segment out of one dialogue stem, so a bare stem names
+                # every cut the same file.
                 tag = hashlib.sha1(
                     f"{audio.resolve()}|{span}".encode()).hexdigest()[:10]
                 tmp = Path(work_dir or tempfile.mkdtemp(prefix="viseme_")) / \
@@ -730,18 +706,14 @@ def viseme_events_for_merged(
 # M6 call site: write the keys the planner actually reads
 # ---------------------------------------------------------------------------
 #
-# `viseme_events_for_merged` above writes `viseme_source[]` / `viseme_tts[]` as
-# ONSET EVENTS, which is what `viseme_cost` wants. The planner wants something
-# else: `backend/timing_advanced.py::_d_phoneme` reads `segments[].src_visemes`
-# and `segments[].tts_visemes` and samples them at 20 ms frames through
-# `_viseme_at`, i.e. it needs HALF-OPEN INTERVALS `{start,end,viseme}`. Nothing
-# wrote those two keys, so `_d_phoneme` returned `(0.0, "no_visemes")` on every
-# segment and `plan_dp`'s `lambda_phoneme` term was inert -- an "M6" arm would
-# have been a byte-identical copy of the M7 arm under a different name.
+# Two consumers want two shapes. `viseme_cost` wants ONSET EVENTS, which
+# `viseme_events_for_merged` writes as `viseme_source[]` / `viseme_tts[]`.
+# `backend/timing_advanced.py::_d_phoneme` wants HALF-OPEN INTERVALS
+# `{start,end,viseme}` under `segments[].src_visemes` / `tts_visemes`, which it
+# samples at 20 ms frames -- without those keys it returns
+# `(0.0, "no_visemes")` and `plan_dp`'s `lambda_phoneme` term is inert.
 #
-# `attach_visemes` is that missing writer. It extracts ONCE per segment per
-# side and persists BOTH shapes: the events for the metric, the intervals for
-# the planner.
+# `attach_visemes` extracts once per segment per side and writes both shapes.
 
 VISEME_MAX_HOLD_S = 0.30
 
@@ -750,18 +722,15 @@ def _events_to_intervals(events: Sequence[VisemeEvent], *,
                          max_hold_s: float = VISEME_MAX_HOLD_S) -> List[dict]:
     """`[{start,end,viseme}]` from onset events, in the SAME time base.
 
-    The interval is the HOLD -- this onset to the next onset -- not `e.dur`,
-    for the same reason `_merge_runs` thresholds the hold. For `mms_char` an
-    event's `dur` is the width of the CTC emission frames assigned to one
-    character, and MMS_FA's frame period is 20 ms: measured over 13 real TTS
-    clips 92.1% of character spans are exactly one frame wide. Emitting those
-    20 ms slivers as the intervals would leave `_viseme_at` returning `None` at
-    nearly every sampled frame, so `_d_phoneme` would score ~0.0 while looking
-    like it had run -- the same silent no-op in a new costume.
+    The interval is the HOLD -- this onset to the next -- not `e.dur`, for the
+    same reason `_merge_runs` thresholds the hold: an `mms_char` event's `dur`
+    is usually one 20 ms CTC frame, and emitting those slivers leaves
+    `_viseme_at` returning None at nearly every sampled frame, so `_d_phoneme`
+    scores ~0.0 while appearing to have run.
 
-    A hold is capped at `max_hold_s` so the last shape before a pause does not
-    get painted across a second of silence, and the final event (no successor)
-    falls back to its own span under the same cap.
+    A hold is capped at `max_hold_s` so the last shape before a pause is not
+    painted across a second of silence; the final event falls back to its own
+    span under the same cap.
     """
     out: List[dict] = []
     n = len(events)
@@ -808,34 +777,28 @@ def attach_visemes(
                        samples `tts` at, after walking `dst_t` back through the
                        piece's own tempo mapping.
 
-    Also writes `viseme_source[]` / `viseme_tts[]`: the same extraction as
-    ONSET EVENTS (`{t,dur,cls,char,score}`), because `viseme_cost` wants events
-    and the planner wants intervals, and re-running the extractor to get the
-    other shape would double a stage that costs ~5 s a segment on CPU.
+    Also writes `viseme_source[]` / `viseme_tts[]`, the same extraction as
+    ONSET EVENTS (`{t,dur,cls,char,score}`). Both shapes come from one pass
+    because the extraction costs ~5 s a segment on CPU.
 
     The source side is cut out of the full dialogue stem by `span`; the target
     side is the segment's own raw clip. `audio_field` defaults to
-    `tts_raw_audio` for the reason spelled out in `align_tts_segments`: a
-    stretched clip's times cannot be used to cut the raw clip.
+    `tts_raw_audio` for the reason given in `align_tts_segments`.
 
-    DEGRADES PER SEGMENT, never aborts the stage. A segment that yields nothing
-    gets `[]` plus `qc["visemes_<side>"]` naming the reason, and the run
-    continues. Known reasons: `no_audio`, `audio_missing`, `no_text`,
-    `too_short` (< `MIN_ALIGNABLE_S`; `mms_char` raises "targets length is too
-    long for CTC" on e.g. a 0.08 s segment, which `extract_viseme_events`
-    already swallows into `[]`), and `empty`. When `fallback_backend` is set
-    and the primary backend yields nothing, the other backend is tried and the
-    reason records the swap (e.g. `mms_char_empty->allosaurus`).
+    Degrades per segment, never aborts the stage: a segment that yields
+    nothing gets `[]` plus `qc["visemes_<side>"]` naming the reason. Reasons
+    are `no_audio`, `audio_missing`, `no_text`, `too_short`
+    (< `MIN_ALIGNABLE_S`) and `empty`. With `fallback_backend` set, the other
+    backend is tried and the reason records the swap, e.g.
+    `mms_char_empty->allosaurus`.
 
-    MIXED BACKENDS ARE FLAGGED, not hidden: `mms_char` classes come from
-    uroman'd orthography and `allosaurus` classes from IPA read off the audio,
-    so a segment whose two sides came from different backends is comparing two
-    inventories. Those ids are listed in `extra.visemes.mixed_backend_segments`
-    and marked per segment in `qc["visemes_backend_mismatch"]`.
+    A segment whose two sides came from different backends is comparing two
+    inventories -- uroman'd orthography against IPA read off the audio -- so
+    those ids are listed in `extra.visemes.mixed_backend_segments` and marked
+    per segment in `qc["visemes_backend_mismatch"]`.
 
     One `mms_fa` aligner is built lazily and reused across every segment and
-    both sides; `_allosaurus_events` keeps its recognizer in a module global
-    for the same reason.
+    both sides; `_allosaurus_events` keeps its recognizer in a module global.
     """
     for s in sides:
         if s not in ("source", "tts"):
@@ -893,8 +856,8 @@ def attach_visemes(
                 reason = "audio_missing"
             elif not (txt or "").strip() and backend == "mms_char" \
                     and fallback_backend is None:
-                # allosaurus needs no text, so missing text is only fatal when
-                # there is no text-free backend left to fall back to.
+                # allosaurus needs no text, so missing text is only fatal
+                # with no text-free backend to fall back to.
                 reason = "no_text"
             else:
                 if dur is None:
@@ -1013,79 +976,37 @@ def viseme_cost(
 ) -> dict:
     """DTW over (onset, class) between two viseme sequences.
 
-    The sequences are NOT expected to be the same length -- Hindi and English
-    say the same thing with different numbers of mouth shapes, and forcing a
-    1:1 comparison is exactly the assumption that makes "match the durations"
-    look like it works. DTW lets the target spend more events in one place and
-    charges only for the misalignment that results.
+    The sequences need not be the same length -- Hindi and English say the
+    same thing with different numbers of mouth shapes. DTW lets one side spend
+    more events in one place and charges only the resulting misalignment.
 
-    Costs: a matched pair costs `|dt|/match_window_s` (capped at
-    `max_time_cost`, and forbidden outright beyond `band_s`) plus a class
-    penalty scaled by the heavier of the two classes; a skipped event costs
-    `skip_cost * weight[class] * (1 + min(d_near, skip_disp_cap_s)/win)`, where
-    `d_near` is the distance from that event to the nearest event in the other
-    sequence. Both are class-weighted so that dropping or displacing a lip
-    closure hurts far more than a velar nobody can see.
+    Costs: a matched pair costs `|dt|/match_window_s`, capped at
+    `max_time_cost` and forbidden beyond `band_s`, plus a class penalty scaled
+    by the heavier of the two classes. A skipped event costs
+    `skip_cost * weight[class] * (1 + min(d_near, skip_disp_cap_s)/win)`,
+    where `d_near` is the distance to the nearest event in the other sequence.
+    Both are class-weighted, so dropping a lip closure costs far more than a
+    velar nobody can see. `viseme_cost(X, X) == 0`: the diagonal is free.
 
-    `viseme_cost(X, X) == 0` by construction: the diagonal is free.
+    Two settings keep the metric monotone in desync, and changing either
+    brings back a score that goes DOWN as the desync grows:
 
-    WHY THE SKIP PENALTY IS DISPLACEMENT-AWARE, AND WHY THE DENOMINATOR
-    CHANGED. Measured on 5 real segments (38.6 s of source, 346 mms_char /
-    328 allosaurus source events) the SHIPPED metric -- fixed skip cost,
-    normalised by DTW path length -- was blind to a global desync, and worse
-    than blind: NON-MONOTONE. Shifting a sequence against an exact copy of
-    itself (so the only error present is the shift) gave
+      `norm_by="max"` divides by `max(n_src, n_tgt)`, a property of the
+        inputs. Dividing by DTW path length lets a worse alignment grow the
+        denominator as fast as the numerator and cancel its own cost.
+      `skip_disp_cap_s` makes the skip penalty displacement-aware. With a
+        fixed skip cost, skipping is cheaper than any pairing once `|dt|`
+        passes about `2 * skip_cost * win`, so the total saturates and 2 s of
+        desync scores the same as 1 s. An event with a counterpart nearby
+        still skips cheaply, so different-length sequences remain allowed.
 
-        shift        0 ms   100 ms   500 ms  1000 ms  2000 ms
-        mms_char   0.0000   0.4597   0.4268   0.4259   0.4211
-        allosaurus 0.0000   0.4177   0.4057   0.4070   0.4068
+    It is NOT length-blind: dropping half the target's events while leaving
+    every surviving onset untouched costs about what a 70 ms global shift
+    does, so print `n_src`/`n_tgt` beside any number taken from here. Beyond
+    `skip_disp_cap_s` the saturation returns by construction.
 
-    i.e. a 2000 ms desync -- 36x the 55 ms ground-truth noise floor -- scored
-    BETTER than a 100 ms one. Two compounding causes, both measured:
-
-      1. NORMALISATION. `dtw_cost / (matched + skips)` divides by a quantity
-         the alignment itself chooses. A worse alignment converts matches into
-         skips, which grows the denominator as fast as the numerator and
-         cancels the extra cost: raw cost rose 169.6 -> 258.6 across the sweep
-         while path length rose 369 -> 614. Dividing by `max(n_src, n_tgt)`
-         instead -- a property of the INPUTS, not of the path -- removes that
-         feedback and already restores monotonicity for allosaurus.
-      2. SKIP SATURATION. With a fixed skip cost, "these two events are not
-         the same event" is cheaper than any pairing once `|dt|` passes about
-         `2 * skip_cost * win`, so beyond ~200 ms every event simply re-pairs
-         with a same-class neighbour or is skipped, and the total hits a
-         ceiling of `0.5 * sum(weights)` that is the same for 1 s and for 2 s.
-         Charging a skip by how far its nearest counterpart actually is makes
-         the ceiling move with the desync, which is the thing the fixed cost
-         was hiding. This is NOT a 1:1 matching assumption: an event with a
-         counterpart nearby still skips cheaply, so different-length sequences
-         are still allowed to differ.
-
-    With both changes (`band_s=0.25`, `skip_disp_cap_s=3.0`, `norm_by="max"`)
-    the same sweep is strictly monotone on both backends, pooled over the same
-    5 segments:
-
-        self-desync   0 ms   100 ms   500 ms  1000 ms  2000 ms
-        mms_char    0.0000   0.4963   1.0674   1.5345   2.5474
-        allosaurus  0.0000   0.4921   1.0284   1.3705   2.3993
-        real pair     0 ms   100 ms   500 ms  1000 ms  2000 ms
-        mms_char    1.1602   1.1913   1.3725   1.7274   2.8253
-        allosaurus  1.2748   1.3131   1.5031   1.9028   3.0991
-
-    and it resolves the scale that actually matters: 25 ms -> 0.125,
-    55 ms -> 0.275 (mms_char), and zero-mean per-event JITTER (local desync,
-    no global offset) at sd 25/55/100 ms -> 0.123/0.288/0.440.
-
-    WHAT IT STILL CANNOT DO, measured, not assumed: it is not length-blind.
-    Dropping 50% of the target's events at random while leaving every
-    surviving onset untouched costs 0.331, about what a 70 ms global shift
-    costs. Two arms that differ in how many visemes their TTS contains (M1
-    changes engine speed, so it does) carry that confound into any ranking,
-    and `n_src`/`n_tgt` must be printed beside any number taken from here.
-    Beyond `skip_disp_cap_s` the saturation is back by construction.
-
-    `band_s=None, skip_disp_cap_s=None, norm_by="path"` reproduces the shipped
-    metric exactly, bit for bit, for re-reading old numbers.
+    `band_s=None, skip_disp_cap_s=None, norm_by="path"` reproduces the older
+    metric exactly, for re-reading old numbers.
     """
     if norm_by not in ("max", "path"):
         raise ValueError(f"norm_by must be 'max' or 'path', got {norm_by!r}")
@@ -1183,9 +1104,8 @@ def viseme_cost(
         "unmatched_tgt": skipped_tgt,
         "n_src": n,
         "n_tgt": m,
-        # matched/max(n,m): the share of the richer sequence that found an
-        # in-band partner. Shift-sensitive on its own, and the number that
-        # says whether `onset_mae_s` was computed over anything.
+        # Share of the richer sequence that found an in-band partner; says
+        # whether `onset_mae_s` was computed over anything.
         "match_rate": round(matched / max(1, max(n, m)), 4),
         "band_s": band_s,
         "norm_by": norm_by,
@@ -1196,11 +1116,10 @@ def viseme_cost(
 # CLI
 # ---------------------------------------------------------------------------
 #
-# A real, runnable call site for the viseme stage without reaching into
-# `backend/pipeline.py`, which this change does not own. Wiring it into the
-# pipeline proper is one call to `attach_visemes(mt_json, language=...,
-# out_json=mt_json)` placed AFTER stage 9f1 (the TTS clips and `tts_words[]`
-# must already exist) and BEFORE 9f2 (the timing plan reads the keys).
+# A runnable call site for the viseme stage. To wire it into the pipeline:
+# one `attach_visemes(mt_json, language=..., out_json=mt_json)` after stage
+# 9f1 (the TTS clips and `tts_words[]` must exist) and before 9f2 (the timing
+# plan reads the keys).
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     import argparse

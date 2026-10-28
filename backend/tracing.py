@@ -1,42 +1,29 @@
-"""Langfuse tracing for the one module here that talks to an LLM.
+"""Langfuse tracing for `backend/llm.py`, the only LLM caller here.
 
-`backend/llm.py` is the only LLM caller (on behalf of `backend/edit_agent.py`
-and `backend/classify.py`), so this is the only place that needs wiring. Added
-2026-10-19 to close a specific gap: the parsed ops survive in
-`<job>/edits/edit_NNN.json` and `extra.edits.history`, but the RAW model reply
-was never stored anywhere, so a model that misbehaves — a hallucinated voice
-id, a degenerate scope — left no record of what it actually said.
+Wraps the calls `backend/edit_agent.py` and `backend/classify.py` make, so
+the raw model reply is recorded alongside the parsed ops that end up in
+`<job>/edits/edit_NNN.json`.
 
-THREE RULES, in order of importance.
+Three rules this module keeps:
 
-1. **It must never break a dub.** Observability that can take down a
-   fifteen-stage GPU run is worse than no observability. Every public
-   function here swallows its own exceptions and logs; `generation()` yields
-   a no-op recorder rather than raising when Langfuse is unreachable.
-
-2. **Unconfigured is a supported state**, exactly as an empty
-   `OPENROUTER_API_KEY` is (CLAUDE.md §1). No keys → every call is a cheap
+1. It never breaks a dub. Every public function swallows its own exceptions
+   and logs; `generation()` yields a no-op recorder when Langfuse is
+   unreachable.
+2. Unconfigured is a supported state. No keys means every call is a cheap
    no-op and nothing warns on the hot path.
+3. Short-lived processes must flush. The SDK batches on a background thread,
+   so `flush()` is registered with `atexit` and the CLI entry points call it
+   explicitly.
 
-3. **Short-lived processes must flush.** The SDK batches over a background
-   thread, so `python -m backend.edit_agent` can exit with a full queue and
-   lose the trace it just made. `flush()` is registered with `atexit`, and
-   the CLI entry points call it explicitly.
+Auth needs BOTH keys: Langfuse uses HTTP Basic with the public key as
+username and the secret as password, so a secret key alone sends nothing.
+The public key is not a secret and can be re-read from Langfuse project
+settings at any time.
 
-AUTH NEEDS BOTH KEYS. Langfuse authenticates with HTTP Basic where the
-PUBLIC key is the username and the SECRET key is the password — the SDK and
-the REST API alike. A secret key on its own cannot send or read anything.
-The public key is **not** a secret: it is shown in Langfuse → Project
-Settings → API Keys any time you look. Only the secret key is one-time. So
-"I only have the private key" is recoverable — open project settings and
-copy the `pk-lf-…` next to it.
-
-CONTENT. The prompts carry the cue table, i.e. the actual translated
-dialogue of whatever is being dubbed. On Langfuse Cloud that text leaves
-this host. `DUBBING_LANGFUSE_CAPTURE_CONTENT=0` keeps the timings, token
-counts, costs and model parameters while dropping prompt and completion
-text, which is the setting to use if the material is not yours to send.
-Self-hosting (`LANGFUSE_HOST=http://localhost:3000`) avoids the question.
+The prompts carry the cue table, i.e. the dialogue being dubbed, so on
+Langfuse Cloud that text leaves this host.
+`DUBBING_LANGFUSE_CAPTURE_CONTENT=0` keeps timings, tokens, cost and model
+parameters while dropping prompt and completion text.
 """
 from __future__ import annotations
 
@@ -75,9 +62,8 @@ def configured() -> bool:
 def client():
     """The shared `Langfuse` client, or None. Built once, never raises.
 
-    A half-configured install is the case worth being loud about: a secret
-    key with no public key looks like "tracing is on" in `.env` and silently
-    sends nothing, so it says what is missing and where to find it.
+    A secret key with no public key looks like "tracing is on" in `.env` and
+    silently sends nothing, so that case says what is missing.
     """
     global _client, _tried, _atexit_registered
     if _tried:
@@ -110,9 +96,8 @@ def client():
         return None
 
     if not _atexit_registered:
-        # The SDK batches on a background thread. A CLI process that exits
-        # with a full queue drops the trace it just made, which looks like
-        # "tracing does not work" rather than "the process ended early".
+        # The SDK batches on a background thread, so a CLI process that
+        # exits with a full queue drops the trace it just made.
         atexit.register(flush)
         _atexit_registered = True
     log.info("langfuse: tracing ON (%s, content=%s)",
@@ -161,22 +146,20 @@ class _NullRecorder:
 class _Recorder:
     def __init__(self, obs):
         self._obs = obs
-        # `generation()` ends the span in its `finally` as a backstop for a
-        # caller that returns without calling either method. Ending twice is
-        # NOT idempotent — the SDK logs "Calling end() on an ended span." for
-        # every call — so the guard lives here rather than in the comment
-        # that used to claim it was harmless.
+        # `generation()` ends the span in its `finally` as a backstop, and
+        # ending twice is not idempotent -- the SDK logs "Calling end() on
+        # an ended span." every time.
         self._ended = False
 
     def succeed(self, output=None, *, usage=None, cost=None, **extra) -> None:
         """Close the generation as a success.
 
-        `usage` is OpenRouter's `usage` block and `cost` its dollar figure;
-        both arrive only because `backend/llm.py` asks for
-        `usage: {"include": true}`. They are mapped onto Langfuse's own
-        `usage_details` / `cost_details` so the dashboard's token and spend
-        columns populate — without that mapping Langfuse would re-derive
-        cost from its model table, which does not know this model's price.
+        `usage` is OpenRouter's `usage` block and `cost` its dollar figure,
+        both present only because `backend/llm.py` asks for
+        `usage: {"include": true}`. They are mapped onto Langfuse's
+        `usage_details` / `cost_details`; without that mapping Langfuse
+        re-derives cost from its model table, which lacks this model's
+        price.
         """
         try:
             fields: Dict[str, Any] = dict(extra)
@@ -225,8 +208,7 @@ def generation(name: str, *, model: str, input: Any = None,
     """One LLM call. Yields a recorder; always yields something.
 
     The caller closes it with `.succeed(...)` or `.fail(...)`. If the caller
-    raises instead, the generation is still ended on the way out and marked
-    ERROR, so a crashed run does not leave a span open forever.
+    raises instead, the generation is still ended and marked ERROR.
     """
     c = client()
     if c is None:
@@ -261,10 +243,9 @@ def trace(name: str, *, metadata: Optional[Dict[str, Any]] = None,
           input: Any = None):
     """Group the calls one user request makes into a single trace.
 
-    An edit agent request is one parse call plus up to N rewrite calls, and
-    read as N+1 unrelated traces it tells you nothing about which rewrite
-    belonged to which request. Nesting is by OTel context, so generations
-    opened inside this block attach themselves — no ids to thread through.
+    An edit agent request is one parse call plus up to N rewrite calls.
+    Nesting is by OTel context, so generations opened inside this block
+    attach themselves -- no ids to thread through.
     """
     c = client()
     span_cm = None
@@ -282,13 +263,9 @@ def trace(name: str, *, metadata: Optional[Dict[str, Any]] = None,
         yield None
         return
 
-    # NOT wrapped in try/except. An earlier version caught around the yield
-    # and then yielded AGAIN, which `@contextmanager` answers with
-    # `RuntimeError: generator didn't stop after throw()` — so every
-    # exception raised inside a traced block, every EditError the agent
-    # relies on, surfaced as that RuntimeError instead of itself. Tracing
-    # that swallows the error it was meant to record is worse than none.
-    # Failure to CREATE the span is handled above; once it exists the SDK's
-    # own context manager ends it and lets the exception through.
+    # Not wrapped in try/except around the yield: catching there and
+    # yielding again makes `@contextmanager` raise "generator didn't stop
+    # after throw()", which masks every exception raised inside the block.
+    # Failure to CREATE the span is handled above.
     with span_cm as span:
         yield span

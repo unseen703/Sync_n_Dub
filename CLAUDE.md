@@ -103,6 +103,7 @@ A new caller imports the canonical one. A new adapter inherits. A case that does
 | `--speed-mode segment` knobs | `backend/speed.py` |
 | best-effort JSON read of a job file | `ui/_io.py::read_json` |
 | lip-sync model ids the edit agent advertises | `models.lipsync.available_models()`, via `edits._lipsync_model_ids` |
+| delivery styles the TTS engine accepts | `backend/edits.py::tone_styles` (reads `INDIC_SPEAK_STYLES`) |
 | ASD face crops, int16-scale MFCC, VRAM windowing | `models/asd/_mfcc_av.py` |
 | where a vendored upstream lives, either side of the move | `models/_vendor.py::resolve_vendor_repo` |
 
@@ -115,8 +116,36 @@ error strings are pinned by `scripts/ab_refactor.py`, Bodhan retry loops are del
 ## 3. Running things
 
 **UI.** `ui/server.py` (FastAPI, loopback only, port 7861) serves `ui/web-dist/`. Jobs launch detached via
-`scripts/ui_run_job.sh`, the one launcher that sets the libstdc++ preload. The progress bar is 8 pills:
-7 stage groups plus `Finished`.
+`scripts/ui_run_job.sh`, the one launcher that sets the libstdc++ preload. The progress bar is 5 pills:
+`Prepare`, `Translate`, `Dub audio`, `Lip-sync` (`progress.PHASE_GROUPS`) plus a synthetic `Finished`.
+
+**A UI job ends at the MT gate.** `ui/runner.py` forces `stop_after_mt=True` on every submission — not a
+default, so no `request.json` can opt out; the CLI is unaffected because it never goes through the runner.
+Phase one runs through stage 9 plus 9b1 (the last marker before `run_post_mt_stages`), stamps
+`awaiting_cast` on the manifest, and exits `done`. Casting (`POST /api/jobs/{id}/cast` → `ui.runner
+--cast`) runs TTS + mix; lip-sync is a third, separate submission. **Trap:** the gate is
+`run_post_mt_stages`, not the `Translate` pill — 9b and 9c sit in that pill but run *after* the gate.
+
+**Stage 6b predicts gender before the gate**, on the gated flow only, so the cast table has a gender to
+show at the moment it asks for a voice. All three voters run, which is why ASD runs here too — and that
+costs a job that gets cast nothing, because `_run_asd_stage` is idempotent and the cast gate and lip-sync
+job both reuse the scores. Written to `voices/<stem>.gender.json`, deliberately NOT
+`speaker_voice_map.json`, which 9d rewrites wholesale. 9d reads the file back and only predicts the
+speakers it does not cover.
+
+**Progress-bar rules** (`ui/progress.py`). Three that are easy to break:
+
+- **`skipped` ≠ not-yet.** A group with no substages is `skipped` ("never part of this run"); post-gate
+  stages are planned and flagged `deferred` ("not run yet"). `StageRibbon` ticks only `done` — painting
+  `skipped` as done is what made Lip-sync claim a render that never happened. Every pill opens: each one
+  also carries `contains`, the group members this run did not plan, listed as "not in this run" (empty
+  for clip-runner and evidence-only docs, whose rows are not pipeline keys).
+- **A later run owns only its own keys.** `ProgressWriter` merges into the existing `progress.json`:
+  rows in `planned` are reset, everything else is preserved. Before this, cast/rerun/lip-sync each
+  replaced the file and erased phase one.
+- **A replay must open its own rows.** `edit_agent._rerun_lipsync_only` logs no stage marker, so
+  `ui/runner.py::_run_rerun` calls `writer.begin()` for `6`/`9h` itself. 9i is planned only when
+  `restore` is set — it never writes `progress.json`, so a planted row would hold `Finished` dark.
 
 **Edit agent.**
 
@@ -125,8 +154,28 @@ $PY -m backend.edit_agent -j <job_id> "speed up 0:30 to 0:45 by 1.2x"
 $PY -m backend.edit_agent -j <job_id> --list-ops
 ```
 
-Dry run by default; `--apply` writes, `--run` re-renders, `--revert` undoes. Gemma 3 12B via OpenRouter,
-JSON mode off (the model emits `{".ops":[...]}` under it).
+Dry run by default; `--apply` writes, `--run` re-renders, `--revert` undoes.
+
+**The regex parser runs first** (2026-10-28). `parse_request` tries `_rule_parse` and returns on a match;
+Gemma 3 12B via OpenRouter (JSON mode off — the model emits `{".ops":[...]}` under it) sees only the
+sentences the patterns could not place. Every phrasing in the op catalogue parses without the LLM, and
+`scripts/audit_edit_ops.py` prints the proof (72 rows, op + scope, bare and cue-scoped). What this gives up
+is the model's ability to ABSTAIN on an ambiguous sentence; what keeps it safe is that each branch guards
+the ones that could swallow it. Three rules that are easy to break:
+
+- **A cue id is a scope.** `resolve_cue_aliases` rewrites `cue 5` → `SEG_0004` before either parser runs,
+  so `_scope_from` matches `SEG_\d{4}` FIRST. Without that branch every cue-scoped request widened to the
+  whole dub, silently — and the UI's own selection prefix is the commonest way to produce one.
+- **A quoted phrase is a phrase edit.** `replace_term` is ordered before the language switch, or
+  `translate the word "conditional" into Hindi` re-translates the entire video.
+- **Tone comes from the engine.** `edits.tone_styles()` reads `INDIC_SPEAK_STYLES`; "formal" and "casual"
+  are not styles and `_h_set_tone` now refuses them. The catalogue, the prompt and the regex all read that
+  one function. The edit workspace OFFERS only `edits.TONE_CHOICES` — `TV style news` and
+  `educational lecture`, the two formats this material comes in — served as `action.options`. That narrows
+  what is offered, never what is accepted: a typed request naming any engine style still parses.
+
+A quick-action `fill` that carries a `<placeholder>` must also set `needs` — the workspace opens a picker
+for it and refuses to send an unfilled one. `tests/test_edit_agent.py` pins all four rules.
 
 **Langfuse tracing** wraps `backend/llm.py`. Needs both `LANGFUSE_PUBLIC_KEY` and `LANGFUSE_SECRET_KEY`;
 `--check-langfuse` verifies them. `DUBBING_LANGFUSE_CAPTURE_CONTENT=0` drops prompt text and keeps

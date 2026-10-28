@@ -480,6 +480,131 @@ def _asd_targets_npz(out_root: Path, video: Path, model: str, *,
         return None
 
 
+#: Where phase one leaves its gender ballot. Deliberately NOT
+#: `speaker_voice_map.json`: stage 9d rewrites that file wholesale every time
+#: it runs, so a prediction stored there would be destroyed by the very step
+#: that is supposed to reuse it.
+GENDER_SUFFIX = ".gender.json"
+
+
+def _read_gender_stage(out_root: Path, video: Path) -> Dict[str, dict]:
+    """Stage 6b's ballot for this job, or `{}`.
+
+    Scoped to `out_root` on purpose -- see the call site in 9d: an experiment
+    variant writes elsewhere and must predict for itself.
+    """
+    path = Path(out_root) / "voices" / f"{Path(video).stem}{GENDER_SUFFIX}"
+    try:
+        doc = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(doc, dict):
+        return {}
+    return {spk: rec for spk, rec in doc.items()
+            if isinstance(rec, dict) and rec.get("gender")}
+
+
+def _run_gender_stage(
+    out_root: Path,
+    video: Path,
+    *,
+    turns,
+    reference_audio: Optional[Path],
+    voices_dir: Path,
+    asd_model: Optional[str] = None,
+    asd_on_screen_threshold: float = 0.3,
+    device: Optional[str] = None,
+    adapter_kwargs: Optional[dict] = None,
+    result=None,
+) -> Optional[Path]:
+    """Stage 6b: predict every speaker's gender BEFORE the MT gate.
+
+    The staged UI flow stops after MT and asks the operator to cast voices.
+    It was asking with an empty gender column, because gender was predicted
+    in stage 9d -- on the far side of the gate. This moves the prediction to
+    where the question is asked.
+
+    All three voters run, which is why ASD runs here too: without a
+    face-to-speaker attribution `predict_gender_face` abstains, every
+    disagreement between the two audio voters falls to the tiebreak, and the
+    documented failure case in `backend/gender.py` (the lecturer both audio
+    methods get wrong and only the face gets right) arrives at the gate
+    confidently mislabelled.
+
+    That ASD pass is not an extra one. `_run_asd_stage` is idempotent on
+    `<stem>.<model>.scores.npz` + `.assignments.json`, and the cast gate and
+    the lip-sync job both reuse what is on disk, so for a job that gets cast
+    the pass simply MOVES from after the gate to before it. A job abandoned
+    at the gate is the one that pays for nothing.
+
+    Writes `voices/<stem>.gender.json` and returns its path, or None when
+    there is nothing to predict from.
+    """
+    out_root, video = Path(out_root), Path(video)
+    if not turns:
+        log.warning("gender: no diarization turns; skipping stage 6b")
+        return None
+
+    ref_dir = Path(voices_dir) / f"{video.stem}.refs"
+    # The same clips 9d would cut, cut early. `backend/gender.py`'s
+    # measurements were taken on these -- 3-15 s off the dialogue stem -- not
+    # on the UI's shorter listening previews, and writing them now makes 9d's
+    # own call a rewrite of identical audio rather than new work.
+    speaker_refs = extract_speaker_references(
+        reference_audio, turns, out_dir=ref_dir,
+    )
+    if not speaker_refs:
+        log.warning("gender: no reference clips under %s; skipping stage 6b",
+                    ref_dir)
+        return None
+
+    if asd_model:
+        _run_asd_stage(
+            out_root, video,
+            asd_model=asd_model, turns=turns,
+            reference_audio=reference_audio,
+            asd_on_screen_threshold=asd_on_screen_threshold,
+            device=device, adapter_kwargs=adapter_kwargs,
+            result=result,
+        )
+    else:
+        # No model to score with. Let the face voter abstain rather than
+        # inventing one: a mismatched model name would have its output swept
+        # as stale by `_run_asd_stage` at the cast gate anyway.
+        log.info("gender: no ASD model configured; the face vote abstains")
+
+    face_tracks_by_speaker = _speaker_face_tracks(out_root, video)
+    votes: Dict[str, dict] = {}
+    gender_map = predict_genders(
+        speaker_refs, device=device or "cpu", video=video,
+        speaker_face_tracks=face_tracks_by_speaker,
+        details_out=votes,
+    )
+
+    doc = {}
+    for spk, gender in gender_map.items():
+        vote = votes.get(spk) or {}
+        doc[spk] = {
+            "gender": gender,
+            "gender_vote": vote,
+            # Same key names stage 9d writes into `speaker_voice_map`, so
+            # nothing downstream has to learn a second vocabulary.
+            "gender_basis": ("fallback" if vote.get("decided_by") == "fallback"
+                             else vote.get("decided_by")),
+            "source": "stage6b",
+        }
+    out_path = Path(voices_dir) / f"{video.stem}{GENDER_SUFFIX}"
+    out_path.write_text(json.dumps(doc, indent=2, ensure_ascii=False))
+    log.info("gender: wrote %s (%d speaker(s))", out_path, len(doc))
+    # No new `PipelineResult` field for the path: the dataclass is serialised
+    # verbatim into `pipeline.json`, and the timing-plan comment on that class
+    # already settles the question -- a deterministic path does not need a
+    # field. `voices/<stem>.gender.json` is that path.
+    if result is not None:
+        result.speaker_references_dir = ref_dir
+    return out_path
+
+
 def _run_asd_stage(
     out_root: Path,
     video: Path,
@@ -907,7 +1032,24 @@ def run_post_mt_stages(
         # with a separate lip-sync job skips it here; the lip-sync job runs
         # ASD itself. Idempotent, so a second call reuses the scores.
         _all_speakers = {s["id"] for s in speakers}
-        _need_gender_asd = bool(_all_speakers - set(gender_overrides or {}))
+        # Stage 6b already voted for these, before the gate. Reuse it: a
+        # second ballot would reload 1.2 GB of wav2vec2 weights to reach the
+        # same verdict, and would re-run ASD to feed a face vote whose scores
+        # are already on disk. Scoped to THIS `out_root`, so an experiment
+        # variant (which writes under `exp_root/<stem>/<tag>`) finds no cache
+        # and predicts afresh -- which is what variant isolation requires.
+        _cached_genders = _read_gender_stage(out_root, video)
+        _need = (_all_speakers - set(gender_overrides or {})
+                 - set(_cached_genders))
+        if _cached_genders:
+            log.info("voices: reusing stage 6b gender for %d speaker(s); "
+                     "%d still to predict",
+                     len(_all_speakers & set(_cached_genders)), len(_need))
+        # ASD at the cast gate only buys the face vote, so it is needed only
+        # for the speakers still to predict. With 6b having covered everyone
+        # this skips entirely -- the scores it wrote are already on disk for
+        # the lip-sync job to reuse.
+        _need_gender_asd = bool(_need)
         if asd_model and _need_gender_asd:
             _run_asd_stage(
                 out_root, video,
@@ -926,13 +1068,20 @@ def run_post_mt_stages(
         # set defeats both audio methods at once and only the face gets him
         # right, so no single method is safe here. The face vote is optional
         # by construction: without face tracks + ASD it abstains.
-        face_tracks_by_speaker = _speaker_face_tracks(out_root, video)
-        gender_votes: Dict[str, dict] = {}
-        gender_map = predict_genders(
-            speaker_refs, device=device or "cpu", video=video,
-            speaker_face_tracks=face_tracks_by_speaker,
-            details_out=gender_votes,
-        )
+        gender_votes: Dict[str, dict] = {
+            spk: dict(rec.get("gender_vote") or {})
+            for spk, rec in _cached_genders.items()
+        }
+        gender_map = {spk: rec["gender"]
+                      for spk, rec in _cached_genders.items()}
+        if _need:
+            face_tracks_by_speaker = _speaker_face_tracks(out_root, video)
+            gender_map.update(predict_genders(
+                {k: v for k, v in speaker_refs.items() if k in _need},
+                device=device or "cpu", video=video,
+                speaker_face_tracks=face_tracks_by_speaker,
+                details_out=gender_votes,
+            ))
         if gender_overrides:
             for sid, g in gender_overrides.items():
                 if gender_map.get(sid) != g:
@@ -1300,6 +1449,14 @@ def run_post_mt_stages(
                 # and a lip-sync-only replay scores it now. Inside the try so
                 # a failure is a lip-sync error, not a silent wrong-face dub.
                 if asd_model:
+                    # The marker lives at THIS call site, not inside
+                    # `_run_asd_stage`, and that is deliberate. ASD also runs
+                    # in stage 6b (for the gender face vote) before the MT
+                    # gate; a marker inside the helper would fire there too
+                    # and light the Lip-sync pill on a job that has not been
+                    # anywhere near a render. ONE line -- `ui/progress.py`
+                    # scrapes it and the test greps the literal.
+                    log.info("=== stage 6: active speaker detection (%s) ===", asd_model)
                     _run_asd_stage(
                         out_root, video, asd_model=asd_model, turns=turns,
                         reference_audio=reference_audio_src,
@@ -2060,6 +2217,30 @@ def _run_pipeline(
         # `_run_asd_stage`. `assignments` stays None here; the per-segment
         # face fold below is therefore empty until the gate re-folds it.
         assignments: Optional[List] = None
+
+        # 6b. Gender for every speaker, on the GATED flow only.
+        #
+        # A run that stops after MT asks the operator to cast voices, and it
+        # was asking with an empty gender column because gender came out of
+        # stage 9d, past the gate. Predicting here fills the column while ASR
+        # and MT are still running, so it is on screen by the time the
+        # question is asked. ASD comes with it -- see `_run_gender_stage` for
+        # why that costs a cast job nothing.
+        #
+        # A CLI run never stops and is untouched: gender stays in 9d, ASD
+        # stays where 2026-10-26 put it.
+        if stop_after_mt:
+            log.info("=== stage 6b: predicting speaker gender ===")
+            _run_gender_stage(
+                job_root, video,
+                turns=diar_result.turns,
+                reference_audio=dia_input,
+                voices_dir=voices_dir,
+                asd_model=asd_model,
+                asd_on_screen_threshold=asd_on_screen_threshold,
+                device=device, adapter_kwargs=adapter_kwargs,
+                result=result,
+            )
 
         # 7. ASR (optional) -- or the uploader's own transcript, when there is
         #    a human-authored one. A published manual caption track is free

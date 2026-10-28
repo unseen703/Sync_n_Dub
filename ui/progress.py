@@ -61,31 +61,37 @@ STAGE_MARKER_RE = re.compile(
 #: runner vocabulary ("code-mix / script-norm (bodhan)"); these are not.
 #: Shared with the spec panel so the two never disagree.
 STAGE_LABELS: Dict[str, str] = {
-    "fetch":  "Fetching the video",
+    # `meta` and `fetch` are the runner's own steps, before the pipeline
+    # starts. `1` is the pipeline resolving what the runner already put on
+    # disk -- it used to share "Fetching the video" with `fetch`, so the
+    # Prepare drawer listed the same sentence twice for two different things.
+    "meta":   "Reading the video's details",
+    "fetch":  "Downloading the video",
     "cut":    "Trimming to the chosen part",
     "probe":  "Looking at the faces",
-    "1":      "Fetching the video",
+    "1":      "Finding the downloaded video",
     "2":      "Extracting the audio",
-    "3":      "Separating music from speech",
-    "4":      "Working out who speaks when",
+    "3":      "Separating background noise from audio",
+    "4":      "Diarization",
     "4b":     "Tidying up the segments",
     "4c":     "Telling the speakers apart",
     "5":      "Finding faces",
-    "6":      "Working out who is on screen",
+    "6":      "Active speaker detection",
+    "6b":     "Gender detection",
     "7":      "Transcribing",
     "8":      "Timing the words",
     "9":      "Translating",
     "9b":     "Keeping English terms in English",
     "9b1":    "Working out the tone",
-    "9b2":    "Listening for emotion",
+    "9b2":    "Emotion prediction",
     "9c":     "Fitting the text to the timing",
     "9c2":    "Shortening lines that run long",
-    "9d":     "Casting voices",
-    "9e":     "Speaking the translation",
+    "9d":     "Voice assignment",
+    "9e":     "Speech generation",
     "9f":     "Converting the voice",
     "9f1":    "Timing the new speech",
     "9f1b":   "Reading mouth shapes",
-    "9f2":    "Planning the timing",
+    "9f2":    "Planning the timing of new speech",
     "9g":     "Mixing the new soundtrack",
     "9h":     "Lip-syncing",
     "9i":     "Enhancing resolution",
@@ -98,21 +104,43 @@ STAGE_LABELS: Dict[str, str] = {
 #: stages plus a synthetic Finished pill. The 24 internal markers fold into
 #: these; the substages still travel in each phase for the expandable detail
 #: row, but the ribbon itself shows only this many nodes.
+#: Grouped by what an operator expects to find under each heading, not by
+#: where the stage sits in the pipeline source. Diarization and ASR are
+#: filed under `Translate` because "who said what, and what did they say"
+#: is the work that produces the script; ASD under `Lip-sync` because
+#: picking the speaking face is what the render needs it for.
+#:
+#: 9b1 is under `Translate` and 6b under `Prepare` for one shared reason:
+#: both run BEFORE the MT gate. Filed under `Dub audio` either one would
+#: make a job stopped at the gate draw a Dub pill with a stage done in it.
 PHASE_GROUPS: List[tuple] = [
-    ("prepare",   "Prepare",    ("fetch", "cut", "probe", "1", "2", "3",
-                                 "1-9a", "4", "4b", "4c", "5", "6",
-                                 "7", "8")),
-    ("translate", "Translate",  ("9", "9b", "9c", "9c2")),
-    ("dub",       "Dub audio",  ("9b1", "9b2", "9d", "9e", "9f",
+    ("prepare",   "Prepare",    ("meta", "fetch", "cut", "probe", "1", "2",
+                                 "3", "1-9a", "5", "6b")),
+    ("translate", "Translate",  ("4", "4b", "4c", "7", "8",
+                                 "9", "9b", "9b1", "9c", "9c2")),
+    ("dub",       "Dub audio",  ("9b2", "9d", "9e", "9f",
                                  "9f1", "9f1b", "9f2", "9g")),
-    ("lipsync",   "Lip-sync",   ("9h", "9i")),
+    ("lipsync",   "Lip-sync",   ("6", "9h", "9i")),
 ]
 
 #: Stages 10a/10b score the ASR and MT against ground-truth subtitles. They
 #: are an optional QA pass that most runs skip, and they produce no part of
 #: the dub — so they are kept out of the bar rather than appearing as an
 #: eighth stage nobody asked about. They still show in the log.
-HIDDEN_KEYS: tuple = ("10a", "10b")
+#:
+#: The second group is housekeeping the operator did not ask for and cannot
+#: act on (2026-10-28, by request): trimming, the face-size probe, resolving
+#: the file the runner just downloaded, the two optional diarization
+#: clean-ups, face detection, and word-level alignment. Each still runs,
+#: still logs, and still sits in `doc["stages"]` — they are just not steps
+#: anyone reads the bar to find out about.
+#:
+#: 9i (enhancement) is NOT hidden: it belongs under Lip-sync and shows there
+#: whenever it runs. What it must not be is PLANNED on a run that is not
+#: doing it -- see `plan_stages`.
+HIDDEN_KEYS: tuple = ("10a", "10b",
+                      "cut", "probe", "1", "4b", "4c", "5", "8",
+                      "1-9a", "9b", "9b1", "9c", "9f", "9f1", "9f1b")
 
 _GROUP_OF: Dict[str, str] = {
     key: gid for gid, _label, keys in PHASE_GROUPS for key in keys
@@ -122,7 +150,8 @@ _GROUP_OF: Dict[str, str] = {
 #: pipeline job read the same way on screen. Without this they all land in a
 #: single meaningless "Other" pill.
 _GROUP_OF.update({
-    "P1_CUT": "prepare", "P2_FACES": "prepare", "P3_ASD": "prepare",
+    # P3_ASD follows stage 6 into `lipsync`: same work, same reason.
+    "P1_CUT": "prepare", "P2_FACES": "prepare", "P3_ASD": "lipsync",
     "P4_MIX": "dub", "P5_LIPSYNC_BBOX_PREVIEW": "lipsync",
     "P6_LIPSYNC": "lipsync", "P7_SPLICE": "lipsync", "P8_VERIFY": "lipsync",
     "P5_SEGMENT": "prepare",
@@ -151,14 +180,23 @@ def label_for(key: str, fallback: str = "") -> str:
 # planning the stage list up front
 # ---------------------------------------------------------------------------
 
-def plan_stages(config: Dict[str, Any], *, pre: Optional[List[str]] = None
-                ) -> List[Dict[str, Any]]:
+def plan_stages(config: Dict[str, Any], *, pre: Optional[List[str]] = None,
+                stop_after_mt: bool = False) -> List[Dict[str, Any]]:
     """The stages this config will run, so the UI can say "5 of 18".
 
-    Mirrors the conditionals in `_run_pipeline`, which means it *can* drift.
-    It is reconciled against reality as markers arrive: an unplanned key is
-    appended, and a planned key that is skipped over is marked `skipped`. So
-    a drift degrades the up-front count, never the live state.
+    Mirrors the conditionals in `_run_pipeline`, so it can drift. It is
+    reconciled as markers arrive: an unplanned key is appended, a planned key
+    that is skipped over is marked `skipped`. A drift degrades the up-front
+    count, never the live state.
+
+    `stop_after_mt` is what a UI submission plans with: the run ends at the
+    gate. The boundary is `run_post_mt_stages`, not the Translate pill -- 9b
+    and 9c live in that pill but run after the gate, and 9b1 before it.
+
+    Post-gate keys are still planned, marked `deferred`. Dropping them left
+    the `dub` and `lipsync` groups with no substages, and `_group_phases`
+    reads an empty group as `skipped`, which the ribbon paints done -- so the
+    bar claimed a lip-sync render that had never happened.
     """
     keys: List[str] = list(pre or ["fetch", "cut"])
     keys += ["1", "2"]
@@ -171,17 +209,37 @@ def plan_stages(config: Dict[str, Any], *, pre: Optional[List[str]] = None
         keys.append("4c")
     if config.get("face_detector") or config.get("lipsync"):
         keys.append("5")
-    if config.get("asd"):
-        keys.append("6")
+    # 6 (ASD) is NOT planned here any more. Its marker is emitted at the
+    # lip-sync call site, because the pre-gate ASD pass belongs to 6b's
+    # gender vote -- so the row is planned down beside 9h, where it fires.
+    # Planned up here it never opened, got swept to `skipped` on a clean
+    # finish, and drew a done-looking Lip-sync pill: the original bug.
+    if stop_after_mt:
+        # 6b: every speaker's gender, predicted before the gate so the cast
+        # table has one to show when it asks for a voice. Phase one only --
+        # a CLI run gets gender inside 9d.
+        keys.append("6b")
     if config.get("asr"):
         keys.append("7")
     if config.get("align"):
         keys.append("8")
     if config.get("mt"):
         keys.append("9")
+
+    # 9b1 is the last marker phase one emits, so under `stop_after_mt` it
+    # belongs on this side of the gate even though every other 9b* key does
+    # not.
+    gated_9b1 = stop_after_mt and config.get("tts_style") == "auto"
+    if gated_9b1:
+        keys.append("9b1")
+
+    # Everything appended below this line runs inside `run_post_mt_stages`.
+    # Under `stop_after_mt` the run stops before all of it, so every key from
+    # here on is marked deferred at the bottom of this function.
+    gate = len(keys)
     if config.get("translit"):
         keys.append("9b")
-    if config.get("tts_style") == "auto":
+    if config.get("tts_style") == "auto" and not gated_9b1:
         keys.append("9b1")
     if config.get("emotion"):
         keys.append("9b2")
@@ -205,48 +263,53 @@ def plan_stages(config: Dict[str, Any], *, pre: Optional[List[str]] = None
         keys.append("9f2")
     if config.get("mix") or config.get("lipsync"):
         keys.append("9g")
-    # 9h is planned even when this run will not reach it, which is the one
-    # place this function deliberately does not mirror `_run_pipeline`.
+
+    # 9h is planned even when this run will not reach it -- the one place
+    # this function deliberately does not mirror `_run_pipeline`.
     #
-    # A `draft` submission sets `lipsync: None` and the dub stops at the mix;
-    # lip-sync is then a separate, explicit act (`POST .../lipsync`). Keying
-    # the node off the config meant such a job drew a SIX-node bar reading
-    # "Finished · all 6 stages" — a dub that is waiting for its most expensive
-    # stage, rendered identically to one that will never have it. The node is
-    # drawn and left pending instead, so the bar says what is still to come.
+    # A draft submission sets `lipsync: None` and stops at the mix; lip-sync
+    # is then a separate act (`POST .../lipsync`). Keyed off the config, such
+    # a job drew a bar reading "Finished - all 6 stages" over a dub still
+    # waiting for its most expensive stage. The node is drawn and left
+    # pending instead.
     #
-    # **Only when the run actually produces something to lip-sync TO.** A
-    # config with no TTS and no mix is not a dub awaiting its last stage; it
-    # is a run that was never going anywhere near 9h, and showing the node as
-    # "still to come" there would promise a step nobody is waiting for. That
-    # case keeps the old behaviour — no node, and `_group_phases` reads the
-    # group as `skipped`.
+    # Only when the run produces something to lip-sync TO: a config with no
+    # TTS and no mix was never going near 9h.
     #
-    # `deferred` is what carries the first case through `finish()` and
-    # `_from_manifest`, both of which otherwise resolve a leftover `pending`
-    # to `skipped` on a successful run. Skipped is a decision; deferred is a
-    # stage that has not had its turn, and the ribbon counts the two
-    # differently.
+    # `deferred` carries this through `finish()` and `_from_manifest`, which
+    # otherwise resolve a leftover `pending` to `skipped`. Skipped is a
+    # decision; deferred is a stage that has not had its turn.
     deferred: set = set()
+    _lipsync_keys = (["6"] if config.get("asd") else []) + ["9h"]
     if config.get("lipsync"):
-        keys.append("9h")
+        keys += _lipsync_keys
     elif config.get("mix") or config.get("tts"):
-        keys.append("9h")
-        deferred = {"9h"}
-    # 9i is 9h's case one step further out. Enhancement is NEVER part of a
-    # submission -- there is nothing to restore until a render exists, so it
-    # is always a separate act on a finished job (`POST .../enhance`), the
-    # same shape as `POST .../lipsync` on a draft. It is therefore planned
-    # whenever there is a 9h node to enhance, and deferred unless this run
-    # was explicitly configured to do it.
+        keys += _lipsync_keys
+        deferred = set(_lipsync_keys)
+
+    # 9i is planned ONLY when this run will actually restore. It used to be
+    # planted deferred-and-pending beside every 9h, and because enhancement
+    # never writes `progress.json` -- `POST .../enhance` runs in its own
+    # thread with its own polling -- that row could never resolve: once a
+    # real 9h render finished the group rolled up ["done", "pending"] ->
+    # "running" and held `Finished` dark forever.
     #
-    # Deferred and not `skipped`: `StageRibbon.isDone` counts skipped AS
-    # DONE, so marking it skipped would light the bar over a render nobody
-    # has enhanced — exactly the bug `deferred` was added to 9h to fix.
-    if "9h" in keys:
+    # Enhancement still appears under Lip-sync when it happens: the pipeline
+    # logs `=== stage 9i ===` and `_open` appends an unplanned row for it.
+    # Reality beats the forecast, which is the rule the whole file follows.
+    if config.get("restore"):
         keys.append("9i")
-        if not config.get("restore"):
-            deferred = deferred | {"9i"}
+
+    # Under `stop_after_mt` the whole post-gate half is deferred: planned, so
+    # the pills stay drawn, but never counted as done or skipped.
+    if stop_after_mt:
+        deferred = deferred | set(keys[gate:])
+    return _plan_rows(keys, deferred)
+
+
+def _plan_rows(keys: List[str], deferred: Optional[set] = None
+               ) -> List[Dict[str, Any]]:
+    deferred = deferred or set()
     return [{"key": k, "title": None, "label": label_for(k),
              "state": "pending", "started_at": None, "wall_s": None,
              **({"deferred": True} if k in deferred else {})}
@@ -271,25 +334,80 @@ class ProgressWriter(logging.Handler):
         self.job_root = Path(job_root)
         self.path = self.job_root / PROGRESS_FILE
         self._lock = threading.RLock()
+        #: The keys THIS run owns. Everything else in the file belongs to an
+        #: earlier run and is read-only here. The sweeps in `_open` and
+        #: `finish` are scoped to it, or a cast run opening 9d would mark
+        #: every inherited phase-one row `skipped`.
+        self._owned = {s["key"] for s in (planned or [])}
+        stages, started_at = self._merge(planned, job_id)
         self._doc: Dict[str, Any] = {
             "version": PROGRESS_VERSION,
             "job_id": job_id,
             "kind": kind,
             "pid": os.getpid(),
             "state": "running",
-            "started_at": _now(),
+            # The JOB's start, carried across runs -- the job list sorts on
+            # it. This run's own start is `run_started_at`.
+            "started_at": started_at or _now(),
+            "run_started_at": _now(),
             "updated_at": _now(),
             "heartbeat": _now(),
             "current": None,
             "log": "run.log",
             "error": None,
-            "stages": list(planned or []),
+            "stages": stages,
         }
         self._stop = threading.Event()
         self._beat = threading.Thread(target=self._heartbeat, args=(heartbeat_s,),
                                       daemon=True, name="progress-heartbeat")
         self._flush()
         self._beat.start()
+
+    def _merge(self, planned: Optional[List[Dict[str, Any]]],
+               job_id: str) -> tuple:
+        """Fold `planned` into the progress doc already on disk.
+
+        A job folder is written by several processes over its life: phase
+        one, the cast run, a re-render, the lip-sync job. Rows this run owns
+        are reset (it is about to run them); rows it does not own are kept
+        exactly as the last run left them.
+
+        Replacing the file instead erased everything before it, leaving a
+        single `9h` row -- so the ribbon drew four empty groups, called them
+        `skipped`, and painted them done.
+
+        Any trouble reading the old file -- missing, corrupt, a different
+        schema version or a different job -- falls back to replacing it. A
+        progress file must never be able to fail a run.
+        """
+        rows = [dict(r) for r in (planned or [])]
+        try:
+            doc = json.loads(self.path.read_text())
+            prior = doc["stages"]
+            if (doc.get("version") != PROGRESS_VERSION
+                    or doc.get("job_id") != job_id):
+                return rows, None
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            return rows, None
+
+        by_key = {r["key"]: r for r in rows if isinstance(r, dict) and "key" in r}
+        out: List[Dict[str, Any]] = []
+        for old in prior:
+            if not isinstance(old, dict) or "key" not in old:
+                continue
+            fresh = by_key.pop(old["key"], None)
+            if fresh is None:
+                out.append(old)
+                continue
+            # Ours, and it has run before. Reset it: a stale `done` with the
+            # previous attempt's wall time is wrong the moment we start.
+            # `deferred` goes too -- we own it now.
+            fresh.pop("deferred", None)
+            fresh.update(state="pending", started_at=None, wall_s=None)
+            out.append(fresh)
+        for key, fresh in by_key.items():
+            out.insert(_insert_at(out, key), fresh)
+        return out, doc.get("started_at")
 
     # -- public ----------------------------------------------------------
 
@@ -318,7 +436,13 @@ class ProgressWriter(logging.Handler):
             self._close_current("done" if state == "done" else state)
             if state == "done":
                 for st in self._doc["stages"]:
-                    if st["state"] == "pending" and not st.get("deferred"):
+                    # `self._owned`: a row an earlier run left pending is not
+                    # this run's to judge. The lip-sync replay plans one key;
+                    # without this it marked every inherited phase-one row
+                    # `skipped`, which the ribbon drew as done.
+                    if (st["state"] == "pending"
+                            and st["key"] in self._owned
+                            and not st.get("deferred")):
                         st["state"] = "skipped"
             self._doc["state"] = state
             self._doc["error"] = error
@@ -359,9 +483,14 @@ class ProgressWriter(logging.Handler):
         idx = next((i for i, s in enumerate(stages)
                     if s["key"] == key and s["state"] == "pending"), None)
         if idx is not None:
-            # Anything still pending before this one was conditionally skipped.
+            # Anything still pending before this one was conditionally
+            # skipped -- but only among the keys THIS run owns, and never a
+            # deferred row. An inherited row belongs to a closed run, a
+            # deferred one to a submission that has not happened yet.
             for s in stages[:idx]:
-                if s["state"] == "pending":
+                if (s["state"] == "pending"
+                        and s["key"] in self._owned
+                        and not s.get("deferred")):
                     s["state"] = "skipped"
         else:
             # No PENDING entry for this key. Two different situations, and
@@ -485,6 +614,11 @@ def _from_progress_json(job_root: Path) -> Optional[Dict[str, Any]]:
     out = _blank(job_root)
     out.update(doc)
     out["source"] = "progress.json"
+    out["stages"] = _backfill_erased(job_root, doc)
+    out["n_done"] = sum(1 for st in out["stages"]
+                        if st.get("state") in ("done", "skipped"))
+    out["n_total"] = len(out["stages"])
+
     # A process that died without finalising still reads "running". Only the
     # pid can tell us otherwise, and only on this machine.
     if out.get("state") == "running" and not _pid_alive(out.get("pid")):
@@ -493,6 +627,37 @@ def _from_progress_json(job_root: Path) -> Optional[Dict[str, Any]]:
             "The run stopped without reporting a result — the process is gone. "
             "See run.log for what it was doing.")
     return out
+
+
+def _backfill_erased(job_root: Path, doc: Dict[str, Any]
+                     ) -> List[Dict[str, Any]]:
+    """Repair a doc a pre-2026-10-28 rerun flattened.
+
+    Until `ProgressWriter._merge` existed, a cast or re-render replaced this
+    file with its own two or three keys, so the job's whole history went. The
+    signature is a `rerun`/`cast` doc with not one Prepare-group key in it --
+    no download, no diarization, nothing that must have happened for a
+    re-render to be possible at all.
+
+    Rather than rewrite those files, re-plan the run from the manifest and
+    put the recovered rows in front of what survived. New jobs never match,
+    so this costs one set-membership test per read.
+    """
+    stages = [st for st in (doc.get("stages") or [])
+              if isinstance(st, dict) and "key" in st]
+    if doc.get("kind") not in ("rerun", "cast"):
+        return stages
+    if any(_GROUP_OF.get(st["key"]) == "prepare" for st in stages):
+        return stages
+    try:
+        recovered = _from_manifest(job_root)
+    except Exception:                                     # noqa: BLE001
+        return stages
+    if not recovered:
+        return stages
+    seen = {st["key"] for st in stages}
+    return [st for st in recovered["stages"]
+            if st.get("key") not in seen] + stages
 
 
 def _from_status_json(job_root: Path) -> Optional[Dict[str, Any]]:
@@ -559,7 +724,11 @@ def _from_manifest(job_root: Path) -> Optional[Dict[str, Any]]:
     state = {"ok": "done", "running": "running",
              "failed": "failed"}.get(status, status)
     cfg = doc.get("config") or {}
-    stages = plan_stages(cfg)
+    # A job sitting at the gate stamped `awaiting_cast` here, and the cast run
+    # has not written its own progress doc yet. Plan what phase one ran, or
+    # this fallback reports a finished job as stalled mid-dub. A CLI job never
+    # carries the flag and still plans end to end.
+    stages = plan_stages(cfg, stop_after_mt=bool(doc.get("awaiting_cast")))
     if state == "done":
         for s in stages:
             # `deferred` stays pending — see `ProgressWriter.finish`. The
@@ -659,6 +828,28 @@ def _pct(doc: Dict[str, Any]) -> int:
     return max(0, min(99, int(round(100 * (doc.get("n_done") or 0) / total))))
 
 
+#: Where a key belongs in the stage list, so a row introduced by a later run
+#: (the cast step's 9d into a doc that stops at 9) lands in pipeline order
+#: rather than at the end.
+_CANON_ORDER: Dict[str, int] = {
+    key: i
+    for i, key in enumerate(
+        k for _gid, _label, keys in PHASE_GROUPS for k in keys)
+}
+
+
+def _insert_at(rows: List[Dict[str, Any]], key: str) -> int:
+    """The index `key` should take in `rows`. Unknown keys go last."""
+    rank = _CANON_ORDER.get(key)
+    if rank is None:
+        return len(rows)
+    for i, r in enumerate(rows):
+        other = _CANON_ORDER.get(r.get("key"))
+        if other is not None and other > rank:
+            return i
+    return len(rows)
+
+
 #: The last pill, and the only synthetic one. It is NOT in `PHASE_GROUPS`
 #: because that table maps real `=== stage N ===` markers and
 #: `tests/test_ui_progress.py` greps `pipeline.py` for every key in it; a
@@ -690,20 +881,41 @@ def _group_phases(stages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             continue
         by_group.setdefault(_GROUP_OF.get(s["key"], "other"), []).append(s)
 
-    out = []
+    # Every pill opens, including one this run planned nothing in -- so
+    # `contains` carries the group's FULL membership, and the ribbon lists
+    # the steps a run did not take as "not in this run" rather than showing
+    # an empty drawer or refusing to open.
+    #
+    # Suppressed for the clip runner and the evidence-based fallback, whose
+    # rows (`P1_CUT`, ...) are not pipeline keys: listing the pipeline's own
+    # stages against those would describe a pipeline that is not running.
+    canonical_doc = any(s["key"] in _CANON_ORDER for s in stages)
+
+    out: List[Dict[str, Any]] = []
     for gid, label, _keys in PHASE_GROUPS:
         subs = by_group.pop(gid, [])
+        planned = {s["key"] for s in subs}
+        rest = ([{"key": k, "label": label_for(k)} for k in _keys
+                 if k not in planned and k not in HIDDEN_KEYS]
+                if canonical_doc or not stages else [])
         out.append({"id": gid, "label": label,
+                    "contains": rest,
                     # No substages means this run never configured the step.
                     # `skipped`, not `pending`: pending reads as "still to
                     # come" and would leave a finished run looking unfinished.
-                    "state": _rollup([s["state"] for s in subs]) if subs
-                             else "skipped",
+                    "state": _rollup(subs) if subs else "skipped",
+                    # True when the group exists only as work a later
+                    # submission does. The ribbon draws a skipped group muted
+                    # and a deferred one as a waiting node. Never both -- an
+                    # empty group is skipped, not deferred.
+                    "deferred": bool(subs) and not _live(subs),
                     "wall_s": _sum_opt(s.get("wall_s") for s in subs),
                     "substages": subs})
     for gid, subs in by_group.items():            # unknown keys, kept visible
         out.append({"id": gid, "label": gid.replace("_", " ").title(),
-                    "state": _rollup([s["state"] for s in subs]),
+                    "contains": [],
+                    "state": _rollup(subs),
+                    "deferred": bool(subs) and not _live(subs),
                     "wall_s": _sum_opt(s.get("wall_s") for s in subs),
                     "substages": subs})
 
@@ -724,21 +936,47 @@ def _finished_phase(phases: List[Dict[str, Any]]) -> Dict[str, Any]:
     states = [p["state"] for p in phases]
     if "failed" in states:
         return {"id": FINISHED_ID, "label": FINISHED_LABEL,
-                "state": "failed", "wall_s": None, "substages": []}
+                "state": "failed", "deferred": False,
+                "contains": [], "wall_s": None, "substages": []}
     deferred = any(s.get("deferred") and s.get("state") == "pending"
                    for p in phases for s in p["substages"])
     complete = all(s in ("done", "skipped") for s in states) and not deferred
     return {"id": FINISHED_ID, "label": FINISHED_LABEL,
             "state": "done" if complete else "pending",
-            # None, NOT the sum of the others. The ribbon adds `wall_s`
-            # across phases to show elapsed time, so a total here would be
-            # counted twice and report double the real runtime. This pill
-            # marks a moment, not work.
+            # Always present so the TS type can treat them as non-optional.
+            "deferred": False,
+            # A moment, not a step: it contains nothing, so its pill is the
+            # one that does not open.
+            "contains": [],
+            # None, not the sum of the others: the ribbon adds `wall_s`
+            # across phases, so a total here would double the runtime. This
+            # pill marks a moment, not work.
             "wall_s": None,
             "substages": []}
 
 
-def _rollup(states: List[str]) -> str:
+def _live(subs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """The substages this run is actually going to touch.
+
+    A deferred-and-pending row is work a later submission does (the cast
+    step, the lip-sync job), so it must not drag the group into `running`
+    nor be mistaken for a stage that was decided against.
+    """
+    return [s for s in subs
+            if not (s.get("deferred") and s.get("state") == "pending")]
+
+
+def _rollup(subs: List[Dict[str, Any]]) -> str:
+    """Fold a group's substages into one pill state.
+
+    Takes the rows, not bare states, because `deferred` lives on the row and
+    changes the answer: a group of nothing but deferred rows reads `pending`
+    ("not run yet"), never `skipped` -- which the ribbon paints as done.
+    """
+    live = _live(subs)
+    if not live:
+        return "pending"
+    states = [s["state"] for s in live]
     if "running" in states:
         return "running"
     if "failed" in states:

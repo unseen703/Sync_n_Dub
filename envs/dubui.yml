@@ -1,4 +1,4 @@
-# Node, for building ui/web2/ only -- never a runtime dependency of the
+# Node, for building ui/web/ only -- never a runtime dependency of the
 # server itself (CLAUDE.md: the server serves static files from
 # ui/web-dist/ and never shells into node). The system node on this host is
 # v12, and bare `npm` under it fails with "Cannot find module 'node:path'",
@@ -7,14 +7,14 @@
 #
 # Conda layer taken verbatim from this env's `conda-meta/history`:
 #   conda create -n dubui -y nodejs=20
-# which resolved to 20.20.2 from pkgs/main. `ui/web2/package-lock.json` is
+# which resolved to 20.20.2 from pkgs/main. `ui/web/package-lock.json` is
 # tracked, so `npm ci` against it is reproducible without a separate lock
 # file here.
 #
 # Recreate:
 #   conda env create -f envs/dubui.yml -n dubui
-#   conda run -n dubui npm --prefix ui/web2 ci
-#   conda run -n dubui npm --prefix ui/web2 run build    # -> ui/web-dist/
+#   conda run -n dubui npm --prefix ui/web ci
+#   conda run -n dubui npm --prefix ui/web run build    # -> ui/web-dist/
 name: dubui
 channels:
   - defaults

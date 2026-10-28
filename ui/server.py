@@ -43,13 +43,10 @@ if str(REPO_ROOT) not in sys.path:
 DATA_DIR = _data_dir()
 JOBS_DIR = DATA_DIR / "jobs"
 
-#: The built Vite app, and the hand-written inspector that predates it.
-#: `WEB_DIR` prefers the build but falls back, so a broken or absent build
-#: never takes the UI down — which matters on this host, where the UI is how
-#: you check a four-hour GPU run.
-WEB_DIST   = Path(__file__).resolve().parent / "web-dist"
-WEB_LEGACY = Path(__file__).resolve().parent / "web"
-WEB_DIR    = WEB_DIST if (WEB_DIST / "index.html").is_file() else WEB_LEGACY
+#: The built Vite app (`ui/web/` builds into it). The API still comes up if
+#: the build is missing, so a four-hour GPU run stays reachable over /api.
+WEB_DIST = Path(__file__).resolve().parent / "web-dist"
+WEB_DIR  = WEB_DIST
 
 LOG = logging.getLogger("ui")
 
@@ -779,12 +776,11 @@ for _mod, _what in (("routes_edits", "voice/tone editing"),
 
 
 # Static UI — mounted last so /api/* and /files/* win first.
-# The old inspector stays reachable at /legacy during the transition; its
-# Files/Images/Clips tabs are the fallback until they are ported.
-if WEB_DIR is not WEB_LEGACY and WEB_LEGACY.is_dir():
-    app.mount("/legacy", StaticFiles(directory=str(WEB_LEGACY), html=True),
-              name="legacy")
-app.mount("/", StaticFiles(directory=str(WEB_DIR), html=True), name="ui")
+if (WEB_DIR / "index.html").is_file():
+    app.mount("/", StaticFiles(directory=str(WEB_DIR), html=True), name="ui")
+else:
+    LOG.warning("%s/index.html missing — API only. Build the UI: "
+                "conda run -n dubui npm --prefix ui/web run build", WEB_DIR)
 
 
 def main() -> None:

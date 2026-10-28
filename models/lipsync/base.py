@@ -1,14 +1,12 @@
-"""Shared types + abstract base for lip-sync adapters.
+"""Shared types and abstract base for lip-sync adapters.
 
-A lip-sync adapter takes a video file and a *driving* audio track (the
-dubbed audio from the mix stage) and produces a new video where the
-on-screen faces are animated to match the driving audio. Content stays
-the same; only the mouth / lower-face region is re-rendered.
+An adapter takes a video and a driving audio track (the dubbed audio from
+the mix stage) and re-renders the on-screen mouths to match it. Only the
+lower-face region changes.
 
-The three adapters we ship — Wav2Lip, MuseTalk 1.5, LatentSync 1.6 —
-each wrap an external upstream clone (see `models/lipsync/vendor/`). None of
-them have a usable PyPI install; the adapter is responsible for cloning
-the repo and loading its checkpoints via env vars.
+Each adapter wraps an external upstream clone (see `models/lipsync/vendor/`).
+None installs from PyPI, so the adapter clones the repo and loads its
+checkpoints via env vars.
 """
 from __future__ import annotations
 
@@ -21,28 +19,19 @@ from typing import Optional
 
 def resolve_env_python(model: str, env_name: str,
                        explicit: Optional[str] = None) -> str:
-    """Interpreter for an adapter that CANNOT run in the `dubbing` env.
+    """Interpreter for an adapter that cannot run in the `dubbing` env.
 
     MuseTalk and LatentSync have upstream pins incompatible with `dubbing`,
-    which is why they have their own conda envs. The adapters used to resolve
-    `<MODEL>_PYTHON or sys.executable`, and an empty value is the normal case:
-    neither variable was in `.env.example` (added 2026-10-17), and
-    `LIPGAN_PYTHON` / `WAV2LIP_PYTHON` being legitimately blank makes a blank
-    look safe. The fallback then ran MuseTalk under `dubbing`, where
-    `import diffusers` fails -- AFTER a full run has paid for ASR, MT, TTS and
-    the mix, with the adapter still logging "done" and the manifest recording
-    an output path that does not exist.
+    so they have their own conda envs.
 
-    So the sibling conda env is tried BEFORE `sys.executable`: `dubbing`'s
-    interpreter lives at `<prefix>/envs/dubbing/bin/python`, so a sibling is
-    `<prefix>/envs/<env_name>/bin/python`. Derived from `sys.executable`
-    rather than hard-coded, which is the same trick `media_io._ffmpeg_bin()`
-    uses to find the env actually executing. Resolving it here fixes the CLI,
-    the UI runner, the edit agent and `experiment.py` at once, instead of
-    each launcher remembering to export a variable.
+    Order: explicit argument -> `<MODEL>_PYTHON` -> sibling conda env ->
+    `sys.executable` (warned). The sibling env is tried before
+    `sys.executable` because falling back to `dubbing` runs MuseTalk where
+    `import diffusers` fails -- after ASR, MT, TTS and the mix are paid for,
+    with the adapter still logging "done".
 
-    Order: explicit argument -> `<MODEL>_PYTHON` -> sibling env ->
-    `sys.executable` (warned, because that is the shape that failed).
+    The sibling path is derived from `sys.executable`
+    (`<prefix>/envs/<env_name>/bin/python`), not hard-coded.
     """
     import logging
     import os
@@ -79,9 +68,8 @@ def resolve_env_python(model: str, env_name: str,
 class LipSyncRequest:
     """One (video, audio) pair to run through a lip-sync model.
 
-    `video` is the source video (we re-render the lower face region on
-    top of its original frames). `audio` is the driving track — in the
-    pipeline this is the mixed dubbed audio from `backend.mix`.
+    `video` is the source; `audio` is the driving track, which in the
+    pipeline is the mixed dubbed audio from `backend.mix`.
     """
     video: Path
     audio: Path
@@ -125,14 +113,10 @@ class BaseLipSync(ABC):
     def _subprocess_env(self) -> dict:
         """Env for the adapter's shell-out, pinned to self.cuda_device if set.
 
-        Also puts our ffmpeg on PATH. Every one of these upstream repos
-        shells out to the bare name `ffmpeg` somewhere, and there is none on
-        this host's PATH (CLAUDE.md §1) — Wav2Lip's `inference.py:289` muxes
-        its `temp/result.avi` onto the output that way and discards the
-        return code, so a missing ffmpeg costs the whole render *after* the
-        GPU work is finished, and `inference.py` still exits 0 with no
-        output file. Prepending the directory here fixes it once for every
-        adapter instead of once per runner script.
+        Also puts our ffmpeg on PATH. Every vendored upstream shells out to
+        a bare `ffmpeg` somewhere and there is none on this host's PATH;
+        Wav2Lip's `inference.py` discards the return code, so a missing
+        ffmpeg loses the render after the GPU work and still exits 0.
         """
         import os
         from pathlib import Path
@@ -157,23 +141,16 @@ class BaseLipSync(ABC):
         """Render a lip-synced video. Returns metadata about the output."""
 
     def sync_many(self, requests: "list[LipSyncRequest]") -> "list[LipSyncResult]":
-        """Render several (video, audio) pairs reusing ONE loaded model.
+        """Render several (video, audio) pairs reusing one loaded model.
 
-        The warm-model path. `backend.lipsync` splits a long clip into pieces
-        to bound host RAM (see `_run_lipsync_segmented`); the old loop paid a
-        fresh process start and a full model load per piece, which the docstring
-        there measured as the dominant cost at this clip length. Handing a GPU's
-        whole run of pieces to one call lets an adapter load the model once and
-        cycle only the per-piece frame buffers in and out -- the memory bound
-        stays a function of one piece, the load cost stops scaling with the
-        piece count.
+        `backend.lipsync` splits a long clip into pieces to bound host RAM;
+        handing a GPU's whole run of pieces to one call lets an adapter load
+        the model once and cycle only the per-piece frame buffers.
 
-        Default: one `sync()` per request (a fresh load each time), so an
-        adapter that has no warm path still works. Adapters that load the model
-        in a subprocess override this to load once and loop. The returned list
-        matches `requests` in order and length; a request that failed carries
-        its error in its own `LipSyncResult.error` rather than aborting the
-        rest, because `backend.lipsync` decides per piece what a failure means.
+        Default: one `sync()` per request, so an adapter with no warm path
+        still works. The returned list matches `requests` in order and
+        length; a failed request carries its error in its own
+        `LipSyncResult.error` rather than aborting the rest.
         """
         return [self.sync(r) for r in requests]
 

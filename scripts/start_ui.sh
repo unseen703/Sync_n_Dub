@@ -53,8 +53,8 @@ cd "$REPO" || exit 1
 
 WEB_DIST="$REPO/ui/web-dist/index.html"
 if [ ! -f "$WEB_DIST" ]; then
-  echo "warning: $WEB_DIST missing -- serving the read-only legacy inspector" >&2
-  echo "  build it: conda run -n dubui npm --prefix ui/web2 ci && conda run -n dubui npm --prefix ui/web2 run build" >&2
+  echo "warning: $WEB_DIST missing -- server will be API-only" >&2
+  echo "  build it: conda run -n dubui npm --prefix ui/web ci && conda run -n dubui npm --prefix ui/web run build" >&2
 fi
 
 if [ -f "$REPO/scripts/doctor.py" ]; then

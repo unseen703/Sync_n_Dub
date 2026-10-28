@@ -1,27 +1,17 @@
-"""One adapter registry, written once instead of twelve times.
+"""One adapter registry, shared by every stage under `models/`.
 
-Every stage under `models/` resolves its implementation the same way: a
-`_REGISTRY_SPEC` mapping a short name to `(module, class)`, a lazy import so
-an adapter nobody asked for costs nothing, and a getter that drops the kwargs
-the chosen class does not accept. That shape was spelled out in full in
-twelve `__init__.py` files — about 45 identical lines each, differing only in
-the noun inside the error messages.
+Each stage declares a `_REGISTRY_SPEC` mapping a short name to
+`(module, class)`; this module turns that into a lazy importer and a getter
+that drops kwargs the chosen class does not accept. A stage's `__init__.py`
+keeps only its docstring, `_REGISTRY_SPEC`, its `base` re-exports, and any
+stage-specific helper.
 
-This is that code, once. A stage's `__init__.py` keeps only what is genuinely
-its own: the docstring, `_REGISTRY_SPEC`, its `base` re-exports, and any
-stage-specific helper (`models.tts.resolve_style`, `models.asr`'s
-language-filtered lister).
+`_REGISTRY_SPEC` must stay a dict literal at module level: tooling and
+`tests/test_lightasd_adapter.py` read it with `ast.parse` without importing
+the module, so a spec assembled by a helper reads as zero adapters.
 
-**`_REGISTRY_SPEC` stays a dict LITERAL at module level in every stage.**
-`scripts/repo_checkup.py::_registry` reads it with `ast.parse` and never
-imports the module — building it through a helper, or assembling it from
-parts, makes the five-hourly README regeneration quietly report zero adapters
-for that stage.
-
-The messages are reproduced here character for character, nouns included.
-They are what an operator sees when a model name is wrong, and
-`scripts/ab_refactor.py` pins every one of them so this consolidation can be
-proved to have changed nothing.
+The error messages are pinned by `scripts/ab_refactor.py` -- change the
+wording and that check fails.
 """
 from __future__ import annotations
 
@@ -55,24 +45,18 @@ def make_registry(
     """Build one stage's registry callables.
 
     `noun` goes in the ValueError for an unregistered name ("MT model",
-    "face detector"); `import_noun` + `import_detail` make the ImportError
-    for a name that IS registered but will not import. They are separate
-    because the two sentences start differently — "Unknown aligner …" but
-    "Aligner 'mms_fa' is not installed …" — and because the install hint is
-    per-stage. `import_detail` may interpolate `{key}`, which is what
-    `models.diarization` uses to name `.venv-<key>` in its own message.
+    "face detector"). `import_noun` + `import_detail` build the ImportError
+    for a name that is registered but will not import; `import_detail` may
+    interpolate `{key}`, which `models.diarization` uses to name
+    `.venv-<key>`.
 
-    `pass_device=False` is `models.faces.track`, whose trackers are pure
-    geometry and take no device; its getter has no `device` parameter at all,
-    so a caller passing one gets a TypeError rather than silence.
-    `verbose_warning=True` appends the accepted-kwarg list, which three
-    stages do.
+    `pass_device=False` gives the getter no `device` parameter at all, so a
+    caller passing one gets a TypeError (used by `models.faces.track`,
+    whose trackers are pure geometry). `verbose_warning=True` appends the
+    accepted-kwarg list.
 
-    `base` is the stage's abstract class, and is only used to put the return
-    annotation back on the getter. Each hand-written getter declared
-    `-> BaseAligner` / `-> BaseMT` / …, and a generic closure loses that:
-    `inspect.signature(get_mt)` stopped reporting a return type, which is
-    what every editor and type-checker reads. It costs one line to keep.
+    `base` is the stage's abstract class, used only to put the return
+    annotation back on the getter so `inspect.signature` still reports it.
     """
 
     def _load(key: str) -> Type:
@@ -94,10 +78,12 @@ def make_registry(
         }
 
     def _resolve(name: str, kwargs: dict) -> tuple:
-        """(class, filtered kwargs). Unknown kwargs are dropped with a
-        warning, NOT propagated — so one call site (CLI, pipeline) can pass
-        `hf_token=…, batch_size=…` without knowing which adapter will
-        consume which."""
+        """(class, filtered kwargs).
+
+        Unknown kwargs are dropped with a warning, not propagated, so one
+        call site can pass `hf_token=..., batch_size=...` without knowing
+        which adapter consumes which.
+        """
         key = name.strip().lower()
         if key not in spec:
             raise ValueError(
@@ -135,10 +121,8 @@ def make_registry(
     get.__doc__ = get_doc or _resolve.__doc__
     if base is not None:
         get.__annotations__["return"] = base
-    # `__name__` is deliberately left as "get". Deriving it from `noun` would
-    # produce "get_lip_sync_model" where the exported name is `get_lipsync`,
-    # and a wrong name in a repr is worse than a generic one. Tracebacks read
-    # the code object, not this, so they are unaffected either way.
+    # `__name__` is left as "get": deriving it from `noun` would produce
+    # "get_lip_sync_model" where the exported name is `get_lipsync`.
 
     return Registry(available=available, get=get, load=_load,
                     accepted_kwargs=_accepted_kwargs)

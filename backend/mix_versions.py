@@ -1,47 +1,31 @@
-"""Keep every version of a job's dubbed mix on disk.
+"""Snapshot every version of a job's dubbed mix.
 
-Mix overwrites the dubbed audio and video in place -- `mix/<stem>.dubbed.wav`
-and `mix/<stem>.dubbed.mp4` are the two files the UI serves, and each edit
-replay rewrites them. That is fast and keeps the UI's URL stable, but it also
-means the operator can never go back and compare "before the mute" with
-"after the mute": the previous mix is gone the moment the next one lands.
+Mix rewrites `mix/<stem>.dubbed.wav` and `mix/<stem>.dubbed.mp4` in place on
+every edit replay, so each mix calls `snapshot()` first. Same pattern as
+`backend.mt_versions`.
 
-So every mix snapshots, same pattern as `backend.mt_versions`.
-
-Naming
-------
-Live file, unchanged and still the only one the UI reads::
+Live files, the only ones the UI reads::
 
     <job>/mix/<stem>.dubbed.wav
     <job>/mix/<stem>.dubbed.mp4
 
-Versions, in their own directory beside it::
+Versions, in their own subdirectory beside them::
 
     <job>/mix/versions/<stem>.v000.original.dubbed.wav
-    <job>/mix/versions/<stem>.v000.original.dubbed.mp4
-    <job>/mix/versions/<stem>.v001.edit_000.dubbed.wav
     <job>/mix/versions/<stem>.v001.edit_000.dubbed.mp4
 
-Same four decisions as `mt_versions`:
+Naming constraints, each load-bearing:
 
-1. **A SUBDIRECTORY, not `mix/` itself.** `ui/media.find_dubbed_video` falls
-   back to "newest `.mp4` in `mix/`" when the manifest pointer is missing,
-   so a version file sitting in `mix/` would silently become the UI's dub.
-   `glob` is not recursive; a subdirectory is invisible to it.
+1. Versions go in a subdirectory. `ui/media.find_dubbed_video` falls back to
+   "newest `.mp4` in `mix/`" when the manifest pointer is missing, so a
+   version file in `mix/` would silently become the UI's dub.
+2. The `.dubbed.<ext>` tail is kept so the files stay playable; the
+   `.v<NNN>.<producer>` segment goes ahead of it.
+3. The index is zero-padded to three digits -- `v10` sorts before `v9`
+   otherwise.
 
-2. **The suffix stays `.dubbed.wav` / `.dubbed.mp4`.** The *stem* grows a
-   `.v<NNN>.<producer>` segment ahead of `.dubbed`, so the files are still
-   playable but no longer match the exact live name.
-
-3. **Zero-padded to three digits.** `v10` sorts before `v9` in every
-   lexicographic listing; three digits also leaves room for a job that is
-   re-edited many times.
-
-4. **The producer is in the name.** `v003.edit_002.dubbed.wav` says what
-   made it without opening it or cross-referencing the index.
-
-Snapshots are a record, never a dependency. Every failure is caught and
-logged: a mix that cannot be snapshotted still plays.
+Every failure here is caught and logged: a mix that cannot be snapshotted
+still plays.
 """
 from __future__ import annotations
 
@@ -70,7 +54,7 @@ def versions_dir(mix_dir: Path) -> Path:
 def _stem(path: Path) -> str:
     """`a.dubbed.wav` -> `a`.
 
-    The `.dubbed.<ext>` tail is dropped so the versioned file can grow a
+    Drops the `.dubbed.<ext>` tail so the version can grow a
     `.v<NNN>.<producer>` segment and keep the same ending.
     """
     name = Path(path).name
@@ -81,11 +65,10 @@ def _stem(path: Path) -> str:
 
 
 def next_index(vdir: Path) -> int:
-    """One past the highest `v<NNN>` present, or 0.
+    """One past the highest `v<NNN>` in `vdir`, or 0.
 
-    Derived from the DIRECTORY rather than from a counter held anywhere
-    else, so a snapshot written by a different process cannot reuse a
-    number.
+    Read from the directory, not a stored counter, so two processes
+    snapshotting at once cannot reuse a number.
     """
     highest = -1
     if vdir.is_dir():
@@ -98,14 +81,11 @@ def next_index(vdir: Path) -> int:
 
 def snapshot(wav: Optional[Path], mp4: Optional[Path], producer: str
              ) -> Tuple[Optional[Path], Optional[Path]]:
-    """Copy the dubbed wav/mp4 to `mix/versions/` under the next number.
+    """Copy the dubbed wav/mp4 into `mix/versions/` under the next number.
 
-    Either file may be None (a mix without the mp4 mux step, for example):
-    the one that exists is copied, the one that does not is skipped.
-    Returns `(versioned_wav, versioned_mp4)`, with either entry None when
-    the corresponding input was missing or could not be copied.
-
-    Failures are logged, not raised: a mix with no history is still a mix.
+    Either file may be None; the one that exists is copied. Returns
+    `(versioned_wav, versioned_mp4)`, each None when its input was missing
+    or could not be copied. Failures are logged, not raised.
     """
     wav = Path(wav) if wav else None
     mp4 = Path(mp4) if mp4 else None
@@ -127,9 +107,7 @@ def snapshot(wav: Optional[Path], mp4: Optional[Path], producer: str
         vdir = versions_dir(mix_dir)
         vdir.mkdir(parents=True, exist_ok=True)
 
-        # Never overwrite. If the computed name exists -- two processes
-        # snapshotting at once -- take the next free number instead of
-        # clobbering somebody else's version.
+        # Never overwrite: if the name exists, take the next free number.
         for bump in range(100):
             idx = next_index(vdir) + bump
             wav_dest = vdir / f"{stem}.v{idx:03d}.{producer}.dubbed.wav"
@@ -168,10 +146,10 @@ def snapshot(wav: Optional[Path], mp4: Optional[Path], producer: str
 
 def _append_index(vdir: Path, idx: int, producer: str,
                   wav: Optional[Path], mp4: Optional[Path]) -> None:
-    """A readable manifest beside the versions.
+    """Append a row to `versions/index.json`.
 
-    Rewritten whole rather than appended to, because a partially-written
-    JSON array is unreadable and this file is small.
+    Rewritten whole rather than appended to: a half-written JSON array is
+    unreadable.
     """
     import datetime as _dt
 
@@ -210,8 +188,8 @@ def _append_index(vdir: Path, idx: int, producer: str,
 def history(mix_dir: Path) -> List[Path]:
     """Every version file for this job, oldest first.
 
-    Returns the wav files when both are present (the mp4 is a mux of the
-    same mix), otherwise whichever extension is on disk.
+    Returns the wav when both extensions are present (the mp4 is a mux of
+    the same mix), otherwise whichever one is on disk.
     """
     vdir = versions_dir(mix_dir)
     if not vdir.is_dir():

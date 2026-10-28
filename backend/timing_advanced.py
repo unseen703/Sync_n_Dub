@@ -1,44 +1,26 @@
 """The two search-based timing producers: `word_anchored` (M4) and `dp` (M7).
 
-Why this lives in its own module rather than in `backend.timing`
-----------------------------------------------------------------
-`backend/timing.py` holds the integration CONTRACT -- the dataclasses every
-producer emits, the shared source/TTS helpers, and the dispatcher. That file is
-being edited concurrently by other producers, and a contract file that three
-agents append to at once is a merge conflict waiting to happen. So the contract
-stays in one place and is imported, never copied, and the two heavyweight
-producers live here. The bottom of this module assigns them onto the timing
-module, so `timing.plan("dp", ...)` keeps working through the existing
-dispatcher with no edit to it: importing this module is the registration.
+`backend/timing.py` holds the contract -- the dataclasses, the shared
+source/TTS helpers and the dispatcher -- and is imported, never copied. The
+bottom of this module assigns both producers onto it, so importing this module
+IS the registration and `timing.plan("dp", ...)` works unchanged.
 
-What a reader should know before touching anything here
--------------------------------------------------------
-Time conventions, restated because mixing them up is the bug this whole phase
-is most likely to produce:
+Time units:
 
   * `slot`, `src_speech`, `src_pauses`, `dst_start`     ABSOLUTE output seconds
   * `Piece.src_span`                                    RELATIVE to the raw clip
   * `segments[].words[]`                                ABSOLUTE
   * `segments[].tts_words[]`                            CLIP-RELATIVE
 
-Functions below name their units in the signature docstring wherever a float
-could plausibly be either.
-
-The cost model
---------------
-The cost formulas live HERE (see `_COST_DEFINITIONS` and `segment_cost`), not
-in `backend.timing`, and are written so the DP's two degenerate cases hold by
-construction:
+The cost formulas live here (`_COST_DEFINITIONS`, `segment_cost`). Two
+degenerate settings hold by construction:
 
   lambda_pause = lambda_speechrate = lambda_phoneme = 0  ->  naive_slot placement
   lambda_duration = 0, lambda_pause = 1                  ->  pause_aware onsets
 
-The second case is checked against the real `timing.plan_pause_aware`, which
-`_resolve_fallback` looks up at call time. Note that it reproduces that
-producer's SEMANTICS, not its output byte for byte: on a segment whose clip
-overruns, pause_aware is held to one tempo per segment while the DP may re-cut,
-so the DP hits onsets pause_aware misses. `tests/test_timing_plan.py` pins that
-difference as a strict xfail rather than letting it look like a regression.
+The second reproduces pause_aware's semantics, not its exact output: on an
+overrunning clip pause_aware is held to one tempo per segment while the DP may
+re-cut. `tests/test_timing_plan.py` pins that gap as a strict xfail.
 """
 from __future__ import annotations
 
@@ -65,23 +47,17 @@ from .timing import (
 
 log = logging.getLogger(__name__)
 
-# ffmpeg's atempo/rubberband filters silently DROP an input shorter than their
-# analysis window (~0.01 s), which is how Phase 0 found itself writing empty
-# files. No producer here may emit a piece the renderer would swallow, so every
-# cut candidate is held this far from its neighbours.
+# Minimum piece length. ffmpeg's atempo/rubberband drop an input shorter than
+# their analysis window (~0.01 s), so no cut candidate may sit closer than this
+# to its neighbours.
 MIN_RENDERABLE_PIECE_S = 0.05
 
-# Costs that are mathematically equal can differ in the last bits purely from
-# the order the terms were summed in: in the undershoot case the slot-start and
-# source-onset paths both score 1.5666666666666673 and 1.566666666666667, and
-# a raw `min` took the second. Round before comparing so genuine ties fall
-# through to the key tie-break instead of being decided by float association.
-# 1e-9 s is nine orders of magnitude below anything audible.
+# Costs are rounded to this many digits before comparing, so equal-but-for-the-
+# last-bits costs fall through to the key tie-break instead of being decided by
+# summation order.
 COST_TIE_NDIGITS = 9
 
-# Sentence/clause terminators. Devanagari danda and double danda first because
-# the target side is Indic; the ASCII set covers the English source side and
-# Indic text that kept Latin punctuation.
+# Sentence/clause terminators: Devanagari danda and double danda, plus ASCII.
 _CLAUSE_PUNCT = "।॥.!?;:,"
 _HARD_PUNCT = "।॥.!?"
 
@@ -119,12 +95,10 @@ def _seg_text(seg: dict) -> str:
 
 
 def _resolve_fallback(name: str) -> Optional[Callable]:
-    """Look up a fallback producer on the timing module AT CALL TIME.
+    """Look up `timing.plan_<name>` at call time.
 
-    Late-bound rather than imported at module scope because this module is
-    itself imported FROM `backend.timing` (see the registration block at the
-    bottom), so a top-level lookup would run mid-import and miss producers
-    defined after that point.
+    Late-bound: this module is imported from `backend.timing`, so a top-level
+    lookup would run mid-import and miss producers defined after that point.
     """
     from . import timing as _t
 
@@ -132,11 +106,10 @@ def _resolve_fallback(name: str) -> Optional[Callable]:
 
 
 def _nonoverlapping(pieces: List[Piece]) -> List[Piece]:
-    """Push each piece forward so it starts no earlier than the previous one ends.
+    """Push each piece forward so it starts no earlier than the previous ends.
 
-    Overlapping pieces from the SAME clip would render as the clip talking over
-    itself, which no amount of mixing fixes. Cross-segment overlap is left to
-    the caller's shift-forward cursor; this is the within-segment guard.
+    Within-segment only; cross-segment overlap is the caller's shift-forward
+    cursor's job.
     """
     out: List[Piece] = []
     cursor = -math.inf
@@ -153,11 +126,10 @@ def _nonoverlapping(pieces: List[Piece]) -> List[Piece]:
 # ---------------------------------------------------------------------------
 
 def _onset_targets(sp: SegmentPlan, n_pieces: int) -> List[float]:
-    """Absolute seconds each piece WANTS to start at, one per piece.
+    """Absolute seconds each piece wants to start at, one per piece.
 
-    Beyond the last source speech run the target saturates at that run's onset;
-    the penalty for having too many pieces then comes out of D_pause's
-    unmatched-run term rather than from a silently wrapping index.
+    Past the last source speech run the target saturates at that run's onset;
+    surplus pieces are charged by D_pause's unmatched-run term instead.
     """
     runs = sp.src_speech or [sp.slot]
     return [runs[min(k, len(runs) - 1)].start for k in range(n_pieces)]
@@ -167,8 +139,8 @@ def _d_pause(sp: SegmentPlan, pieces: Sequence[Piece]) -> float:
     runs = sp.src_speech or [sp.slot]
     targets = _onset_targets(sp, len(pieces))
     err = sum(abs(p.dst_start - t) for p, t in zip(pieces, targets))
-    # A source speech run with no piece of its own is a pause we failed to
-    # reinsert; charge its length so that K == len(runs) is the optimum.
+    # Charge the length of every source run left without a piece, so that
+    # K == len(runs) is the optimum.
     unmatched = sum(r.dur for r in runs[len(pieces):])
     return err + unmatched
 
@@ -203,8 +175,6 @@ def _parse_visemes(raw) -> List[Tuple[float, float, str]]:
 
 
 def _viseme_at(vis: Sequence[Tuple[float, float, str]], t: float) -> Optional[str]:
-    # Linear scan is fine: a segment holds tens of visemes, not thousands, and
-    # the whole term is skipped unless lambda_phoneme > 0.
     for s, e, lab in vis:
         if s <= t < e:
             return lab
@@ -248,11 +218,10 @@ def segment_cost(
     safety_margin_s: float,
     viseme_frame_s: float = 0.02,
 ) -> Tuple[float, dict]:
-    """The one cost function. Returns (total, components-for-SegmentPlan.cost).
+    """The one cost function. Returns (total, components for SegmentPlan.cost).
 
-    `lambda_phoneme == 0` short-circuits the viseme term -- it is not computed
-    and then multiplied by zero, because computing it means a per-frame scan
-    inside the DP's innermost loop.
+    A zero lambda short-circuits its term; the viseme term in particular is
+    never computed when `lambda_phoneme == 0` (it is a per-frame scan).
     """
     parts: dict = {}
     total = 0.0
@@ -300,11 +269,9 @@ def _tokenize_words(seg: dict, key: str) -> List[dict]:
 def _synth_tts_words(seg: dict, raw: float) -> List[dict]:
     """Pseudo clip-relative word timings, spread over the clip by character mass.
 
-    Used only when `require_tts_words=False`. It is NOT forced alignment -- it
-    assumes a constant characters-per-second rate -- but it is monotone and
-    lets clause cutting run before the TTS forced-aligner lands. Every segment
-    built this way is flagged in `qc`, so no measurement can quietly treat it
-    as real alignment.
+    Used only when `require_tts_words=False`. Assumes a constant
+    characters-per-second rate, so it is monotone but is NOT alignment; every
+    segment built this way is flagged in `qc`.
     """
     toks = [t for t in re.split(r"\s+", _seg_text(seg)) if t]
     if not toks or raw <= 0:
@@ -323,8 +290,7 @@ def _synth_tts_words(seg: dict, raw: float) -> List[dict]:
 def _clause_groups(words: List[dict], *, max_gap_s: float) -> List[Tuple[int, int]]:
     """Group word indices into clauses -- [start, end) index pairs.
 
-    Cuts after punctuation, and also after an unusually long inter-word gap,
-    because a pause IS a clause boundary whether or not the text wrote one.
+    Cuts after clause punctuation and after any inter-word gap >= `max_gap_s`.
     """
     if not words:
         return []
@@ -350,9 +316,8 @@ def _merge_short(
 ) -> List[Tuple[int, int]]:
     """Enforce min_piece_s then max_groups, both by merging neighbours.
 
-    Short pieces go first because a sub-min piece is a correctness problem (the
-    renderer may drop it); the cap is only a tidiness bound, so it merges the
-    cheapest adjacent pair -- the one with the smallest gap between them.
+    Short pieces are merged first (the renderer may drop a sub-minimum piece);
+    the group cap then merges the adjacent pair with the smallest gap.
     """
     def dur(g):
         return words[g[1] - 1]["end"] - words[g[0]]["start"]
@@ -382,29 +347,19 @@ def _cum_bounds(
 ) -> Tuple[List[float], List[float]]:
     """(start, end) cumulative fraction in [0,1] for each group.
 
-    BOTH ends, not just the end, because the two are used for different
-    things and conflating them is what broke this producer: a clause is
-    ANCHORED by where its content STARTS, and SIZED by how much of the stream
-    it covers. `_cum_mass` used to return only the end fractions, so the
-    anchor was derived from the end -- see `_match_proportional`.
+    Both ends are returned: a clause is anchored by where its content starts
+    and sized by how much of the stream it covers. Do not derive the anchor
+    from the end fraction -- see `_match_proportional`.
 
-    `by` picks what "how much content" means:
+    `by` picks how content is measured:
 
-      "time"   each word contributes its OWN DURATION, and the gaps between
-               words contribute nothing. This is the default, and it is the
-               only basis that uses the input this producer is named after.
-               Counting words or characters instead throws the word timings
-               away at exactly the step that decides placement, and the two
-               are not interchangeable: 40 source words spoken over 12 s of
-               speech separated by four pauses do not distribute their
-               content uniformly over the index. Measured over the four
-               word-bearing merged JSONs on disk, moving from word count to
-               duration took the median piece-onset error from 827/346/0 ms
-               to 495/27/0 ms on the three that have room to differ.
-      "chars"  character mass -- the fallback when the word timings are all
-               zero-width (some aligners emit point timings), which would
-               make "time" a division by zero.
-      "words"  word count. Kept so the earlier behaviour is still reachable.
+      "time"   each word contributes its own duration, gaps contribute
+               nothing. The default, and the only basis that uses the word
+               timings this producer is named after.
+      "chars"  character mass. Falls back to this when all word timings are
+               zero-width (some aligners emit point timings), which would make
+               "time" a division by zero.
+      "words"  word count.
     """
     if by == "time":
         unit = [max(0.0, float(w.get("end", 0.0)) - float(w.get("start", 0.0)))
@@ -436,27 +391,16 @@ def _groups_from_runs(
 ) -> List[Tuple[int, int]]:
     """Index groups over `words` induced by the segment's SPEECH RUNS.
 
-    The source anchor set must be the acoustic events, not the punctuation.
-    `_clause_groups` cuts on a terminator as well as on a gap, and a comma the
-    speaker did not pause at is not an onset: anchoring a piece there invents a
-    speech start the source does not have, which is precisely what the
-    governing constraint forbids. It also costs a piece out of
-    `max_pieces_per_segment` that a real onset then does not get.
+    The source anchors are the acoustic events, not the punctuation: do not
+    use `_clause_groups` here, which also cuts at commas the speaker did not
+    pause at and so invents onsets the source does not have.
 
-    Measured on `data/mt/2vxQaT0Fy-c_60to80s_720p.indictrans2.hi.mt.json`,
-    whose single segment has 4 speech runs: `_clause_groups` found 5 source
-    groups, the surplus piece landed mid-run, and the median piece-onset error
-    was 1052 ms against pause_aware's 327 ms. Grouping by run instead is
-    346 ms before the other two fixes in this function and 27 ms after.
-
-    Deriving the groups from `sp.src_speech` rather than re-splitting on the
-    gap keeps this EXACTLY consistent with `_onset_targets`, `_d_pause` and
-    `plan_pause_aware`, which all key off the same runs -- including the case
-    where `source_speech_and_pauses` REFUSED an off-timeline word stream and
-    returned one slot-wide run. There every word falls in that one group, the
-    segment gets one piece at the slot start, and the corrupt word times
-    cannot steer placement. That is the right degradation, and the clause
-    split did not have it.
+    Taking the runs from `sp.src_speech` keeps this consistent with
+    `_onset_targets`, `_d_pause` and `plan_pause_aware`, which key off the same
+    runs. That includes the case where `source_speech_and_pauses` refused an
+    off-timeline word stream and returned one slot-wide run: every word lands
+    in one group, the segment gets one piece at the slot start, and corrupt
+    word times cannot steer placement.
     """
     if not words:
         return []
@@ -483,19 +427,14 @@ def _source_clause_cuts(
 ) -> List[int]:
     """Target word indices that line up, in mass, with the SOURCE RUN boundaries.
 
-    Why this is word_anchored's business and not a borrowed pause_aware trick:
-    the target side only ever yields a clause boundary where its own text
-    punctuates or its own word timings leave a gap, and Indic MT output
-    punctuates sparsely -- on the dress-rehearsal clip one segment produced a
-    SINGLE target clause against four source speech runs, which is naive
-    placement wearing this producer's name. The source words[] stream is the
-    input this method exists to use, so its run boundaries are allowed to
-    choose cut points in the target, at word granularity. `_merge_short` then
-    still enforces `min_piece_s` and `max_pieces_per_segment`, so this can
-    only ever propose cuts, never force an unrenderable one.
+    Lets the source run boundaries choose cut points in the target at word
+    granularity -- needed because Indic MT output punctuates sparsely, so the
+    target's own clause split can yield far fewer boundaries than the source
+    has onsets. These are proposals only: `_merge_short` still enforces
+    `min_piece_s` and `max_pieces_per_segment`.
 
-    Returns `len(src_groups) - 1` indices at most. It CANNOT express "no cut
-    at all", so the single-run case is handled by the caller, not here.
+    Returns at most `len(src_groups) - 1` indices. It cannot express "no cut at
+    all", so the caller handles the single-run case.
     """
     if not tts_words or len(src_groups) < 2:
         return []
@@ -515,33 +454,14 @@ def _match_proportional(
     """Monotone target-group -> source-group map: NEAREST start mass.
 
     Target group k maps to the source group whose START mass is closest to
-    target group k's start mass, subject to the map never going backwards.
-    The caller anchors the piece at that group's onset, so the quantity
-    matched is the one the anchor is read off: a start to a start, and the
-    comparison is a distance, not a containment test.
+    group k's start mass, never going backwards. Start is matched against
+    start, by distance and not by containment, because the caller anchors the
+    piece at the matched group's onset. Matching ends, or taking "the first
+    source group whose end mass is past the target's start mass", is off by
+    one in mass space and drops a source group.
 
-    Two earlier rules both lost a clause here, in opposite directions:
-
-      * comparing target END mass to source END mass and then anchoring on the
-        matched group's START is an off-by-one in mass space; every piece after
-        the first landed one source group LATE, so the error grew with group
-        length across a segment.
-      * "the first source group whose END mass is past the target's start mass"
-        is off by one the other way whenever the two mass streams agree only
-        approximately -- which is the normal case, because the target cut index
-        chosen by `_source_clause_cuts` is the first target word that CROSSES
-        the source boundary, so the target group's start mass sits just BELOW
-        the source boundary it was derived from. Measured on the dress clip's
-        SEG_0000, target starts [0, .161, .214, .321, .464, .607, .750, .857]
-        against source starts [0, .163, .224, .327, .469, .612, .755, .857] --
-        visibly the identity map -- came back as [0,0,1,2,3,4,5,7]. An exact
-        tie resolved correctly and a 0.002-of-mass near-miss did not, which
-        is why the bug survived the fixtures: the fixture masses tie exactly.
-
-    Nearest-start has no such edge: it is insensitive to which side of the
-    boundary the crossing index landed on. On these inputs it returns the same
-    map as the global DP in `_match_monotone_dtw` (verified on all four
-    word-bearing merged JSONs), at a fraction of the cost.
+    Returns the same map as `_match_monotone_dtw` on every word-bearing merged
+    JSON on disk, at a fraction of the cost.
 
     Monotone by construction: `j` never decreases. Group counts need not agree.
     """
@@ -550,8 +470,8 @@ def _match_proportional(
     if n == 0:
         return [0] * len(tgt_start)
     for c in tgt_start:
-        # Strict `<` so an exact tie keeps the earlier group: skipping a source
-        # onset is the one error that cannot be recovered downstream.
+        # Strict `<`, so an exact tie keeps the earlier group -- a skipped
+        # source onset cannot be recovered downstream.
         while j + 1 < n and abs(src_start[j + 1] - c) < abs(src_start[j] - c):
             j += 1
         out.append(j)
@@ -561,10 +481,9 @@ def _match_proportional(
 def _match_monotone_dtw(tgt_cum: List[float], src_cum: List[float]) -> List[int]:
     """Monotone alignment minimising cumulative-mass disagreement.
 
-    A real DP rather than a greedy walk: every target clause is consumed exactly
-    once, source clauses may be consumed by several target clauses or skipped,
-    and the mapping cannot go backwards. That last constraint is the point --
-    a non-monotone match would reorder speech.
+    Every target clause is consumed exactly once; a source clause may be
+    consumed by several target clauses or skipped. The mapping cannot go
+    backwards -- a non-monotone match would reorder speech.
     """
     n, m = len(tgt_cum), len(src_cum)
     if n == 0 or m == 0:
@@ -613,36 +532,28 @@ def plan_word_anchored(
 ) -> TimingPlan:
     """Cut the TTS clip at clause boundaries and place each clause on its source.
 
-    The premise: a dub is in sync when speech EVENTS line up, and a clause is
-    the smallest unit whose boundary a viewer actually perceives. Cutting the
-    clip at clause boundaries from `tts_words[]` (clip-relative) and placing
-    each chunk on the SOURCE SPEECH RUN it corresponds to (absolute, from
-    `words[]`) moves the onsets to where the source put them, instead of
-    moving them all by one uniform tempo the way `naive_slot` does.
+    Cuts the clip at clause boundaries from `tts_words[]` (clip-relative) and
+    places each chunk on the source speech run it corresponds to (absolute,
+    from `words[]`), so the onsets land where the source put them instead of
+    all shifting by one uniform tempo as in `naive_slot`.
 
-    Three choices make the placement, and all three were wrong at once in the
-    dress rehearsal. Each is documented where it is implemented, because each
-    was a separate measurable defect:
+    Three things decide the placement:
 
-      WHAT THE ANCHORS ARE.  The source speech runs, via `_groups_from_runs` --
-        not `_clause_groups`, which also cuts on punctuation and so invents
-        onsets at commas the speaker did not pause at.
-      HOW CONTENT IS MEASURED.  Seconds of word, on both sides, via
-        `_cum_bounds(by="time")` -- not word or character count, which throws
-        away the timings this producer is named after. `mass_basis` reaches
-        the old bases ("words", "chars") for comparison.
-      HOW THE TWO ARE MATCHED.  `anchor` picks the algorithm; both compare a
-        target group's START mass against a source run's START mass:
+      ANCHORS.   The source speech runs, via `_groups_from_runs`.
+      CONTENT.   Seconds of word on both sides, via `_cum_bounds(by="time")`.
+                 `mass_basis` reaches the "words" and "chars" bases.
+      MATCHING.  `anchor` picks the algorithm; both compare a target group's
+                 START mass against a source run's START mass:
           "proportional"  nearest start, greedy and monotone (`_match_proportional`)
           "monotone_dtw"  nearest start, globally optimal (`_match_monotone_dtw`)
-        On all four word-bearing merged JSONs on disk the two agree exactly;
-        the DP is the safety net for an input where the greedy is fooled.
+                 The two agree on every word-bearing merged JSON on disk; the
+                 DP is the safety net for an input that fools the greedy.
 
-    Either way the match is monotone -- never reordering -- which is the only
-    property the renderer depends on.
+    Either way the match is monotone, which is the property the renderer
+    depends on.
 
-    A segment missing word timings on EITHER side degrades to `fallback` and
-    says so in `qc`; one unaligned segment must not kill a sweep.
+    A segment missing word timings on either side degrades to `fallback` and
+    records that in `qc`.
     """
     if mass_basis not in ("time", "chars", "words"):
         raise ValueError(
@@ -661,20 +572,16 @@ def plan_word_anchored(
     }
     plan = TimingPlan(producer="word_anchored", params=params)
 
-    # The fallback producer is run ONCE over the whole file, and individual
-    # degraded segments are lifted out of it. Running it per segment would mean
-    # re-reading and re-probing the merged JSON for every bad segment.
+    # Run the fallback ONCE over the whole file and lift degraded segments out
+    # of it; per-segment would re-read and re-probe the merged JSON each time.
     fb_by_id: Dict[str, SegmentPlan] = {}
     fb_fn = _resolve_fallback(fallback)
     if fb_fn is not None:
         try:
-            # Forward the knobs the two producers share. Calling the fallback
-            # bare let it run on ITS OWN defaults, so `shift_forward=False`
-            # here silently produced a shift-forward plan -- word_anchored
-            # scored 3.25 s median onset error against pause_aware's 0.00 on
-            # the same file, purely because the kwarg was dropped. Only pass
-            # what the callee actually accepts, so a fallback with a different
-            # signature still works.
+            # Forward the knobs the two producers share -- called bare, the
+            # fallback runs on its own defaults and ignores e.g.
+            # `shift_forward=False`. Pass only what the callee accepts, so a
+            # fallback with a different signature still works.
             import inspect
             shared = {"pause_min_s": pause_min_s, "max_tempo": max_tempo,
                       "min_tempo": min_tempo, "shift_forward": shift_forward}
@@ -731,13 +638,10 @@ def plan_word_anchored(
             plan.segments.append(sp)
             continue
 
-        # Cumulative mass is measured in SECONDS OF WORD on both sides. See
-        # `_cum_bounds`; `mass_basis` exists only to get the earlier
-        # count-based behaviour back for a comparison.
+        # Cumulative mass is seconds of word on both sides; see `_cum_bounds`.
         by = mass_basis
         tgt_groups = _clause_groups(tts_words, max_gap_s=clause_gap_s)
-        # Source anchors are the SPEECH RUNS, not the punctuation clauses --
-        # see `_groups_from_runs`.
+        # Source anchors are the speech runs, not punctuation clauses.
         src_groups = _groups_from_runs(src_words, sp.src_speech)
         if unit == "word":
             tgt_groups = [(i, i + 1) for i in range(len(tts_words))]
@@ -746,40 +650,24 @@ def plan_word_anchored(
                                   max_groups=max_pieces_per_segment)
         if (unit != "word" and split_on_source_clauses
                 and len(src_groups) != len(tgt_groups)):
-            # `!=`, not `>`: the right number of pieces is one per source
-            # speech run in BOTH directions. Too few target clauses leaves a
-            # source onset with no piece; too many is just as bad, and less
-            # obviously so. A surplus target clause is matched to a run that
-            # already has a piece, `j_hi = max(j_lo, match[k+1] - 1)` then
-            # collapses to the single run `j_lo`, and the chunk is sized
-            # against a region it does not cover. Measured on
-            # 2vxQaT0Fy-c_60to80s_720p (4 speech runs): target punctuation
-            # produced 5 clauses, and the median piece-onset error was
-            # 1052 ms. Re-cutting to 4 makes it 27 ms.
+            # `!=`, not `>`: the right piece count is one per source speech
+            # run in both directions. Too few target clauses leaves a source
+            # onset with no piece; too many collapses `j_hi` onto `j_lo` and
+            # sizes a chunk against a region it does not cover.
             #
-            # Compared AFTER `_merge_short`, not before: the raw clause split
-            # is routinely finer than what survives `min_piece_s`, so a
-            # pre-merge count says the target has plenty of boundaries when
-            # the plan is about to be built from five. On the dress-rehearsal
-            # clip SEG_0000 that is 9 raw target clauses collapsing to 5
-            # against 8 source runs -- the pre-merge test read 8 > 9 and
-            # declined to help.
-            # REPLACE the target grouping rather than union the two. The right
-            # number of pieces is one per source run: that is what gives every
-            # source onset a piece of its own and leaves none over. Unioning
-            # the two boundary sets overshoots it and the surplus pieces land
-            # on no source run at all -- measured on the dress clip, union
-            # emits 23 pieces against 19 source runs with 6 unmatched, replace
-            # emits 18 with 1.
+            # Compared AFTER `_merge_short`, because the raw clause split is
+            # routinely finer than what survives `min_piece_s`.
+            #
+            # REPLACE the target grouping rather than union the two boundary
+            # sets -- a union overshoots one piece per run and the surplus
+            # pieces land on no source run at all.
             regroup: Optional[List[Tuple[int, int]]] = None
             if len(src_groups) == 1:
-                # One source run means one piece, and `_source_clause_cuts`
-                # cannot say so: it proposes BOUNDARIES, and the right number
-                # here is zero, which is indistinguishable from "found none".
-                # This is the case the refused off-timeline word streams land
-                # in (`source_speech_and_pauses` returns one slot-wide run),
-                # and without it a corrupt stream still got 6 target clauses
-                # cut against the 1 run it is allowed to know about.
+                # One source run means one piece. `_source_clause_cuts`
+                # proposes boundaries and cannot express "zero of them", so
+                # handle it here. This is where a refused off-timeline word
+                # stream lands -- `source_speech_and_pauses` returns one
+                # slot-wide run.
                 regroup = [(0, len(tts_words))]
             else:
                 extra = _source_clause_cuts(tts_words, src_words, src_groups, by=by)
@@ -799,13 +687,12 @@ def plan_word_anchored(
         tgt_start, _tgt_end = _cum_bounds(tts_words, tgt_groups, by=by)
         src_start_cum, _src_end_cum = _cum_bounds(src_words, src_groups, by=by)
         # Both modes match a target clause's START mass to a source clause's
-        # START mass. monotone_dtw gets the start fractions for the same
-        # reason proportional does -- what is being located is an onset.
+        # START mass -- what is being located is an onset.
         match = (_match_monotone_dtw(tgt_start, src_start_cum)
                  if anchor == "monotone_dtw"
                  else _match_proportional(tgt_start, src_start_cum))
-        # Both producers above are monotone by construction; enforce it anyway
-        # so a future matcher cannot silently reorder speech.
+        # Both matchers are monotone by construction; enforced anyway so a
+        # future one cannot silently reorder speech.
         for k in range(1, len(match)):
             if match[k] < match[k - 1]:
                 match[k] = match[k - 1]
@@ -816,21 +703,16 @@ def plan_word_anchored(
         natural_rate = 0
         for k, (a, b) in enumerate(tgt_groups):
             # Clip-relative span. The first piece starts at 0.0 and the last
-            # ends at `raw` so no audio is dropped on the floor.
+            # ends at `raw`, so no audio is dropped.
             s = 0.0 if k == 0 else tts_words[a]["start"]
             e = raw if k == len(tgt_groups) - 1 else tts_words[b - 1]["end"]
             e = max(e, s + MIN_RENDERABLE_PIECE_S)
             # The source region this target clause covers runs from its own
-            # matched clause up to the clause before the NEXT target clause's
-            # anchor (and, for the final target clause, to the end of the
-            # source speech). Sizing the piece against the matched clause
-            # ALONE was the second half of the bug: when the clause counts
-            # disagree -- 5 target clauses over 8 source clauses on the
-            # dress-rehearsal clip -- a 5.2 s chunk was asked to fit a single
-            # 1.58 s clause, demanded tempo 3.3, hit the 1.15 cap, and the
-            # 2.9 s overrun was handed to the next piece by `_nonoverlapping`.
-            # That is where the per-segment +3.4..+6.5 s slot overruns came
-            # from, and why the lateness compounded along a segment.
+            # matched clause up to the clause before the next target clause's
+            # anchor, or to the end of the source speech for the last one.
+            # Sizing against the matched clause alone makes a chunk demand a
+            # tempo it cannot have whenever the clause counts disagree, and
+            # the overrun compounds along the segment.
             j_lo = match[k]
             j_hi = (n_src - 1 if k == len(tgt_groups) - 1
                     else max(j_lo, match[k + 1] - 1))
@@ -840,13 +722,10 @@ def plan_word_anchored(
             want = (e - s) / src_dur
             tempo, was = _clamp_tempo(want, min_tempo, max_tempo)
             if want < tempo <= 1.0:
-                # The chunk is SHORTER than the source region it covers. The
-                # clamp would stretch it to 1/min_tempo to fill the room,
-                # which smears speech across a silence the source actually
-                # had. Play it at its natural rate instead and let the
-                # remainder BE the pause -- preserving pauses is the point of
-                # this producer, and `min_tempo` is a floor on deliberate
-                # slowing, not an instruction to slow down.
+                # The chunk is shorter than the source region it covers.
+                # Play it at its natural rate and let the remainder be the
+                # pause; stretching to `min_tempo` to fill the room would
+                # smear speech across a silence the source actually had.
                 tempo, was = 1.0, False
                 natural_rate += 1
             capped = capped or was
@@ -900,15 +779,12 @@ def _cut_candidates(
 ) -> List[float]:
     """Clip-relative cut offsets the DP may split at, always including 0 and raw.
 
-    Three sources, in priority order:
-      1. `tts_words[]` gaps -- real silences in the synthesised audio, the only
-         places a cut is inaudible.
-      2. the SOURCE-speech-proportional cuts -- included unconditionally so the
-         pause-aware optimum is actually inside the search space. Without these
-         the DP could only approach onset anchoring, never reproduce it, and
-         the second degenerate case would fail for a reason that is about the
-         candidate set rather than about the cost.
-      3. a uniform grid, as filler when neither of the above gives enough.
+    Three sources:
+      1. `tts_words[]` gaps -- real silences in the synthesised audio, where a
+         cut is inaudible.
+      2. source-speech-proportional cuts, added unconditionally so the
+         pause-aware optimum is inside the search space.
+      3. a uniform grid, as filler when the first two give too few.
     """
     if not allow_split:
         return [0.0, raw]
@@ -955,9 +831,8 @@ def _tempo_candidates(
 ) -> List[Tuple[float, bool]]:
     """Grid tempos PLUS the exact-fit tempo for this piece, all clamped.
 
-    The exact-fit candidate is why the first degenerate case can reproduce
-    `naive_slot` exactly rather than to within half a grid step: naive_slot
-    computes a continuous tempo, and a fixed grid can never contain it.
+    The exact-fit candidate is what lets the DP reproduce `naive_slot`'s
+    continuous tempo exactly rather than to within half a grid step.
     """
     out: Dict[float, bool] = {}
     for t in list(grid) + [src_dur / max(1e-6, target_dur)]:
@@ -994,20 +869,17 @@ def _inner_dp(
 ) -> Tuple[float, List[Piece], List[Tuple[int, float]], bool]:
     """Best (cost, pieces, inserted_pauses, tempo_cap_hit) for ONE segment.
 
-    State is (cut index, pieces placed so far, dst-time bucket). The dst time is
-    carried as an exact float inside the state VALUE and bucketed only to form
-    the dedup key -- if the time itself were snapped to the grid, a piece could
-    never land exactly on a source onset like 0.031 s, and onset anchoring would
-    be quantised away. Bucketing keeps the state count finite; the exact float
-    keeps the placements exact.
+    State is (cut index, pieces placed so far, dst-time bucket). The dst time
+    is carried as an exact float in the state value and bucketed only to form
+    the dedup key: bucketing keeps the state count finite, the exact float
+    keeps a piece able to land on a source onset like 0.031 s.
     """
     targets = _onset_targets(sp, max_pieces_per_segment)
     runs = sp.src_speech or [sp.slot]
     end_target = sp.slot.end - safety_margin_s
 
-    # The first piece's onset: the shift-forward floor, and the first source
-    # speech onset. Two candidates, because those are the only two things any
-    # of the cost terms can want.
+    # Two candidates for the first piece's onset -- the shift-forward floor
+    # and the first source speech onset -- which is all any cost term wants.
     floor = max(sp.slot.start, entry_cursor) if shift_forward else -math.inf
     onsets = {max(floor, sp.slot.start), max(floor, runs[0].start)}
     if not shift_forward:
@@ -1018,20 +890,11 @@ def _inner_dp(
     frontier: Dict[Tuple[int, int, int], Tuple[float, float, object, object]] = {}
     for o in sorted(onsets):
         key = (0, 0, _bucket(o, sp.slot.start, drift_bucket_s))
-        # D_duration is |placement - slot.start| + |end - end_target|, but the
-        # terminal branch only ever charged the second half (its `placement`
-        # was marked "recovered on reconstruction" and never was). Seeding the
-        # placement error here is where it belongs: it is fixed the moment the
-        # first onset is chosen, and charging it at the start makes every path
-        # through this state carry it.
-        #
-        # It only changed the argmin in the UNDERSHOOT regime, where the two
-        # terms cancel and cost falls with a later start -- the DP then picked
-        # the source onset over the slot start (measured: 0.2000 vs
-        # naive_slot's 0.0000 for a 3 s clip in a 5 s slot). In the overrun
-        # regime that real Indic TTS always lands in, the end term alone is
-        # increasing in the start time, so the answer was right by accident,
-        # and tie-broken by set-iteration order when both candidates scored 0.
+        # Seed D_duration's placement term here, not in the terminal branch:
+        # it is fixed the moment the first onset is chosen, so every path
+        # through this state must carry it. Without it the undershoot regime
+        # (where the two terms cancel) picks the source onset over the slot
+        # start and diverges from naive_slot.
         c0 = lambda_duration * abs(o - sp.slot.start) if lambda_duration else 0.0
         if key not in frontier or c0 < frontier[key][0]:
             frontier[key] = (c0, o, None, None)
@@ -1057,23 +920,22 @@ def _inner_dp(
                 piece_src_dur = cuts[j] - src_start
                 if piece_src_dur < MIN_RENDERABLE_PIECE_S:
                     continue
-                # A path that cannot reach the clip's end within the remaining
-                # piece budget is dead; pruning it here keeps the layer small.
+                # Prune a path that cannot reach the clip's end within the
+                # remaining piece budget.
                 if j < n_cuts - 1 and pieces_left <= 1:
                     continue
                 last = j == n_cuts - 1
                 onset_target = targets[k]
                 nxt_target = targets[min(k + 1, len(targets) - 1)]
-                # What duration would this piece need for the NEXT piece to land
-                # on its own onset target with no inserted pause?
+                # Duration this piece needs for the NEXT piece to land on its
+                # own onset target with no inserted pause.
                 want = max(1e-3, (nxt_target - t_now) if not last
                            else (end_target - t_now))
                 for tempo, was_capped in _tempo_candidates(
                         piece_src_dur, want, tempo_grid, min_tempo, max_tempo):
                     dst_dur = piece_src_dur / tempo
                     piece_end = t_now + dst_dur
-                    # Per-piece cost contributions that do not need the whole
-                    # segment: speech rate now, onset error now.
+                    # Cost terms that do not need the whole segment.
                     c_add = 0.0
                     if lambda_speechrate:
                         c_add += lambda_speechrate * piece_src_dur * abs(math.log(tempo))
@@ -1086,8 +948,8 @@ def _inner_dp(
                             frame_s=viseme_frame_s)
                         c_add += lambda_phoneme * d
                     if last:
-                        # Close out the segment: the whole-segment duration term
-                        # is only knowable here.
+                        # Close out the segment; the whole-segment duration
+                        # term is only knowable here.
                         tot = cost + c_add
                         if lambda_duration:
                             placement = None  # recovered on reconstruction
@@ -1101,9 +963,8 @@ def _inner_dp(
                             all_states[("T",) + tkey] = (
                                 tot, piece_end, key, (tempo, 0.0, was_capped, i, j))
                         continue
-                    # Pause candidates: the grid, plus the exact pause that puts
-                    # the next piece on its onset target (same reason as the
-                    # exact-fit tempo above).
+                    # Pause candidates: the grid, plus the exact pause that
+                    # puts the next piece on its onset target.
                     fit_pause = nxt_target - piece_end
                     for pause in list(pause_grid_s) + [fit_pause]:
                         pause = float(pause)
@@ -1127,14 +988,11 @@ def _inner_dp(
     if not terminal:
         return math.inf, [], [], False
 
-    # Ties are not hypothetical: with only lambda_duration active and a clip
-    # that UNDERSHOOTS its slot, |o - slot.start| + |end_target - o - dur| is
-    # genuinely constant in o, so the slot-start and source-onset candidates
-    # score identically and dict order alone decided the answer. Break ties on
-    # the state key, whose drift bucket is monotone in the piece end time, so
-    # the earliest (= slot-start-anchored) path wins. That is what makes
-    # degenerate case 1 reproduce `plan_naive_slot` deterministically rather
-    # than by luck.
+    # Break ties on the state key, whose drift bucket is monotone in the piece
+    # end time, so the earliest (slot-start-anchored) path wins. Ties are real:
+    # with only lambda_duration active and a clip that undershoots its slot the
+    # cost is constant in the onset, and without this the answer came down to
+    # dict order.
     best_key = min(terminal, key=lambda k: (round(terminal[k], COST_TIE_NDIGITS), k))
     # Walk back.
     chain = []
@@ -1152,8 +1010,8 @@ def _inner_dp(
     inserted: List[Tuple[int, float]] = []
     capped_any = False
     # chain[0] is the start state (t = onset, choice None); each later entry
-    # carries the choice that PRODUCED it, so the piece it describes starts at
-    # the previous entry's time.
+    # carries the choice that produced it, so its piece starts at the previous
+    # entry's time.
     for idx in range(1, len(chain)):
         t_prev = chain[idx - 1][0]
         tempo, pause, capped, i, j = chain[idx][1]
@@ -1179,7 +1037,6 @@ def plan_dp(
     drift_bucket_s: float = 0.05,
     drift_max_s: float = 3.0,
     out_json: Optional[Path] = None,
-    # --- additive knobs; the defaults reproduce the behaviour described above ---
     min_tempo: Optional[float] = None,
     max_tempo: Optional[float] = None,
     safety_margin_s: float = 0.10,
@@ -1194,39 +1051,31 @@ def plan_dp(
 
     Minimises
         L1*D_duration + L2*D_pause + L3*D_speechrate + L4*D_phoneme
-    (see `_COST_DEFINITIONS`) over the joint choice of split points, a tempo per
-    piece and a pause after each piece.
+    (see `_COST_DEFINITIONS`) over the joint choice of split points, a tempo
+    per piece and a pause after each piece.
 
-    Two levels, because the two decisions have different scopes:
-      inner  per segment, over (split, tempo, pause) GIVEN an entry cursor;
-      outer  across segments, over the accumulated drift that entry cursor
-             encodes.
+    Two levels:
+      inner  per segment, over (split, tempo, pause) given an entry cursor;
+      outer  across segments, over the accumulated drift that cursor encodes.
     The outer state is drift quantised to `drift_bucket_s` and clipped to
-    +/-`drift_max_s`, which is what makes the state space finite: a segment that
-    has already run three seconds long cannot be rescued by the next one, so
-    tracking drift past that bound buys nothing and costs a dimension.
+    +/-`drift_max_s`, which keeps the state space finite.
 
-    Degenerate cases, which are the real specification of the cost function:
+    Two degenerate settings specify the cost function:
       * lambda_pause = lambda_speechrate = lambda_phoneme = 0 reproduces
-        `plan_naive_slot`'s placement -- D_duration's onset term is minimised by
-        the shift-forward floor, and the exact-fit tempo candidate reproduces
+        `plan_naive_slot`'s placement -- D_duration's onset term is minimised
+        at the shift-forward floor and the exact-fit tempo candidate supplies
         naive_slot's continuous tempo.
       * lambda_duration = 0, lambda_pause = 1 reproduces pause-aware onset
         anchoring -- the source-proportional cut candidates and the exact-fit
-        pause candidate put that solution inside the search space, and D_pause's
-        unmatched-run term makes one-piece-per-source-run the optimal count.
+        pause candidate put that solution in the search space, and D_pause's
+        unmatched-run term makes one piece per source run optimal.
 
-        This matches pause-aware SEMANTICS, which is a stronger claim than
-        matching `plan_pause_aware`'s OUTPUT, and the two part company on an
-        overrunning clip. `plan_pause_aware` is constrained to one tempo for
-        the whole segment and to cut points proportional to the source run
-        durations, so its chunk can run past the next onset, at which point it
-        degrades to `prev_end + pause_min_keep_s` and sets `qc.pauses_floored`.
-        The DP is free to re-cut and does not need to, so it lands on every
-        onset exactly. Measured on `tests/fixtures/mini.mt.json`: pause_aware
-        is 433 ms and 277 ms late on two segments where the DP is exact.
+        That matches pause-aware's semantics, not `plan_pause_aware`'s output.
+        On an overrunning clip pause_aware is held to one tempo per segment
+        and degrades to `prev_end + pause_min_keep_s` with `qc.pauses_floored`
+        set, while the DP re-cuts and lands on every onset.
         `tests/test_timing_plan.py` asserts equality only on the segments
-        pause_aware did not degrade, and pins the rest as a known gap.
+        pause_aware did not degrade and pins the rest as a known gap.
     """
     merged_json = Path(merged_json)
     data = json.loads(merged_json.read_text())
@@ -1269,7 +1118,7 @@ def plan_dp(
         step: Dict[int, Tuple[int, object]] = {}
         for db, (cum, cursor, _bk) in outer.items():
             if raw is None or raw <= 0 or len(cuts) < 2:
-                # Degrade, do not raise: carry the cursor through untouched.
+                # Degrade rather than raise: carry the cursor through.
                 res = (0.0, [], [], False)
             else:
                 res = _inner_dp(
@@ -1289,7 +1138,7 @@ def plan_dp(
             if cost == math.inf:
                 cost, pieces, inserted, capped = 0.0, [], [], False
             new_cursor = max((p.dst_end for p in pieces), default=cursor)
-            # Drift the NEXT segment inherits, relative to its own slot start.
+            # Drift the next segment inherits, relative to its own slot start.
             nxt_slot = (prepared[s_idx + 1][1].slot.start
                         if s_idx + 1 < len(prepared) else new_cursor)
             d = max(-drift_max_s, min(drift_max_s, new_cursor - nxt_slot))
@@ -1365,10 +1214,9 @@ def plan_dp(
 # ---------------------------------------------------------------------------
 # registration
 # ---------------------------------------------------------------------------
-# `timing.plan()` dispatches with getattr(timing, f"plan_{method}"), so attaching
-# the two heavyweight producers here is all the registration the dispatcher
-# needs. They live in this module so that a plain `plan("pause_aware", ...)`
-# never pays to import them.
+# `timing.plan()` dispatches with getattr(timing, f"plan_{method}"), so
+# attaching the two producers here is the whole registration. Keeping them in
+# this module means `plan("pause_aware", ...)` never pays to import them.
 from . import timing as _timing  # noqa: E402
 
 _timing.plan_word_anchored = plan_word_anchored

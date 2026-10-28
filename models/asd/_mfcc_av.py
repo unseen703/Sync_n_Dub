@@ -1,29 +1,15 @@
-"""What every MFCC+crop ASD adapter here does identically.
+"""Shared MFCC + face-crop front end for the MFCC-based ASD adapters.
 
-TalkNet and Light-ASD are different architectures that take the SAME two
-inputs: 112x112 grayscale face crops at the track's frame rate, and 13-d
-MFCC over int16-valued PCM. Everything up to the first `forward_*` call is
-shared, and this module is that part.
+TalkNet and Light-ASD are different architectures taking the same two
+inputs: 112x112 grayscale face crops at the track frame rate, and 13-d MFCC
+over int16-valued PCM. Everything up to the first `forward_*` call is here.
 
-It exists because the alternative was tried. `ts_talknet_adapter.py` held
-its own copy of this code and missed BOTH halves of the 2026-10-11 TalkNet
-fix -- the `_crop_track` -> `_crop_all_tracks` split and the int16 rescale --
-so it sat broken, and would have scored near-zero had it loaded at all. It
-was deleted on 2026-10-23. A third hand-maintained copy is the same bet a
-third time.
-
-**The int16 rescale is the thing this module is really protecting.**
-Both upstreams read their wav with `scipy.io.wavfile.read`, which yields
-int16 for 16-bit PCM, and hand that straight to
-`python_speech_features.mfcc`. Light-ASD is explicit about it --
-`dataLoader.py` ends its audio path with `return audio.astype(numpy.int16)`.
-Read the same file with `soundfile` and you get floats in [-1, 1], every
-log-energy cepstral term shifts by ~log(32768), and every score collapses
-toward zero WITHOUT RAISING. Measured on one 3 s single-speaker close-up:
-mean 0.044 / max 0.129 / 0 of 75 frames above 0.5 as floats, against mean
-0.411 / max 0.798 / 31 of 75 once rescaled. A stage that answers "nobody is
-speaking" for every face, at exit code 0, is the most expensive failure in
-this directory -- see docs/ROUGH_EDGES.md.
+Audio must stay on the int16 value scale. Both upstreams read their wav with
+`scipy.io.wavfile.read` (int16 for 16-bit PCM) and pass it straight to
+`python_speech_features.mfcc`. Read the same file as floats in [-1, 1] and
+every score collapses toward zero without raising -- measured mean 0.044 vs
+0.411 on the same clip. Use `load_audio_int16`; do not rescale in an
+adapter. See docs/ROUGH_EDGES.md.
 """
 from __future__ import annotations
 
@@ -36,22 +22,18 @@ import numpy as np
 
 log = logging.getLogger(__name__)
 
-#: `python_speech_features.mfcc` emits one row per 10 ms, whatever the video
-#: fps. Both upstreams hard-code the 100-vs-25 ratio this represents.
+#: `python_speech_features.mfcc` emits one row per 10 ms, whatever the fps.
 MFCC_HZ = 100.0
 
-#: int16 full scale. The rescale factor, named so the call site reads as a
-#: unit conversion rather than a magic number.
+#: int16 full scale, so the call site reads as a unit conversion.
 INT16_SCALE = 32768.0
 
 
 def load_audio_int16(audio_path: Path, *, model_name: str = "asd") -> np.ndarray:
-    """Mono 16 kHz audio on the int16 VALUE SCALE the MFCC front-ends expect.
+    """Mono 16 kHz audio on the int16 value scale the MFCC front-ends expect.
 
-    Returns float32 (not int16 dtype) because `python_speech_features` does
-    its own arithmetic in float anyway; what has to match is the magnitude,
-    not the storage type. See this module's docstring for what happens when
-    it does not.
+    Returns float32: what has to match is the magnitude, not the storage
+    type.
     """
     import soundfile as sf
 
@@ -69,15 +51,12 @@ def mfcc_features(audio: np.ndarray, *, fps: Optional[float] = None) -> np.ndarr
     """13-d MFCC, optionally with the window scaled to a non-25 fps video.
 
     `fps=None` keeps `winlen=0.025 / winstep=0.010` fixed, which is what
-    TalkNet's upstream does -- it resamples the video to 25 fps first and so
-    never needs the correction. Light-ASD instead scales both by `25 / fps`
-    (`dataLoader.py::load_audio`) so the MFCC grid lines up with the visual
-    stream at whatever rate the source runs.
+    TalkNet's upstream does (it resamples the video to 25 fps first).
+    Light-ASD instead scales both by `25 / fps`, so pass `fps` for that
+    family.
 
-    The asymmetry is deliberate rather than an oversight to tidy up later:
-    at 25 fps the two are identical, and away from 25 each adapter matches
-    the upstream it wraps. Making TalkNet scale too would change the output
-    of a working stage on every non-25 fps source.
+    The asymmetry is deliberate -- each adapter matches the upstream it
+    wraps, and at 25 fps the two are identical.
     """
     from python_speech_features import mfcc as mfcc_fn   # upstream dep
 
@@ -92,19 +71,12 @@ def window_bounds(n_frames: int, window_frames: int,
                   *, min_tail: int = 8) -> List[Tuple[int, int]]:
     """Split a track into `[start, stop)` slices of at most `window_frames`.
 
-    `window_frames <= 0` means one pass over the whole track.
+    `window_frames <= 0` means one pass over the whole track. A tail shorter
+    than `min_tail` is merged backwards.
 
-    Windowing is a hard VRAM bound rather than a tuning knob: the visual
-    frontend holds a (1, T, 64, 56, 56) float activation at ~0.77 MiB/frame
-    and the crops are 112x112 whatever the source resolution, so T IS the
-    memory story. A 7-minute single-face track (10575 frames) asked for
-    7.91 GiB in one `batch_norm` and took job 20261024-155149 down at
-    stage 6. Upstream never runs a whole track either -- TalkNet's
-    `demoTalkNet.py`:237-245 cuts it into 1-6 s pieces.
-
-    A tail shorter than `min_tail` is merged backwards: the 3D visual stem
-    has a +/-2-frame kernel, so a stub window is scored almost entirely on
-    padding and buys nothing.
+    Windowing is a VRAM bound, not a tuning knob: the visual frontend holds
+    ~0.77 MiB per frame, so a 10575-frame track asks for 7.91 GiB in one
+    `batch_norm` and OOMs.
     """
     if window_frames <= 0 or n_frames <= window_frames:
         return [(0, n_frames)]
@@ -117,19 +89,13 @@ def window_bounds(n_frames: int, window_frames: int,
 
 
 def align_pair(audio_embed, video_embed, *, who: str = "asd"):
-    """Trim two (B, T, …) embeddings to their common T.
+    """Trim two (B, T, ...) embeddings to their common T.
 
-    The two frontends disagree by up to a frame on most clips: the audio one
-    downsamples 100 Hz MFCC by 4, the visual one emits exactly one embedding
-    per crop, and a window's frame span rarely divides into a whole number of
-    MFCC windows. Upstream aligns earlier, on durations
-    (`length = min((a.shape[0] - a.shape[0] % 4) / 100, v.shape[0] / 25)`);
-    adapters that build their own tensors have to do it here instead.
+    The audio frontend downsamples 100 Hz MFCC by 4 and the visual one emits
+    one embedding per crop, so the two disagree by up to a frame.
 
-    Trimming the tail is correct rather than merely safe -- the extra frame
-    has no counterpart to attend to. It is also MANDATORY for Light-ASD,
-    whose `forward_audio_visual_backend` is `x = x1 + x2`: a mismatch there
-    is a broadcast error, not a graceful degradation.
+    Mandatory for Light-ASD, whose `forward_audio_visual_backend` is
+    `x = x1 + x2`: a mismatch there raises rather than degrading.
     """
     t = min(audio_embed.shape[1], video_embed.shape[1])
     if audio_embed.shape[1] != video_embed.shape[1]:
@@ -144,18 +110,14 @@ def crop_all_tracks(
     size: int,
     cv2,
 ) -> Dict[str, np.ndarray]:
-    """Sweep the video once; dispatch each needed frame to every track that
-    wants it.
+    """Sweep the video once and crop every frame each track needs.
 
-    Returns {track_id: (N, size, size) uint8 grayscale array}, with crops in
-    the same frame order as the track's `.frames` array. Any frame a track
-    expected but the decoder skipped (e.g. truncated video) is dropped --
-    the caller trims scores to `min(len(crops), track.num_frames)` so this
-    is safe.
+    Returns {track_id: (N, size, size) uint8 grayscale}, in the same frame
+    order as the track's `.frames`. A frame the decoder skipped is dropped;
+    the caller trims scores to `min(len(crops), track.num_frames)`.
 
-    One sweep, not one per track: the earlier shape reopened and resliced
-    the video per track, i.e. O(N * video_len) decode, which ran for hours
-    on busy footage (262 tracks).
+    One sweep for all tracks, not one per track -- the per-track shape is
+    O(N * video_len) decode and ran for hours on 262-track footage.
     """
     buckets: Dict[int, list] = defaultdict(list)
     out: Dict[str, List[Optional[np.ndarray]]] = {}
@@ -194,10 +156,9 @@ def crop_all_tracks(
 
 
 def crop_one(frame: np.ndarray, bb, size: int, cv2) -> np.ndarray:
-    """One grayscale face patch, with the context the encoders were trained on.
+    """One grayscale face patch, expanded 1.4x around the box.
 
-    The 1.4x expansion is not cosmetic: both upstreams crop loosely and the
-    visual encoders normalise against that framing, so a tight box is a
+    Both upstream encoders are trained on loose crops, so a tight box is a
     different input distribution.
     """
     x1, y1, x2, y2 = bb

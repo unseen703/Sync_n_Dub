@@ -179,17 +179,15 @@ def check_dubui() -> Row:
 
 def check_ui_build() -> Row:
     web_dist = REPO_ROOT / "ui" / "web-dist" / "index.html"
-    web2_src = REPO_ROOT / "ui" / "web2" / "src"
+    web_src = REPO_ROOT / "ui" / "web" / "src"
     if not web_dist.is_file():
         return _row(WARN, "ui build",
-                     "ui/web-dist/ missing — server falls back to the read-only "
-                     "legacy inspector with no new-job/edit/lip-sync/talking-head "
-                     "pages. Build it: conda run -n dubui npm --prefix ui/web2 ci "
-                     "&& conda run -n dubui npm --prefix ui/web2 run build")
-    if web2_src.is_dir():
-        newest_src = max((p.stat().st_mtime for p in web2_src.rglob("*") if p.is_file()), default=0)
+                     "ui/web-dist/ missing — server is API-only, no UI. Build it: conda run -n dubui npm --prefix ui/web ci "
+                     "&& conda run -n dubui npm --prefix ui/web run build")
+    if web_src.is_dir():
+        newest_src = max((p.stat().st_mtime for p in web_src.rglob("*") if p.is_file()), default=0)
         if newest_src > web_dist.stat().st_mtime:
-            return _row(WARN, "ui build", "ui/web-dist/ is OLDER than ui/web2/src/ — rebuild it")
+            return _row(WARN, "ui build", "ui/web-dist/ is OLDER than ui/web/src/ — rebuild it")
     return _row(PASS, "ui build", str(web_dist))
 
 

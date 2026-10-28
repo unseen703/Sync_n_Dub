@@ -821,35 +821,40 @@ def test_sample_prompts_are_phrasings_not_op_names():
     leaked = [(n, p) for p in prompts for n in machine_only if n in p]
     assert not leaked, f"a sample prompt leaks an internal op name: {leaked}"
     text = sample_prompts_text()
-    assert "from 0:30 to 0:45 that is the second speaker" in text
+    assert "from 0:30 to 0:45 that is actually SPK_02" in text
 
 
-def test_llm_abstention_is_carried_not_overridden(monkeypatch):
-    """An empty ops array from the LLM is a verdict, not a miss.
+def test_a_matched_rule_never_reaches_the_llm(monkeypatch):
+    """The rule parser is first, and a match ends the parse.
 
-    Rule 8 of the system prompt tells the model to return `{"ops": []}`
-    instead of guessing when a request is ambiguous. The old code logged
-    that and ran the regex parser anyway -- so the component that had read
-    the job's real speakers and cues said "I cannot tell what this means"
-    and a pattern match silently overrode it. A regex cannot detect
-    ambiguity; it matches or it does not, and matching is not being right.
+    This REVERSES an earlier decision, deliberately, so the reasoning it
+    replaces is recorded here rather than lost. The LLM used to go first
+    because it reads the job's real speakers and cues and can therefore
+    ABSTAIN -- return `{"ops": []}` when a request is ambiguous -- and a
+    regex cannot: it matches or it does not, and matching is not being
+    right. That veto is given up for every sentence the patterns match.
+
+    What is bought is every fixed-shape request -- "speed this up by 1.2x",
+    "mute cue 5" -- parsed locally, deterministically and without a network
+    round trip. What keeps it safe is `_rule_parse`'s own conservatism and
+    the guards between its branches; if a wrong reading ever ships, the fix
+    is a narrower branch, not a second opinion afterwards.
     """
     import backend.edit_agent as A
+
+    called = []
 
     class _Client:
         def available(self):
             return True
 
-    monkeypatch.setattr(A, "_llm_parse", lambda *a, **k: [])
-    monkeypatch.setattr(
-        A, "_rule_parse",
-        lambda nlq: [A.EditOp(op="set_speed", scope=A.Scope(all=True),
-                              params={"factor": 1.2})])
-    ops, source = A.parse_request("do the thing with the bit",
+    monkeypatch.setattr(A, "_llm_parse",
+                        lambda *a, **k: called.append(1) or [])
+    ops, source = A.parse_request("speed this up by 1.2x",
                                   data={"segments": []}, client=_Client())
-    assert ops, "the regex result should still be offered"
-    assert source == "rules-unverified", (
-        "an unverified reading must be labelled so the caller can warn")
+    assert [o.op for o in ops] == ["set_speed"]
+    assert source == "rules"
+    assert not called, "a sentence the patterns read must not cost an LLM call"
 
 
 def test_an_uninterpretable_request_offers_examples(monkeypatch):
@@ -1205,3 +1210,112 @@ def test_segment_n_resolves_to_its_own_id_not_the_cue_number():
     assert A.resolve_cue_aliases("mute cue 5", data) == "mute SEG_0004"
     # An id this job does not have stays literal so the model can refuse.
     assert A.resolve_cue_aliases("mute segment 99", data) == "mute segment 99"
+
+
+# ---------------------------------------------------------------------------
+# every advertised phrasing parses, to its own op, with the selection intact
+# ---------------------------------------------------------------------------
+#
+# These four pin the 2026-10-28 work. Before it, 8 of the 24 phrasings the UI
+# puts in front of a user matched nothing in `_rule_parse` and one matched the
+# WRONG op (`translate the word "conditional" into Hindi` came back as a
+# whole-dub language switch), four quick-action fills carried a placeholder
+# that was sent verbatim and refused, and every cue-scoped request the rules
+# parsed silently widened to the whole dub because `_scope_from` did not know
+# what a SEG id was.
+
+def _filled(fill: str, needs, options=None):
+    """A quick-action fill as the workspace actually sends it.
+
+    A narrowed `options` list wins over the catalogue default, because that
+    is what the picker shows.
+    """
+    import re
+    from backend.edits import tone_styles
+    values = {"voice": "Amit", "tone": tone_styles()[1], "language": "Marathi",
+              "speaker": "SPEAKER_01", "text": "यह नया वाक्य है"}
+    value = (options or [None])[0] or values.get(needs or "", "…")
+    return re.sub(r"<[^<>]+>", value, fill)
+
+
+def test_every_advertised_phrasing_parses_to_its_own_op():
+    """The op catalogue is a promise; this is the check that it is kept.
+
+    `scripts/audit_edit_ops.py` prints the same table for a human.
+    """
+    import backend.edit_agent as A
+    from backend.edits import OP_SPECS, USER_ACTIONS
+
+    missed = []
+    for spec in OP_SPECS:
+        meta = USER_ACTIONS.get(spec.name) or {}
+        phrasings = list(spec.examples or [])
+        if meta.get("fill"):
+            phrasings.append(_filled(meta["fill"], meta.get("needs"),
+                                     meta.get("options")))
+        for phrase in phrasings:
+            ops = A._rule_parse(phrase)
+            if not any(o.op == spec.name for o in ops):
+                missed.append((spec.name, phrase, [o.op for o in ops]))
+    assert not missed, (
+        "the UI shows these phrasings and the parser cannot read them: "
+        f"{missed}")
+
+
+def test_a_selected_cue_survives_the_rule_parser():
+    """`cue 5: …` must edit cue 5, not the whole dub.
+
+    `resolve_cue_aliases` rewrites the prefix into `SEG_0004` before parsing,
+    and `_scope_from` had no branch for that shape -- so the narrowest
+    request the UI can produce became the widest edit the pipeline can make.
+    """
+    import backend.edit_agent as A
+    from backend.edits import OP_SPECS, USER_ACTIONS
+
+    for spec in OP_SPECS:
+        meta = USER_ACTIONS.get(spec.name) or {}
+        if not meta.get("fill"):
+            continue
+        phrase = f"SEG_0004: {_filled(meta['fill'], meta.get('needs'), meta.get('options'))}"
+        ops = [o for o in A._rule_parse(phrase) if o.op == spec.name]
+        assert ops, f"{spec.name}: {phrase!r} parsed to nothing"
+        assert ops[0].scope.segments == ["SEG_0004"], (
+            f"{spec.name}: the selection was dropped, scope is "
+            f"{ops[0].scope.describe()}")
+
+
+def test_the_tone_vocabulary_is_the_engines():
+    """No invented register reaches `tts_style`.
+
+    The catalogue, the prompt and the regex all advertised "formal | casual |
+    friendly | serious | energetic". Bodhan accepts none of the five, so a
+    tone edit reported success and changed nothing audible.
+    """
+    import backend.edit_agent as A
+    from backend.edits import OPS, tone_styles
+    from models.tts.bodhan_adapter import INDIC_SPEAK_STYLES
+
+    assert set(INDIC_SPEAK_STYLES) <= set(tone_styles())
+    for dead in ("formal", "casual", "friendly", "energetic"):
+        assert dead not in tone_styles()
+        assert dead not in OPS["set_tone"].params["tone"]
+        assert f"set_tone[{dead}" not in str(A._rule_parse(
+            f"deliver this as {dead}"))
+
+
+def test_a_fill_with_a_placeholder_names_what_it_needs():
+    """A `<placeholder>` without a `needs` is an unsendable chip.
+
+    The UI opens a picker keyed on `needs` and blocks Send while an unfilled
+    `<…>` remains. A fill that carries a placeholder and names nothing would
+    be a dead button -- which is exactly what "translate the whole dub to
+    this language" was, a 422 on every click.
+    """
+    import re
+    from backend.edits import USER_ACTIONS
+
+    for op, meta in USER_ACTIONS.items():
+        has_hole = bool(re.search(r"<[^<>]+>", meta.get("fill", "")))
+        assert has_hole == bool(meta.get("needs")), (
+            f"{op}: fill {meta.get('fill')!r} and needs "
+            f"{meta.get('needs')!r} disagree")

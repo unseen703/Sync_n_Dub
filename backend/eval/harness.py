@@ -1,21 +1,15 @@
 """Run one scored evaluation of one dubbed variant, and sweep over many.
 
-This module owns the *runner*: input validation, the result schema, the
-reconstruction of where mix.py actually placed each dubbed clip, and the
-dispatch into the metric modules. It owns no metric formulas — those live in
-`backend.eval.{timing,audio,text}` and are imported lazily, inside the group
-branch that needs them, for two reasons:
+This module is the runner: input validation, the result schema, the
+reconstruction of where mix.py placed each dubbed clip, and the dispatch into
+the metric modules. The formulas live in `backend.eval.{timing,audio,text}`
+and are imported lazily, inside the group branch that needs them, so that
+`--groups timing,pauses` does not pay for `backend.eval.audio`'s torch stack
+and a metric module that is missing degrades to `not_measured` rather than an
+ImportError at startup.
 
-  1. `--groups timing,pauses` must stay cheap. `backend.eval.audio` pulls in
-     torch and soundfile; importing it at module scope would make the
-     placement-only path pay for a GPU stack it never touches.
-  2. The metric modules are written by other hands and may not exist on disk
-     yet. A missing one has to degrade into a `not_measured` entry, not an
-     ImportError at startup that takes the whole sweep down.
-
-House rule enforced throughout: a number that could not be computed is
-recorded in `errors[]` or `not_measured[]` with a reason. It is never
-silently omitted and never guessed.
+A number that could not be computed goes into `errors[]` or `not_measured[]`
+with a reason. It is never silently omitted and never guessed.
 """
 from __future__ import annotations
 
@@ -39,8 +33,8 @@ SCHEMA_VERSION = 2
 GROUPS = ("timing", "pauses", "rate", "audio", "intel", "mt")
 CHEAP = ("timing", "pauses", "rate")     # placement-only: no audio decode, no torch
 
-# Groups that need a decoded waveform. Gating on this set is what makes
-# `--groups timing,pauses` genuinely cheap rather than cheap-looking.
+# Groups that need a decoded waveform; gated so `--groups timing,pauses`
+# never decodes one.
 AUDIO_GROUPS = frozenset({"audio", "intel"})
 
 # Which VariantInputs field each group cannot run without.
@@ -58,43 +52,33 @@ _INPUT_FIELDS = ("mt_json", "mix_wav", "mix_mp4", "tts_only_wav")
 DEFAULT_GOLDEN_ROOT = Path("data/golden")
 DEFAULT_OUT_DIR = Path("data/eval")
 
-# mix.py's own defaults, used only when a manifest predates the keys being
-# written into `extra.mix`. Every replay records which of the two it used.
+# mix.py's own defaults, used only when a manifest predates these keys in
+# `extra.mix`. Every replay records which of the two it used.
 _MIX_DEFAULT_STRATEGY = "global_tempo"
 _MIX_DEFAULT_TEMPO_CAP = 1.5
 _MIX_DEFAULT_CLIP_SOURCE = "auto"
 
 # ---------------------------------------------------------------------------
 # Measured calibration of this corpus. Established once, off-line, against
-# data/golden; carried into every result JSON so a reader never has to guess
-# whether a number is good. These are NOT tuning knobs and nothing in this
-# module may re-derive them.
+# data/golden, and carried into every result JSON. These are constants, not
+# tuning knobs; nothing in this module may re-derive them.
 # ---------------------------------------------------------------------------
 
-# The SOURCE-side (English) word-level floor: median disagreement between
-# whisperx forced-align and the `en-orig` caption word stream. Measured by
-# refbuild on 12 of 18 golden clips. It is recorded for provenance and it does
-# NOT bound the ranking -- see below.
+# Source-side (English) word-level floor: median disagreement between whisperx
+# forced-align and the `en-orig` caption word stream, over 12 of 18 golden
+# clips. Provenance only -- it does not bound the ranking.
 GT_SOURCE_FLOOR_MS = 55.0
 GT_SOURCE_FLOOR_RANGE_MS = (43.0, 79.0)
 
-# The REF_DUB (Hindi) side -- the one every timing metric here is scored
-# against -- has NO word-level floor on any clip. No video in the corpus
-# carries an `hi-orig` auto-caption, so there is exactly one Hindi word stream
-# (`whisperx forced-align (hi)`) and nothing independent to check it against;
-# `meta.agreement_median_ms.ref_dub` says so verbatim on all 18 clips.
+# Reference-dub (Hindi) floor -- the side every timing metric is scored
+# against. There is no word-level floor: no clip in the corpus carries an
+# `hi-orig` auto-caption, so there is one Hindi word stream and nothing to
+# check it against. The substitute is CUE-level: human `.hi.vtt` cue onsets
+# against the whisperx CTC onset of that cue's first word, over the 9 clips
+# where >=90% of cues matched a token (scripts/hi_cue_floor.py).
 #
-# The measurable substitute is cue-level: human-authored `.hi.vtt` cue onsets
-# against the CTC onset whisperx gave that cue's first word. The two share
-# their text but not their timing, so the disagreement is a real timing
-# cross-check -- at CUE resolution, which is coarser than word resolution.
-# Measured by scripts/hi_cue_floor.py over the 9 clips where >=90% of cues
-# matched a whisperx token: median 185 ms, range 79-338 ms.
-#
-# Therefore 185 ms is an UPPER BOUND on the unknown Hindi word-level floor,
-# not an estimate of it. No timing claim below it can be distinguished from
-# reference noise with the data available, so differences smaller than it are
-# reported as ties rather than ranks.
+# 185 ms is therefore an UPPER BOUND on the unknown word-level floor, not an
+# estimate. Timing differences smaller than it are reported as ties, not ranks.
 GT_NOISE_FLOOR_MS = 185.0
 GT_NOISE_FLOOR_RANGE_MS = (79.0, 338.0)
 GT_NOISE_FLOOR_BASIS = (
@@ -104,17 +88,17 @@ GT_NOISE_FLOOR_BASIS = (
     "word stream. This is an upper bound, not an estimate."
 )
 
-# The no-op baseline: the UNTOUCHED English source scored against the human
-# Hindi dub. speech IoU already sits at 0.872 before anything is dubbed, so
-# its headroom (0.128) is a third of its own clip-to-clip spread -- it is a
-# GUARD against a catastrophically mistimed arm, never a ranker. pause F1 is
-# the discriminator: the no-op scores exactly zero on it.
+# The no-op baseline: the untouched English source scored against the human
+# Hindi dub. Speech IoU is already 0.872 before anything is dubbed, leaving
+# headroom a third of its own clip-to-clip spread, so it is a guard against a
+# catastrophically mistimed arm, not a ranker. Pause F1 is the discriminator --
+# the no-op scores exactly zero on it.
 NOOP_SPEECH_IOU_MEDIAN = 0.872
 NOOP_PAUSE_F1_AT_200MS_MEDIAN = 0.000
 
 # The golden VAD's operating point (backend/eval/reference.vad defaults).
-# Planned hypothesis spans are merged at the SAME min_pause_s so that a
-# "pause" means the same thing on both sides of the comparison.
+# Planned hypothesis spans are merged at the same min_pause_s, so "pause"
+# means the same thing on both sides of the comparison.
 _GOLDEN_MIN_PAUSE_S = 0.25
 _GOLDEN_MIN_SPEECH_S = 0.20
 
@@ -168,9 +152,8 @@ def validate_inputs(
 
     Fills `record` (if given) with the schema's `inputs` block: path, sha256,
     byte count and an `ok` flag per field. A file that cannot be opened,
-    hashed or (for audio groups) decoded yields a reason — never an exception.
-    `data/mix/2vxQaT0Fy-c_2min_720p.dubbed.wav` is a dangling symlink on this
-    host, which is exactly the case this has to survive.
+    hashed or (for audio groups) decoded yields a reason, never an exception --
+    a dangling symlink included.
     """
     reasons: List[str] = []
     record = record if record is not None else {}
@@ -197,7 +180,7 @@ def validate_inputs(
 
         try:
             # stat() follows symlinks, so a dangling link fails here rather
-            # than three stages later inside a metric function.
+            # than inside a metric function later.
             st = path.stat()
         except OSError as e:
             rec["reason"] = f"unreadable: {type(e).__name__}: {e}"
@@ -317,10 +300,9 @@ class MixPlan:
 def _seg_clip_duration(seg: dict, clip_source: str) -> Optional[float]:
     """Length of the clip mix.py would have placed for this segment.
 
-    Read off the manifest rather than the WAV header, because the cheap path
-    is not allowed to touch audio. `tts_duration_s` is the post-stretch
-    length (backend/tts.py writes it that way), so the raw clip is recovered
-    by dividing out the recorded stretch factor.
+    Read off the manifest, not the WAV header: the cheap path must not touch
+    audio. `tts_duration_s` is the post-stretch length, so the raw clip is
+    recovered by dividing out the recorded stretch factor.
     """
     dur = seg.get("tts_duration_s")
     if dur is None:
@@ -417,9 +399,9 @@ def _replay_timing_plan(
 ) -> Tuple[List[PlacedSegment], List[PlacedPiece]]:
     """Render a TimingPlan's Pieces onto the output timeline.
 
-    `Piece.dst_dur == src_span.dur / local_tempo` (backend/timing.py:88), and
-    `dst_start` is already absolute output seconds, so no cursor is involved:
-    this reads the placements the renderer used rather than re-deriving them.
+    `Piece.dst_dur == src_span.dur / local_tempo` and `dst_start` is already
+    absolute output seconds, so no cursor is involved: these are the
+    placements the renderer used, not re-derived ones.
     """
     texts = {
         str(s.get("id")): str(s.get("final_text") or s.get("mt_text") or s.get("text") or "")
@@ -483,17 +465,17 @@ def replay_mix_plan(data: dict, *, mt_path: Optional[Path] = None) -> MixPlan:
 
     Two placement rules, because mix.py has two:
 
-      * `strategy=timing_plan` — mix.py renders a `backend.timing.TimingPlan`
-        piece by piece at each `Piece.dst_start`. There is no cursor and no
-        shift-forward, so the plan is LOADED and read, not re-derived. Before
-        this was wired up the replay silently re-ran the shift-forward rule
-        here and was out by up to 3.4 s against the rendered wav, while five
-        differently-planned arms came back bit-identical.
-      * every other strategy — mix.py has no plan, and its rule (sort by
-        source start, shift-forward cursor, then one global atempo) is
-        deterministic and replayed exactly from the manifest alone.
+      * `strategy=timing_plan` -- mix.py renders a `backend.timing.TimingPlan`
+        piece by piece at each `Piece.dst_start`, with no cursor and no
+        shift-forward, so the plan is LOADED and read rather than re-derived.
+        Re-running the shift-forward rule here instead puts the replay seconds
+        out against the rendered wav and makes differently-planned arms score
+        identically.
+      * every other strategy -- no plan; the rule (sort by source start,
+        shift-forward cursor, then one global atempo) is deterministic and
+        replayed from the manifest alone.
 
-    `placement_source` on the returned MixPlan always says which one ran.
+    `placement_source` on the returned MixPlan says which one ran.
     """
     mix = (data.get("extra") or {}).get("mix") or {}
 
@@ -505,8 +487,8 @@ def replay_mix_plan(data: dict, *, mt_path: Optional[Path] = None) -> MixPlan:
     strategy = mix.get("strategy")
     strategy_source = "manifest"
     if not strategy:
-        # Manifests written before mix.py recorded its strategy. Say so rather
-        # than let the assumption vanish into a number.
+        # Manifests predating mix.py recording its strategy; flagged rather
+        # than letting the assumption vanish into a number.
         strategy = _MIX_DEFAULT_STRATEGY
         strategy_source = "assumed_mix_default"
 
@@ -555,8 +537,8 @@ def replay_mix_plan(data: dict, *, mt_path: Optional[Path] = None) -> MixPlan:
             gt = float(gt)
         except (TypeError, ValueError):
             gt = None
-        # mix.py applies no second atempo under timing_plan: the plan already
-        # owns every tempo decision, per piece.
+        # No second atempo under timing_plan: the plan owns every tempo
+        # decision, per piece.
         tempo_source = "manifest" if gt and gt > 0 else "timing_plan_owns_tempo"
         if not gt or gt <= 0:
             gt = 1.0
@@ -662,18 +644,16 @@ def replay_mix_plan(data: dict, *, mt_path: Optional[Path] = None) -> MixPlan:
 class Reference:
     """The human Hindi dub of this clip, as `backend.eval refbuild` wrote it.
 
-    Two tiers of ground truth live here and they are NOT interchangeable:
+    Two tiers of ground truth, NOT interchangeable:
 
-      * `speech` / `pauses` come from `ref_dub.vad.json` and exist for every
-        clip that has a dub (15 of the 18). They are the PRIMARY reference.
-      * `words` comes from `ref_dub.words.json` and is trustworthy only where
+      * `speech` / `pauses` from `ref_dub.vad.json`, present for every clip
+        that has a dub. The primary reference.
+      * `words` from `ref_dub.words.json`, trustworthy only where
         `meta["words"]["ref_dub"]["vad_coverage"]["usable_for_word_metrics"]`
-        is true (7 clips). On the other four NPTEL clips the transcript is
-        under-subtitled -- 0.96-1.45 words per second of VAD speech against
-        2.51-5.15 on a healthy clip -- so word timings there describe the
-        subtitle file, not the speech. `words_usable` gates every word-level
-        metric; an ineligible clip is recorded as not_measured and is never
-        pooled into a word-level number.
+        is true. An under-subtitled transcript gives word times that describe
+        the subtitle file, not the speech. `words_usable` gates every
+        word-level metric; an ineligible clip is recorded as not_measured and
+        never pooled into a word-level number.
     """
     method: str                          # how the ground truth was obtained
     clip_duration_s: Optional[float]
@@ -784,17 +764,14 @@ def load_reference(
     Tier 1 is what `python -m backend.eval refbuild` wrote under
     `data/golden/<clip_id>/`: `ref_dub.vad.json` (speech + pauses of the human
     Hindi dub) and, where `meta.json` says it is usable, `ref_dub.words.json`.
+    Those are the only filenames that exist -- `reference.json`, `ref.json`
+    and the like are never written, and looking for them drops every clip to
+    tier 2.
 
-    Tier 2, when no dub exists for the clip, is the source segment grid in the
-    manifest. That is a real reference -- it is the timeline the dub is meant
-    to hold -- but a much weaker one, so `timing_method` records which tier a
-    row came through and no row can quietly cross between them.
-
-    The previous version of this function looked for `reference.json`,
-    `reference.words.json` or `ref.json`. Nothing in this repository has ever
-    written any of those three names, so every clip fell through to tier 2 and
-    the whole sweep scored each dub against its own source slot grid instead of
-    against the human dub.
+    Tier 2, when the clip has no dub, is the source segment grid in the
+    manifest: a real reference, since it is the timeline the dub must hold,
+    but a much weaker one. `timing_method` records which tier a row came
+    through, and no row crosses between them.
     """
     reasons: List[str] = []
     golden_root = Path(golden_root)
@@ -910,11 +887,11 @@ def _clip_agreement_ms(
 ) -> Tuple[Optional[float], Optional[str]]:
     """This clip's own ground-truth timing floor, if anyone measured it.
 
-    `meta["agreement_median_ms"]` is per-track -- refbuild writes
-    `{"source": {...}, "ref_dub": {...}}`, where each side is either
-    `{"median_ms": ...}` or `{"not_measured": "<why>"}`. The ref_dub track is
-    the one this harness scores against, so that is the one read. A clip whose
-    floor was never measured returns `(None, "<why>")` and the corpus-wide
+    `meta["agreement_median_ms"]` is per-track: refbuild writes
+    `{"source": {...}, "ref_dub": {...}}`, each side either
+    `{"median_ms": ...}` or `{"not_measured": "<why>"}`. This reads the
+    ref_dub track, the one the harness scores against. A clip whose floor was
+    never measured returns `(None, "<why>")`, and the corpus-wide
     `GT_NOISE_FLOOR_MS` is carried in the result alongside it.
     """
     def _dig(obj: Any) -> Tuple[Optional[float], Optional[str]]:
@@ -1020,10 +997,9 @@ def _pauses_between(
 ) -> List[Tuple[float, float]]:
     """Internal gaps between consecutive speech runs, at the golden VAD's rule.
 
-    Same definition `backend.eval.reference.vad` uses for `ref_dub.vad.json`:
-    INTERNAL gaps only, and only those at least `min_pause_s` long. Leading
-    and trailing silence are not pauses the dub has to reproduce, so they are
-    excluded on both sides of the comparison.
+    The same definition `backend.eval.reference.vad` uses for
+    `ref_dub.vad.json`: internal gaps only, at least `min_pause_s` long.
+    Leading and trailing silence are excluded on both sides.
     """
     sp = sorted(speech)
     return [(sp[i][1], sp[i + 1][0]) for i in range(len(sp) - 1)
@@ -1038,14 +1014,13 @@ def _hyp_from_plan(
     """PLANNED hypothesis spans, straight off the TimingPlan's Pieces.
 
     Each piece occupies `[dst_start, dst_start + src_span.dur / local_tempo]`.
-    Consecutive pieces closer together than `min_pause_s` are one speech run
-    -- the renderer butts them up against each other and a listener hears one
-    utterance -- so they are merged at exactly the threshold the golden VAD
-    used, and what is left between runs is the planned pause structure.
+    Pieces closer together than `min_pause_s` are merged into one speech run,
+    at the same threshold the golden VAD used; what is left between runs is
+    the planned pause structure.
 
-    These are the dub's INTENTION. They are cheap (no audio decode) and they
-    are what the timing groups score. A divergence between them and the VAD of
-    the rendered wav is itself a finding, so `source` says which one this is.
+    These are the dub's intention, not its rendering: cheap (no audio decode)
+    and what the timing groups score. `source` marks them as planned, since a
+    divergence from the VAD of the rendered wav is itself a finding.
     """
     if plan.pieces:
         raw = [(p.dst_start, p.dst_end) for p in plan.pieces if p.dst_end > p.dst_start]
@@ -1122,11 +1097,10 @@ def _plan_tempos(plan: MixPlan) -> List[float]:
     """Every usable time-stretch factor this variant actually applied.
 
     Under `strategy=timing_plan` the tempo is per PIECE, in
-    `Piece.local_tempo`, and nothing writes it back to
-    `segments[].stretch_factor` -- so looking only at the manifest reported
-    `n_cap_saturated = 0` for every plan-driven arm by construction, however
-    hard the cap was biting. The pieces are the authority when they exist;
-    `segments[].stretch_factor` is the authority for the other strategies.
+    `Piece.local_tempo`, and is never written back to
+    `segments[].stretch_factor` -- read the manifest alone and every
+    plan-driven arm reports zero saturated pieces by construction. The pieces
+    are the authority when they exist, `segments[].stretch_factor` otherwise.
     """
     if plan.pieces:
         return [p.local_tempo for p in plan.pieces
@@ -1137,19 +1111,17 @@ def _plan_tempos(plan: MixPlan) -> List[float]:
 
 
 def _plan_tempo_caps(plan: MixPlan) -> Tuple[Optional[float], Optional[float], str]:
-    """The tempo caps this variant was actually planned under, and where from.
+    """The tempo caps this variant was planned under, and where they came from.
 
     `backend.timing` clamps every `local_tempo` into `[min_tempo, max_tempo]`
-    and those two are written into the plan's `params` -- 0.90/1.15 for the
-    pause-aware, word-anchored and dp producers, 0.90/1.10 for naive_slot.
-    They are ASYMMETRIC, so scoring them through `stretch_stats`'s default
-    symmetric `1 +- 0.10` budget looks for a floor at 0.85 that no producer
-    has and calls a piece pinned at 1.15 a cap BREACH rather than saturation.
-    That is the same failure as reading tempo off `segments[].stretch_factor`:
-    a number that is zero by construction rather than by measurement.
+    and writes both into the plan's `params` -- 0.90/1.15 for pause_aware,
+    word_anchored and dp, 0.90/1.10 for naive_slot. They are ASYMMETRIC, so
+    scoring them against `stretch_stats`'s symmetric `1 +- 0.10` default looks
+    for a floor no producer has and reads a piece pinned at 1.15 as a cap
+    breach rather than saturation.
 
-    Falls back to `extra.mix.tempo_cap` (symmetric, mix.py's own global-atempo
-    ceiling) and finally to `(None, None, why)` so the caller records a reason
+    Falls back to `extra.mix.tempo_cap` (symmetric, mix.py's global-atempo
+    ceiling), then to `(None, None, why)` so the caller records a reason
     rather than a wrong cap.
     """
     params = plan.plan_params or {}
@@ -1203,8 +1175,8 @@ def _fallback_match(
     """Greedy IoU matching. Used only when `backend.eval.timing` is absent.
 
     n_matched / n_invented / n_missed are top-level schema fields the runner
-    has to fill even when the metric module is missing, so there is a local
-    matcher — but the result records that it was used.
+    must fill even without the metric module. The result records when this
+    local matcher produced them.
     """
     pairs = sorted(
         ((_iou(r, h), i, j) for i, r in enumerate(ref) for j, h in enumerate(hyp)),
@@ -1256,11 +1228,10 @@ class _Recorder:
                 mod_error: Optional[str], *args: Any, **kwargs: Any) -> Any:
         """Call `mod.fn_name(...)` but file the result under `key_name`.
 
-        Several metrics are legitimately run more than once per variant --
-        `gap_stats` on the hypothesis and on the reference, `speech_iou` on the
-        planned spans and again on the VAD of the rendered wav. The function
-        name is therefore not the result key, and conflating the two is what
-        made the old runner pass whatever arguments happened to be in scope.
+        Some metrics run more than once per variant -- `gap_stats` on the
+        hypothesis and on the reference, `speech_iou` on the planned spans and
+        again on the VAD of the rendered wav -- so the function name is not
+        the result key.
         """
         key = f"{group}.{key_name}"
         if mod is None:
@@ -1294,8 +1265,8 @@ class _Recorder:
         try:
             value = fn(*args, **kwargs)
         except TypeError as e:
-            # Signature drift between the runner and the metric module is a
-            # measurement gap, not a crash.
+            # Signature drift against the metric module is a measurement
+            # gap, not a crash.
             self.skip(key, f"{mod.__name__}.{name} signature mismatch: {e}")
         except Exception as e:
             self.fail(key, f"{mod.__name__}.{name} raised {type(e).__name__}: {e}")
@@ -1319,7 +1290,7 @@ def score_variant(
 ) -> dict:
     """Score one variant of one clip and write its result JSON.
 
-    Returns the result dict. Never raises on bad input data: a problem that
+    Returns the result dict. Never raises on bad input data: anything that
     stops a metric becomes an entry in `errors[]` / `not_measured[]`.
     """
     groups = tuple(dict.fromkeys(groups))

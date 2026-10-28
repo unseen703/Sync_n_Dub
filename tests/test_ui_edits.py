@@ -616,9 +616,9 @@ def test_a_script_edit_replays_speech_not_translation():
 # This is the same shape of guard `tests/test_ui_backend_sync.py` puts on the
 # config keys, applied to the request bodies.
 
-CLIENT_TS = REPO_ROOT / "ui" / "web2" / "src" / "api" / "client.ts" \
+CLIENT_TS = REPO_ROOT / "ui" / "web" / "src" / "api" / "client.ts" \
     if "REPO_ROOT" in dir() else \
-    Path(__file__).resolve().parent.parent / "ui" / "web2" / "src" / "api" / "client.ts"
+    Path(__file__).resolve().parent.parent / "ui" / "web" / "src" / "api" / "client.ts"
 
 
 def test_stage_edits_posts_the_key_the_backend_reads():

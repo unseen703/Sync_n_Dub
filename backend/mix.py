@@ -1,49 +1,36 @@
-"""Audio mixing — overlay per-segment TTS/VC clips onto the M&E stem.
+"""Audio mixing -- overlay per-segment TTS/VC clips onto the M&E stem.
 
 Reads the merged JSON produced after the TTS/VC stages. For each segment
-whose `tts_audio` (or `vc_audio` when present) exists:
-  - places it on the timeline using a shift-forward schedule: the clip
-    starts at `max(segment.start, cursor)` where `cursor` is the end of
-    the previous clip. This preserves the entire TTS clip (no `atrim`)
-    and prevents overlap.
-  - sums it with the M&E stem under `amix`
-  - optionally re-paces the whole mix with a single `atempo` so the dub
-    lands back on the source-video duration (strategy=global_tempo).
+with synthesised audio it places the clip on the timeline, sums it with the
+M&E stem under `amix`, and optionally re-paces the whole mix.
 
-Three strategies. `--speed-mode` on the CLI is the two-option front end to
-them: `global` -> `global_tempo`, `segment` -> `timing_plan` rendering a
-`naive_slot` plan with a zero slot margin, which fits every clip to its own
-slot in BOTH directions (a short clip is stretched out to fill, rather than
-leaving a pause). `no_tempo` and the research arms stay reachable directly.
+Three strategies. `--speed-mode` on the CLI is the front end: `global` ->
+`global_tempo`, `segment` -> `timing_plan` over a `naive_slot` plan,
+`warp` -> `timing_plan` over a `warped` plan. `no_tempo` and the research
+arms stay reachable directly.
 
-  * `global_tempo` (default): natural-pace per clip; one global atempo
-    at the end to match source duration. Pitch preserved. Gives a
-    uniformly slightly-fast dub whose length == source video.
-  * `no_tempo`: pure shift-forward with no stretching anywhere. The dub
-    is lossless and natural-paced but can be longer than the video; the
-    mux step will trim the tail with `-shortest`.
+  * `global_tempo`: natural pace per clip placed shift-forward (each clip
+    starts at `max(segment.start, cursor)`, so nothing is trimmed and
+    nothing overlaps), then one global `atempo` to match source duration.
+    Pitch preserved; the dub is uniformly slightly fast.
+  * `no_tempo`: shift-forward with no stretching anywhere. The dub can be
+    longer than the video; the mux trims the tail with `-shortest`.
   * `timing_plan`: render a `backend.timing.TimingPlan`. The plan owns
-    placement AND tempo: each `Piece` is a chunk of a raw TTS clip with
-    its own `dst_start` and `local_tempo`, so there is no global atempo
-    and no shift-forward cursor here at all. Every producer in
-    `backend.timing.PRODUCERS` — including `naive_slot`, the control arm
-    that reproduces `global_tempo` — renders through this one path, which
-    is what keeps a producer comparison about timing rather than about
-    two different ffmpeg graphs.
+    placement AND tempo -- each `Piece` carries its own `dst_start` and
+    `local_tempo` -- so there is no global atempo and no shift-forward
+    cursor here. Every producer in `backend.timing.PRODUCERS` renders
+    through this one path, so a producer comparison is about timing rather
+    than about two different ffmpeg graphs.
 
-Which clip per segment (`clip_source`): the TTS stage writes TWO files and
-records both on the segment — `tts_raw_audio` is the UNSTRETCHED synth
-output, while `tts_audio` is the WSOLA-stretched clip and so may already
-have been re-timed to fit its slot. Mixing `tts_audio` under
-`strategy=global_tempo` therefore stretches a second time, on top of the
-first. `clip_source` makes that choice explicit; `vc_audio` (voice
-conversion) is derived from the stretched clip and inherits its timing.
+`clip_source` picks which per-segment file to place. The TTS stage writes
+two: `tts_raw_audio` is the unstretched synth output, `tts_audio` is the
+WSOLA-stretched clip. Mixing `tts_audio` under `global_tempo` stretches a
+second time on top of the first, so the choice is explicit. `vc_audio` is
+derived from the stretched clip and inherits its timing.
 
-Nothing is written outside `out_dir`. Fallbacks:
-  * If the M&E stem is missing (user ran `--skip-stems`), we still write
-    the dubbed-dialogue-only mix and warn.
-  * Segments with no synthesized audio are skipped silently; their slot
-    carries whatever is in the M&E bed (silence or source music).
+Nothing is written outside `out_dir`. A missing M&E stem (`--skip-stems`)
+still produces a dialogue-only mix, with a warning; segments with no
+synthesised audio are skipped and their slot carries the M&E bed.
 """
 from __future__ import annotations
 
@@ -63,8 +50,7 @@ log = logging.getLogger(__name__)
 def _audio_duration(path: Path) -> float:
     """Duration in seconds for a TTS clip.
 
-    Uses Python's stdlib `wave` for PCM WAVs (fast, no ffprobe dependency)
-    and falls back to `probe_duration` for anything else.
+    stdlib `wave` for PCM WAVs, falling back to `probe_duration` otherwise.
     """
     p = Path(path)
     if p.suffix.lower() == ".wav":
@@ -93,47 +79,43 @@ STRATEGIES = ("global_tempo", "no_tempo", "timing_plan")
 
 CLIP_SOURCES = ("auto", "raw", "stretched", "vc", "warped")
 
-# One ffmpeg `-i` per piece, so the argv and the filter graph both grow
-# linearly with the piece count. Past a few hundred the failure mode is an
-# opaque ffmpeg/OS argument-length error thousands of characters long, which
-# is a terrible way to learn that a producer over-segmented.
+# One ffmpeg `-i` per piece, so argv and the filter graph both grow with the
+# piece count. Past a few hundred the failure is an opaque OS
+# argument-length error rather than "a producer over-segmented".
 DEFAULT_MAX_PIECES = 400
 
-# A stretch filter with less input than its analysis window emits nothing and
-# still exits 0 (see backend.stretch) — the piece would reach the mix as pure
-# silence. Below this we render the piece at its natural pace instead; a few
-# milliseconds of tempo error on a sliver is invisible, a dropped piece is not.
+# A stretch filter given less input than its analysis window emits nothing
+# and still exits 0 (see backend.stretch), so the piece would reach the mix
+# as silence. Below this the piece renders at its natural pace instead.
 _MIN_STRETCH_INPUT_S = 0.05
 
 # Below this a `local_tempo` is not worth a filter instance at all.
 _TEMPO_EPS = 1e-3
 
-# Explicit clip_source → the segment field it reads. "auto" is absent on
-# purpose: it resolves per segment (see `_resolve_clip`).
+# Explicit clip_source -> the segment field it reads. "auto" is absent: it
+# resolves per segment (see `_resolve_clip`).
 _CLIP_FIELDS = {
     "raw": "tts_raw_audio",
     "stretched": "tts_audio",
     "vc": "vc_audio",
-    # Written by the `warped` timing producer: already at its planned length,
-    # with the rate varying INSIDE the file. Every Piece over one of these
-    # carries `local_tempo = 1.0`, so no stretch filter is built at all and
-    # the mix is pure placement.
+    # Written by the `warped` producer: already at its planned length, with
+    # the rate varying INSIDE the file. Every Piece over one of these carries
+    # `local_tempo = 1.0`, so the mix is pure placement.
     "warped": "tts_warped_audio",
 }
 
-# Any field that counts as "this segment was synthesised", used to tell a
-# genuinely empty segment apart from one that is merely missing the
-# requested variant.
+# Any field that counts as "this segment was synthesised", so a genuinely
+# empty segment can be told from one missing only the requested variant.
 _ALL_CLIP_FIELDS = ("vc_audio", "tts_audio", "tts_raw_audio", "tts_warped_audio")
 
 
 def _resolve_clip(seg: dict, clip_source: str) -> tuple[Optional[str], Optional[str]]:
     """Pick the audio field for one segment; returns (field_name, path).
 
-    Both are None when the segment carries no synthesised audio at all.
-    An explicit `clip_source` whose field is missing on an otherwise
-    synthesised segment raises instead of falling back — a silent
-    fallback to `tts_audio` is what hid the double-stretch bug.
+    Both are None when the segment carries no synthesised audio at all. An
+    explicit `clip_source` whose field is missing on an otherwise
+    synthesised segment raises rather than falling back -- a silent fallback
+    to `tts_audio` hides a double stretch.
     """
     if clip_source == "auto":
         if seg.get("vc_audio"):
@@ -162,9 +144,8 @@ class _PlacedPiece:
     """One `timing.Piece` resolved against a concrete wav on disk.
 
     `src_start`/`src_end` are seconds INTO the clip (the plan's convention);
-    `dst_start` is absolute output-timeline seconds. Keeping both on one
-    object is the only place the two time bases meet, so the conversion bug
-    the schema warns about has exactly one home.
+    `dst_start` is absolute output-timeline seconds. This is the only place
+    the two time bases meet.
     """
     sid: str
     wav: Path
@@ -185,10 +166,9 @@ class _PlacedPiece:
 def _ffmpeg_stretch_backend(name: str) -> str:
     """Resolve `name` to a backend that is an ffmpeg *filter*.
 
-    The mix renders inside one `filter_complex`, so `librosa`/`linear` — which
-    are in-process array operations — cannot participate. Rejecting them here
-    with a named error beats letting `ffmpeg_stretch_filter` raise a generic
-    ValueError from three frames down.
+    The mix renders inside one `filter_complex`, so the in-process
+    `librosa`/`linear` backends cannot participate; they are rejected here
+    with a named error rather than deeper down.
     """
     from . import stretch as stretch_mod
 
@@ -216,9 +196,9 @@ def _build_plan_pieces(
 ) -> tuple[List[_PlacedPiece], List[str], List[dict]]:
     """Resolve every `Piece` of `tplan` to a wav + a trim window.
 
-    Returns (pieces, clip_fields, skipped). A segment that cannot be resolved
-    is skipped with a recorded reason rather than raising: one bad segment
-    must not kill a producer sweep.
+    Returns (pieces, clip_fields, skipped). A segment that cannot be
+    resolved is skipped with a recorded reason rather than raising, so one
+    bad segment does not kill a producer sweep.
     """
     import soundfile as sf
 
@@ -233,13 +213,13 @@ def _build_plan_pieces(
             skipped.append({"id": sp.id, "reason": "not_in_merged_json"})
             continue
         if seg.get("muted"):
-            # TTS still renders muted cues (see `edits._h_mute_cue`); mix is
+            # TTS still renders muted cues (`edits._h_mute_cue`); mix is
             # where they drop out, so the M&E bed covers the slot.
             skipped.append({"id": sp.id, "reason": "muted"})
             continue
         if not sp.pieces:
-            # Normal for a `no_audio` segment: the plan says "render nothing
-            # here", and the M&E bed covers the slot.
+            # Normal for a `no_audio` segment: nothing to render, and the
+            # M&E bed covers the slot.
             skipped.append({"id": sp.id, "reason": "no_pieces"})
             continue
         try:
@@ -269,7 +249,7 @@ def _build_plan_pieces(
 
         for i, pc in enumerate(sp.pieces):
             # Clamp into the clip: a producer that cut past the end would
-            # otherwise get a silently short piece and a timeline that drifts.
+            # otherwise get a silently short piece and a drifting timeline.
             s = max(0.0, min(clip_dur, float(pc.src_span.start)))
             e = max(0.0, min(clip_dur, float(pc.src_span.end)))
             if e - s <= 1e-4:
@@ -353,7 +333,7 @@ def mix_dubbed_audio(
     source_video = Path(source_video)
 
     # Probed up front because both branches report it; only `global_tempo`
-    # actually steers on it.
+    # steers on it.
     try:
         source_duration = probe_duration(source_video)
     except Exception:
@@ -381,10 +361,10 @@ def mix_dubbed_audio(
                     f"carries extra['timing_plan']."
                 )
 
-        # The plan owns ALL stretching. Letting "auto" land on `tts_audio`
-        # here is what made a real run compress 1.098x in the TTS stage and
-        # then 1.29x again in the mix; "raw" is the only default that keeps
-        # `local_tempo` meaning what the producer computed.
+        # The plan owns ALL stretching. "auto" landing on `tts_audio` would
+        # compress once in the TTS stage and again here; "raw" is the only
+        # default that keeps `local_tempo` meaning what the producer
+        # computed.
         effective_clip_source = "raw" if clip_source == "auto" else clip_source
         pieces, clip_fields, skipped = _build_plan_pieces(
             data, tplan, effective_clip_source)
@@ -475,8 +455,8 @@ def mix_dubbed_audio(
             )
         segs.sort(key=lambda x: x[1])
 
-        # Pure shift-forward placement: no per-clip tempo. Each clip plays its
-        # full raw duration; the next clip waits if that overruns.
+        # Pure shift-forward placement, no per-clip tempo: each clip plays
+        # its full raw duration and the next waits if that overruns.
         shift_plan: List = []
         cursor = 0.0
         for sid, start_s, wav, raw_dur in segs:
@@ -492,10 +472,10 @@ def mix_dubbed_audio(
         else:
             global_tempo = 1.0
 
-        # Output canvas length. With global_tempo the amix output is retimed
-        # by `global_tempo`, so the pre-tempo canvas must be `fit_duration`;
-        # after `atempo` it collapses to ~`fit_duration / global_tempo`. With
-        # no_tempo we need room for the entire shifted timeline.
+        # Output canvas length. Under global_tempo the amix output is
+        # retimed, so the pre-tempo canvas must be `fit_duration` and
+        # collapses to ~`fit_duration / global_tempo` after `atempo`. Under
+        # no_tempo it needs room for the entire shifted timeline.
         total_duration = fit_duration + 0.5
 
         log.info("mix: %d dubbed segments, strategy=%s, clip_source=%s(%s), me_stem=%s",
@@ -577,8 +557,8 @@ def _ffmpeg_mix(
     filters: List[str] = []
     mix_labels: List[str] = []
 
-    # Input 0: a silent base at `total_duration`, so even without an M&E
-    # bed we have a canvas every segment sits on.
+    # Input 0: a silent base at `total_duration`, so there is a canvas
+    # every segment sits on even without an M&E bed.
     inputs += ["-f", "lavfi", "-t", f"{total_duration:.3f}",
                "-i", f"anullsrc=channel_layout=stereo:sample_rate={sample_rate}"]
     mix_labels.append("[0:a]")
@@ -647,23 +627,20 @@ def _ffmpeg_mix_plan(
 ) -> None:
     """Render a resolved timing plan: one ffmpeg input and chain per piece.
 
-    One `-i` per PIECE rather than per clip. Two pieces cut from the same
-    wav would otherwise have to share a stream, which in ffmpeg means an
-    `asplit` whose outputs must all be consumed — a graph that grows a new
-    failure mode every time a producer changes how it cuts. A duplicate
-    `-i` of the same file costs a second demuxer and nothing else.
+    One `-i` per PIECE, not per clip: two pieces cut from the same wav would
+    otherwise share a stream, which in ffmpeg means an `asplit` whose outputs
+    must all be consumed. A duplicate `-i` costs a second demuxer and
+    nothing else.
 
-    NOTE ON PAUSES: `SegmentPlan.inserted_pauses` needs no filter and no
-    silence source here. A pause IS the gap between one piece's `dst_end`
-    and the next piece's `dst_start`, and each piece is placed absolutely by
-    its own `adelay` onto a silent canvas. Nothing renders the gap because
-    nothing has to — that is the payoff of planning in `Piece`s instead of
-    durations, and the reason there is no pause-handling code to find below.
+    Pauses need no filter and no silence source. A pause IS the gap between
+    one piece's `dst_end` and the next piece's `dst_start`, and each piece is
+    placed absolutely by its own `adelay` onto a silent canvas -- so there is
+    no pause-handling code below.
     """
     from . import stretch as stretch_mod
 
-    # The PATH ffmpeg here has `atempo` but not `rubberband`, so the binary
-    # must be chosen by the filter the graph needs, not the other way round.
+    # The PATH ffmpeg has `atempo` but not `rubberband`, so the binary is
+    # chosen by the filter the graph needs.
     if stretch_backend == "rubberband":
         ff = stretch_mod.ffmpeg_with_filter("rubberband")
         if ff is None:

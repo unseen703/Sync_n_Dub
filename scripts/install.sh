@@ -132,9 +132,9 @@ fi
 # 3. UI build
 # ---------------------------------------------------------------------------
 if [ "$SKIP_UI" -eq 0 ]; then
-  say "UI build (ui/web2 -> ui/web-dist)"
-  conda run -n dubui npm --prefix ui/web2 ci
-  conda run -n dubui npm --prefix ui/web2 run build
+  say "UI build (ui/web -> ui/web-dist)"
+  conda run -n dubui npm --prefix ui/web ci
+  conda run -n dubui npm --prefix ui/web run build
 else
   say "skipping UI build (--skip-ui)"
 fi

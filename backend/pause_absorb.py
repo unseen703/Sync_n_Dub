@@ -1,49 +1,36 @@
 """Pause absorption: spend a cue's duration deficit on its SILENCE first.
 
-The problem. `timing.plan_naive_slot` fits a TTS clip to its slot with ONE
-tempo over the whole clip -- speech and the clip's own internal silence
-alike. A 6.5 s clip in a 5.0 s slot plays at 1.30x, and that 1.30x is
-charged to every syllable even though ~1 s of the clip is the pauses the
-engine put at commas and sentence breaks. Compression spent on silence is
-inaudible. Compression spent on speech is the thing that makes a dub sound
-rushed. The blob tempo spends it on both at the same rate.
+`timing.plan_naive_slot` fits a TTS clip to its slot with one tempo over the
+whole clip, charging the same compression to every syllable and to the
+pauses the engine put at commas and sentence breaks. Compression spent on
+silence is inaudible; compression spent on speech is what makes a dub sound
+rushed.
 
-So the rule here is one line long:
-
-    SHRINK THE SILENCE TO ITS FLOOR BEFORE TOUCHING THE SPEECH.
-
-On any line with sentence breaks in it that is frequently the whole deficit,
-and the speech renders at exactly 1.0x. Worked shape, slot 5.0 s:
+The rule here: shrink the silence to its floor before touching the speech.
+On any line with sentence breaks that is often the whole deficit, and the
+speech renders at 1.0x. Slot 5.0 s:
 
     clip 6.5 s = 5.5 speech + 1.0 silence   blob 1.30x  ->  speech 1.18x
     clip 6.5 s = 4.7 speech + 1.8 silence   blob 1.30x  ->  speech 1.04x
     clip 6.0 s = 4.5 speech + 1.5 silence   blob 1.20x  ->  speech 1.00x
 
-It runs in the other direction too, and that half matters as much. A clip
-SHORTER than its slot is stretched to fill it today, bounded by
-`--speed-floor` (0.75) -- which CLAUDE.md describes, correctly, as audible
-drawl. Here the pauses GROW first and the speech is left alone, so a short
-line is padded with silence instead of slurred. Speech only slows down once
-the gaps have taken what they can.
+It runs the other way too: a clip SHORTER than its slot grows its pauses
+first and leaves the speech alone, so a short line is padded with silence
+rather than drawled at `--speed-floor`.
 
-Three safety properties, each the answer to a specific way this goes wrong:
+Three safety properties:
 
-  * EVERY FLOOR IS A FLOOR, NOT A TARGET. A sentence boundary collapsed to
-    nothing welds two sentences together and reads as breathless even with
-    the speech at 1.0x -- the problem moved rather than went away. Floors
-    are tiered by gap length (`PAUSE_TIERS`), because the long gaps are both
-    the biggest pool and the ones carrying syntax.
-  * `max_absorb_frac` CAPS WHAT ANY SINGLE GAP MAY GIVE UP even when its
-    floor would allow more. A dub with every pause floored is relentless;
-    human dubs do not do this to the limit, and part of why they read as
-    natural is that they leave the rhythm alone.
-  * A FAILED VAD RETURNS None, never a guess. The caller falls back to the
-    single-blob tempo it would have used anyway, so a missing backend or an
-    unreadable clip costs the optimisation and not the run.
+  * Every floor is a floor, not a target. A sentence boundary collapsed to
+    nothing welds two sentences together and reads as breathless even at
+    1.0x speech. Floors are tiered by gap length (`PAUSE_TIERS`).
+  * `max_absorb_frac` caps what any single gap may give up even when its
+    floor would allow more. A dub with every pause floored is relentless.
+  * A failed VAD returns None, never a guess. The caller falls back to the
+    blob tempo, so a missing backend costs the optimisation, not the run.
 
-Deliberately dependency-free at import: the VAD is reached through a
-function body, so `backend.timing` can import this without pulling
-pyannote/torch into a process that may only be reading a plan back.
+Dependency-free at import: the VAD is reached from inside a function body,
+so `backend.timing` can import this without pulling pyannote/torch into a
+process that may only be reading a plan back.
 """
 from __future__ import annotations
 
@@ -56,12 +43,11 @@ log = logging.getLogger(__name__)
 
 #: Floors by gap length, longest first: `(gap_at_least_s, floor_s)`.
 #:
-#: Tiered by DURATION rather than by punctuation because the VAD path has no
-#: text to read. It is a proxy and a good one: a gap long enough to clear
-#: 0.35 s inside a synthesised clip is overwhelmingly a sentence boundary,
-#: which is the gap a listener actually parses as "a thought ended". The
-#: clause floor is 0.12 s to agree with `timing.plan_pause_aware`'s
-#: `pause_min_keep_s`, which is the same quantity under another name.
+#: Tiered by duration, not punctuation, because the VAD path has no text to
+#: read; a gap past 0.35 s inside a synthesised clip is almost always a
+#: sentence boundary. The clause floor is 0.12 s to agree with
+#: `timing.plan_pause_aware`'s `pause_min_keep_s`, the same quantity under
+#: another name.
 PAUSE_TIERS: Tuple[Tuple[float, float], ...] = (
     (0.35, 0.25),     # sentence boundary
     (0.18, 0.12),     # clause / comma
@@ -71,38 +57,34 @@ PAUSE_TIERS: Tuple[Tuple[float, float], ...] = (
 #: Never take more than this fraction of any single gap, floor or no floor.
 DEFAULT_MAX_ABSORB_FRAC = 0.60
 
-#: A gap may grow by at most this fraction of itself when the clip is SHORTER
-#: than its slot. Unbounded growth puts a three-second hole mid-cue.
+#: A gap may grow by at most this fraction of itself when the clip is
+#: shorter than its slot. Unbounded growth puts a three-second hole mid-cue.
 DEFAULT_MAX_EXPAND_FRAC = 1.50
 
 #: Leading / trailing silence in a TTS clip is a synthesis artifact, not
-#: prosody -- the slot already decides where the cue starts, and the engine's
-#: 180 ms of run-up is not a pause anybody wrote. Trimmed to this.
+#: prosody -- the slot already decides where the cue starts. Trimmed to this.
 EDGE_FLOOR_S = 0.02
 
-#: Energy, not pyannote, and the reason is the material rather than speed: a
-#: TTS clip is clean studio-like audio whose pauses are near-digital silence,
-#: which is exactly the case energy VAD is reliable on and noisy field audio
-#: is not. pyannote would also load a model and hold VRAM in a process that
-#: goes on to run stage 9h, where MuseTalk has ~100 MiB of headroom
-#: (CLAUDE.md §1). `auto` and `pyannote` remain reachable by flag.
+#: Energy, not pyannote: a TTS clip is clean audio whose pauses are
+#: near-digital silence, the case energy VAD is reliable on. pyannote would
+#: also hold VRAM in a process that goes on to run stage 9h, where MuseTalk
+#: has ~100 MiB of headroom. `auto` and `pyannote` remain reachable by flag.
 DEFAULT_VAD_BACKEND = "energy"
 
 #: Gap-detection threshold handed to the VAD. Much smaller than the 0.25 s
-#: `timing.DEFAULT_PAUSE_MIN_S` used for STRUCTURAL source pauses: here every
-#: gap is budget, including the 80 ms ones, and the tiers decide what each is
-#: worth. A 0.25 s threshold would merge the cheap gaps into the speech runs
-#: and hide most of the pool.
+#: `timing.DEFAULT_PAUSE_MIN_S` used for structural source pauses: here every
+#: gap is budget, including the 80 ms ones. A 0.25 s threshold would merge
+#: the cheap gaps into the speech runs and hide most of the pool.
 DEFAULT_MIN_GAP_S = 0.06
 
-#: A speech run shorter than this cannot be rendered -- `backend.stretch`
-#: analysis windows are ~10 ms and `mix._MIN_STRETCH_INPUT_S` is 0.05 -- so
-#: it is merged into its neighbour rather than handed to the renderer.
+#: A speech run shorter than this cannot be rendered (`backend.stretch`
+#: windows are ~10 ms, `mix._MIN_STRETCH_INPUT_S` is 0.05), so it is merged
+#: into its neighbour.
 MIN_RUN_S = 0.10
 
 #: One ffmpeg input and filter chain per piece, against `mix`'s 400-piece
 #: ceiling. 8 runs per cue leaves room for ~50 cues; past that the smallest
-#: gaps are merged away, cheapest first.
+#: gaps are merged away first.
 DEFAULT_MAX_RUNS = 8
 
 
@@ -140,8 +122,8 @@ def pause_floor(gap_s: float, tiers: Sequence[Tuple[float, float]] = PAUSE_TIERS
     """The smallest this gap is allowed to become.
 
     Clamped to the gap itself, so a 0.05 s breath is not handed a 0.08 s
-    floor it already sits under -- which would make it a gap that has to
-    GROW in order to be compressed.
+    floor it already sits under -- which would make it grow in order to be
+    compressed.
     """
     for at_least, floor in tiers:
         if gap_s >= at_least:
@@ -158,12 +140,10 @@ def _merge_runs(
 ) -> Tuple[List[Tuple[float, float]], List[float], int]:
     """Merge across the SMALLEST gaps until the run count and length fit.
 
-    Smallest-first rather than left-to-right: the cheapest gap to lose is the
-    one that was barely there, and merging a 0.4 s sentence boundary to save
-    a filter instance would throw away the structure this module exists to
-    protect. A merged run spans from the first member's start to the last
-    member's end, so the swallowed gap simply becomes speech -- which is what
-    rendering it at the blob tempo did anyway.
+    Smallest-first, not left-to-right: the cheapest gap to lose is the one
+    barely there, and merging a 0.4 s sentence boundary to save a filter
+    instance throws away the structure the tiers protect. A merged run spans
+    first start to last end, so the swallowed gap becomes speech.
     """
     speech = list(speech)
     gaps = list(gaps)
@@ -193,13 +173,12 @@ def detect_pauses(
 ) -> ClipPauses:
     """VAD one TTS clip into speech runs and the gaps between them.
 
-    Gaps are derived from CONSECUTIVE SPEECH SPANS, not from
-    `VadResult.pauses`, which only lists gaps at or above its own
-    `min_pause_s` -- every gap under that threshold would be invisible, and
-    those are a real part of the pool.
+    Gaps come from consecutive speech spans, not `VadResult.pauses`, which
+    lists only gaps at or above its own `min_pause_s` -- the ones under it
+    are a real part of the pool.
 
-    Never raises. An unusable answer comes back with `ok == False` and an
-    `error`, and the caller keeps its blob tempo.
+    Never raises: an unusable answer has `ok == False` and an `error`, and
+    the caller keeps its blob tempo.
     """
     out = ClipPauses(duration_s=float(duration_s or 0.0), backend=backend)
     try:
@@ -267,21 +246,17 @@ def allocate(
     max_expand_frac: float = DEFAULT_MAX_EXPAND_FRAC,
     tiers: Sequence[Tuple[float, float]] = PAUSE_TIERS,
 ) -> Allocation:
-    """Split a duration deficit between silence and speech, SILENCE FIRST.
+    """Split a duration deficit between silence and speech, silence first.
 
     `speech_tempo == 1.0` on the way back means the gaps covered the whole
-    deficit and not one syllable was touched. That is the common case on any
-    line with sentence breaks in it, and it is the entire point of the
-    module -- it is also the thing to assert in a test, because a refactor
-    that quietly re-introduces blob tempo still produces a plausible plan.
+    deficit and no syllable was touched -- the common case on any line with
+    sentence breaks in it, and the thing to assert in a test, since a
+    refactor that re-introduces blob tempo still produces a plausible plan.
 
-    Gaps give up time in PROPORTION TO WHAT EACH CAN SPARE -- its distance
-    to its own floor, capped by `max_absorb_frac` -- so every gap ends the
-    same fraction of the way to its floor. That is not the same as the same
-    fraction of itself: a gap already near its floor has less to give and
-    gives less. Draining by LENGTH instead would push the short gaps through
-    their floors while the long ones still had room, which is how the
-    sentence structure the tiers exist to protect gets flattened.
+    Gaps give up time in proportion to what each can spare -- its distance to
+    its own floor, capped by `max_absorb_frac` -- so every gap ends the same
+    fraction of the way to its floor. Draining by LENGTH instead pushes the
+    short gaps through their floors while the long ones still have room.
     """
     gaps = [max(0.0, float(g)) for g in gaps]
     pause_s = sum(gaps)
@@ -323,9 +298,8 @@ def allocate(
 
     # ---- expand: the clip is shorter than its slot ------------------------
     #
-    # Pauses grow BEFORE speech slows. The alternative -- today's behaviour --
-    # is a 0.75x drawl over the whole clip to fill a hole that silence would
-    # have filled without anyone noticing.
+    # Pauses grow BEFORE speech slows, so a short line is padded with silence
+    # rather than drawled at 0.75x.
     want = -need
     room = [g * max_expand_frac for g in gaps]
     pool = sum(room)
@@ -347,8 +321,8 @@ def allocate(
         alloc.speech_tempo = min_speech_tempo
         alloc.speech_capped = True
         # What neither the gaps nor the floor could absorb stays a real
-        # pause at the end of the slot. Reported, never hidden -- same
-        # contract as `plan_naive_slot`'s `unfilled_s`.
+        # pause at the end of the slot, reported as `plan_naive_slot`'s
+        # `unfilled_s` is.
         alloc.unfilled_s = round(remaining - (speech_s / min_speech_tempo - speech_s), 6)
         if alloc.unfilled_s < 0:
             alloc.unfilled_s = 0.0
@@ -365,15 +339,14 @@ def allocate(
 class SegmentAbsorb:
     """Pieces for one cue, as plain tuples plus the qc to record.
 
-    Tuples rather than `timing.Piece` on purpose: `backend.timing` imports
-    THIS module, so handing back its own dataclass would make the import
-    circular. The caller maps four floats onto a Piece, which is the only
-    coupling between the two.
+    Tuples rather than `timing.Piece`: `backend.timing` imports this module,
+    so returning its dataclass would make the import circular. The caller
+    maps the four floats onto a Piece.
     """
 
     pieces: List[Tuple[float, float, float, float]] = field(default_factory=list)
     #: (src_start, src_end, dst_start, local_tempo) -- clip-relative src,
-    #: absolute output-timeline dst, exactly `Piece`'s convention.
+    #: absolute output-timeline dst, matching `Piece`'s convention.
     qc: Dict[str, object] = field(default_factory=dict)
 
 
@@ -396,14 +369,12 @@ def plan_segment(
     """VAD one clip, allocate its deficit, and lay the pieces on the timeline.
 
     Returns None when the clip cannot be used this way -- no VAD backend, no
-    speech found, or a single run with no gaps to spend. The caller then does
-    exactly what it did before, so this is never the difference between a dub
-    and no dub.
+    speech found, or a single run with no gaps to spend. The caller falls
+    back to the blob tempo, so this is never the difference between a dub and
+    no dub.
 
-    A SINGLE RUN WITH NO GAPS IS A REFUSAL, not a one-piece plan: there is no
-    silence to absorb, so the answer is identical to the blob tempo and
-    returning it here would only add a VAD call and a second code path to
-    every continuous line.
+    A single run with no gaps is a refusal, not a one-piece plan: with no
+    silence to absorb the answer equals the blob tempo anyway.
     """
     cp = detect_pauses(wav, duration_s=raw_s, backend=vad_backend,
                        min_gap_s=min_gap_s, min_run_s=min_run_s,
@@ -414,15 +385,13 @@ def plan_segment(
     if len(cp.speech) < 2 and not (trim_edges and (cp.lead_s + cp.tail_s) > 0.05):
         return None
 
-    # Edge silence is recovered outright. It is not prosody -- the slot
-    # already decides where the cue starts -- and leaving it in means paying
-    # speech compression for the engine's run-up.
+    # Edge silence is recovered outright: the slot already decides where the
+    # cue starts, so leaving it in pays speech compression for the engine's
+    # run-up.
     #
-    # The kept edges come OUT OF THE BUDGET before allocation rather than
-    # being added to the timeline afterwards. Handing `allocate` the full
-    # target and then prepending 20 ms would overshoot the slot by exactly
-    # that much on every cue, which is the kind of error that accumulates
-    # into a visible drift over a few hundred of them.
+    # The kept edges come OUT OF THE BUDGET before allocation. Handing
+    # `allocate` the full target and prepending 20 ms afterwards overshoots
+    # the slot on every cue, which accumulates into visible drift.
     spans = list(cp.speech)
     lead_keep = min(cp.lead_s, EDGE_FLOOR_S) if trim_edges else cp.lead_s
     tail_keep = min(cp.tail_s, EDGE_FLOOR_S) if trim_edges else cp.tail_s

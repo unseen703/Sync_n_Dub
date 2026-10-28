@@ -1,82 +1,62 @@
-"""The `--speed-mode segment` knobs, in one place.
+"""The `--speed-mode` knob values, shared by the CLI and the UI.
 
-Two callers set the same four pipeline arguments and used to do it from two
-hand-maintained copies: `backend.cli.resolve_speed_setup` (from an argparse
-namespace) and `ui.presets.UI_TIMING_DEFAULTS` (from nothing — a literal
-dict). The copy was deliberate and documented, because the resolver needs a
-namespace the UI path does not have; `tests/test_speed_mode.py` existed to
-catch the two drifting apart.
+`backend.cli.resolve_speed_setup` builds these from an argparse namespace;
+`ui.presets` calls the same functions with no arguments and gets the
+argparse defaults, so a bare CLI run and a UI run pace identically by
+construction.
 
-This is the shared half: the values and the reasoning, parameterised by the
-four bounds that have flags. The CLI passes what the operator typed, the UI
-passes nothing and gets the defaults — which are the argparse defaults, so
-"what the UI does" and "what a bare CLI run does" are the same thing by
-construction rather than by a test.
+Deliberately dependency-free: `ui/presets.py` is imported when the web
+server starts, and routing this through `backend.cli` would drag argparse
+and all seven model registries into that import.
 
-Deliberately dependency-free. `ui/presets.py` is imported when the web server
-starts and pulls in nothing heavier than `os` and `typing`; routing it
-through `backend.cli` would drag argparse and all seven model registries into
-that import.
-
-The defaults mirror `backend/cli.py`'s `--speed-*` arguments. They are
-repeated as keyword defaults here rather than read back out of the parser
-because building a parser to ask it a question is the heavier coupling, and
+The keyword defaults mirror `backend/cli.py`'s `--speed-*` arguments;
 `tests/test_speed_mode.py` pins the two together.
 """
 from __future__ import annotations
 
 from typing import Any, Dict
 
-#: Default speed-UP bound (`--speed-cap`). Raised from 1.5 on 2026-10-22:
-#: Hindi TTS runs 1.21–1.65x longer than the English it covers, so 1.5 sat on
-#: top of that range with no headroom — job 20261021-114009 overran its slot
-#: on 4 of 5 segments at ratios 1.22 / 1.17 / 1.31.
+#: Default speed-UP bound (`--speed-cap`). Hindi TTS runs 1.21-1.65x longer
+#: than the English it covers, so 1.5 sat on top of that range with no
+#: headroom.
 DEFAULT_SPEED_CAP = 1.8
 
-#: Default slow-DOWN bound (`--speed-floor`). NOT 1/1.8. A symmetric floor
-#: would slow a short line to 0.56x — nearly double length — to fill its
-#: slot, which is audible as drawl. What this floor cannot absorb stays a
-#: real pause and is reported as `unfilled_slot_s` rather than hidden in the
-#: clip.
+#: Default slow-DOWN bound (`--speed-floor`). Not 1/1.8: a symmetric floor
+#: would slow a short line to 0.56x to fill its slot, which is audible as
+#: drawl. What it cannot absorb stays a real pause and is reported as
+#: `unfilled_slot_s`.
 DEFAULT_SPEED_FLOOR = 0.75
 
 #: Any margin is itself a pause, so the default is none.
 DEFAULT_SLOT_MARGIN = 0.0
 
-#: A source gap at least this long is a wall the shift-forward cursor may not
-#: cross (`--speed-gap-barrier`).
+#: A source gap at least this long is a wall the shift-forward cursor may
+#: not cross (`--speed-gap-barrier`).
 DEFAULT_GAP_BARRIER = 1.0
 
-#: Seconds of the FOLLOWING gap a cue may take to avoid speeding up
-#: (`--speed-borrow-gap`). **0.0 = off, and that default is deliberate**:
-#: a non-zero value changes the tempo of every cue that has a gap after it,
-#: so every existing run and every pinned test number would move. Turn it
-#: on, measure, then decide whether it becomes the default. 0.3-0.5 is the
-#: range the prosodic-alignment literature operates in (Virkar et al. 2022
-#: relax phrase boundaries by up to one 300 ms minimum-silence interval).
+#: Seconds of the following gap a cue may take to avoid speeding up
+#: (`--speed-borrow-gap`). 0.0 = off, deliberately: a non-zero value moves
+#: the tempo of every cue with a gap after it, so every existing run and
+#: pinned test number would change. 0.3-0.5 is the range the
+#: prosodic-alignment literature uses (Virkar et al. 2022).
 DEFAULT_BORROW_GAP = 0.0
 
 #: Of the gap that is there, what fraction a cue may take
-#: (`--speed-borrow-frac`). Half, because the gap is shared property: take
-#: all of it and the next cue starts with no cushion, which restarts the
-#: very cascade the barrier exists to stop.
+#: (`--speed-borrow-frac`). Half, so the next cue keeps a cushion.
 DEFAULT_BORROW_FRAC = 0.5
 
 #: Spend a cue's deficit on its own silence before its speech
-#: (`--absorb-pauses`). OFF by default for the same reason as the borrow:
-#: it changes what every multi-run cue renders at.
+#: (`--absorb-pauses`). Off by default: it changes what every multi-run cue
+#: renders at.
 DEFAULT_ABSORB_PAUSES = False
 
 #: Cap on what any single gap may give up, floor or no floor
-#: (`--absorb-max-frac`). See `backend.pause_absorb` -- a dub with every
-#: pause floored is relentless, and leaving the rhythm alone is part of why
-#: human dubs read as natural.
+#: (`--absorb-max-frac`). A dub with every pause floored is relentless.
 DEFAULT_ABSORB_MAX_FRAC = 0.60
 
 #: VAD backend for pause detection (`--absorb-vad-backend`). Energy rather
-#: than pyannote because a TTS clip is clean audio with near-digital silence
-#: in its gaps -- energy's good case -- and because pyannote would hold VRAM
-#: into stage 9h. See `backend.pause_absorb.DEFAULT_VAD_BACKEND`.
+#: than pyannote: a TTS clip is clean audio with near-digital silence in its
+#: gaps, and pyannote would hold VRAM into stage 9h.
 DEFAULT_ABSORB_VAD_BACKEND = "energy"
 
 
@@ -97,23 +77,20 @@ def segment_timing_params(
         "max_tempo": speed_cap,
         "min_tempo": speed_floor,
         "safety_margin_s": slot_margin,
-        # Both default to "off", so this dict is unchanged for every caller
-        # that does not ask -- which is what keeps the UI and a bare CLI run
-        # byte-identical to what they rendered before these landed.
+        # Both default to "off", so this dict is unchanged for any caller
+        # that does not ask.
         "borrow_gap_s": borrow_gap,
         "borrow_frac": borrow_frac,
         "absorb_pauses": absorb_pauses,
         "absorb_max_frac": absorb_max_frac,
         "absorb_vad_backend": absorb_vad_backend,
-        # Simultaneous speech stays simultaneous, and the cascade is not
-        # allowed to walk a line out over the music. Both are corrections
-        # rather than preferences, so neither has a flag of its own; the
-        # gap threshold does, because what counts as "a gap" is material.
+        # Simultaneous speech stays simultaneous, and the cascade may not
+        # walk a line out over the music. Corrections, not preferences, so
+        # neither has a flag; the gap threshold does.
         "overlap_policy": "keep",
         "gap_barrier_s": gap_barrier,
         # Honour a per-segment target written by stage 9c or by
-        # `backend.edits.set_speed`; without this they are silently
-        # ignored in this mode.
+        # `backend.edits.set_speed`; without this they are ignored here.
         "use_target_duration": True,
     }
 
@@ -132,9 +109,8 @@ def segment_timing_kwargs(
 ) -> Dict[str, Any]:
     """Every pipeline kwarg segment mode sets, including the producer.
 
-    `tts_apply_stretch=False` is load-bearing: the TTS stage must NOT stretch
-    as well, or every clip is re-timed twice — once into its slot here, once
-    into the same slot there.
+    `tts_apply_stretch=False` is load-bearing: if the TTS stage stretches
+    too, every clip is re-timed twice into the same slot.
     """
     return {
         "timing_producer": "naive_slot",
@@ -150,11 +126,9 @@ def segment_timing_kwargs(
     }
 
 
-#: `--speed-mode warp` defaults. The bounds are deliberately tighter than
-#: segment mode's: this path reports the SPEECH rate rather than a blob rate,
-#: so 1.45 means something a listener hears, and 1.80 is the line past which
-#: the answer is to shorten the text (`--condense-speed-cap`) rather than
-#: push the mixer harder.
+#: `--speed-mode warp` defaults. Tighter than segment mode's because this
+#: path reports the SPEECH rate rather than a blob rate: past 1.80 the answer
+#: is to shorten the text (`--condense-speed-cap`), not push the mixer.
 DEFAULT_WARP_STEP = 0.30       # max relative tempo change between adjacent cues
 DEFAULT_WARP_TEMPO_MAX = 1.45
 DEFAULT_WARP_TEMPO_HARD_MAX = 1.80
@@ -162,8 +136,7 @@ DEFAULT_WARP_RAMP_S = 0.18
 DEFAULT_WARP_ISLAND_GAP = 1.00
 # Keep diarized labels in one island so the planner can smooth across a
 # speaker change. True leaves single-cue islands with no neighbour to ramp
-# into, which is what the 2026-10-25 A/B showed as the "no audible shape"
-# failure mode of the warp arm.
+# into, which reads as no audible shape at all.
 DEFAULT_WARP_BREAK_SPEAKER = False
 
 
@@ -173,10 +146,9 @@ def warp_timing_kwargs(
     step: float = DEFAULT_WARP_STEP,
     tempo_max: float = DEFAULT_WARP_TEMPO_MAX,
     tempo_hard_max: float = DEFAULT_WARP_TEMPO_HARD_MAX,
-    # NOT `DEFAULT_BORROW_GAP`: that is 0.0 because borrowing is opt-in on the
-    # segment path, whereas here the planner borrows as part of the solve and
-    # 0.0 would simply forbid it. 0.30 s is the Virkar et al. relaxation
-    # budget this is modelled on.
+    # Not `DEFAULT_BORROW_GAP` (0.0): borrowing is opt-in on the segment
+    # path, but here the planner borrows as part of the solve, so 0.0 would
+    # forbid it outright.
     pause_borrow: float = 0.30,
     island_gap: float = DEFAULT_WARP_ISLAND_GAP,
     ramp_s: float = DEFAULT_WARP_RAMP_S,
@@ -187,10 +159,10 @@ def warp_timing_kwargs(
 ) -> Dict[str, Any]:
     """Every pipeline kwarg `--speed-mode warp` sets.
 
-    `mix_clip_source="warped"` is load-bearing and pairs with the producer:
-    the plan's Pieces all carry `local_tempo = 1.0` because the stretching
-    already happened, so pointing the mix at `raw` would place unstretched
-    clips at planned positions and the dub would drift immediately.
+    `mix_clip_source="warped"` is load-bearing: the plan's Pieces all carry
+    `local_tempo = 1.0` because the stretching already happened, so pointing
+    the mix at `raw` places unstretched clips at planned positions and the
+    dub drifts.
 
     `tts_apply_stretch=False` for the same reason as segment mode -- the TTS
     stage must not re-time a clip this producer is about to warp.
@@ -238,8 +210,8 @@ def validate_warp_bounds(step: float, tempo_max: float,
 def validate_segment_bounds(speed_cap: float, speed_floor: float) -> None:
     """Raise SystemExit on a cap or floor that cannot mean what it says.
 
-    Lives beside the values rather than in the CLI so the UI gets the same
-    refusal if it ever starts taking these from an operator.
+    Lives beside the values rather than in the CLI, so the UI gets the same
+    refusal if it ever takes these from an operator.
     """
     if speed_cap <= 1.0:
         raise SystemExit(
@@ -258,7 +230,7 @@ def validate_absorb_bounds(
     """Raise SystemExit on a borrow or absorption bound that cannot hold.
 
     Separate from `validate_segment_bounds` so the two can be called
-    independently, and keyword-free so the CLI reads the same way for both.
+    independently.
     """
     if borrow_gap < 0.0:
         raise SystemExit(

@@ -1,54 +1,39 @@
 """The Liao et al. ASD family: Light-ASD (CVPR 2023) and LR-ASD (IJCV 2025).
 
-Two registered models, one implementation. `Light-ASD/ASD.py` and
-`LR-ASD/ASD.py` are interchangeable from an adapter's side -- same
-`class ASD(nn.Module)` with an all-defaulted `__init__`, same
-`from loss import lossAV, lossV`, same three `forward_*` methods, same
-`loadParameters` stripping `module.`, same `weight/` folder shipping an
-AVA checkpoint beside `finetuning_TalkSet.model`. Everything that changed
-between the two papers -- better encoders, a channel-attention fusion
-module, reworked temporal modelling -- is INSIDE `ASD_Model`, behind
-identical names. So `LRASD` subclasses `LightASD` and overrides five
-constants, and there is no second scoring path to keep in step.
+Two registered models, one implementation. Both clones expose the same
+`class ASD(nn.Module)` with an all-defaulted `__init__`, the same three
+`forward_*` methods, the same `loadParameters` stripping `module.`, and the
+same `weight/` folder; everything that changed between the papers is inside
+`ASD_Model` behind identical names. So `LRASD` subclasses `LightASD` and
+overrides five constants.
 
 Both take the same two inputs as TalkNet -- 112x112 grayscale crops and
 13-d MFCC -- so everything before the first `forward_*` call comes from
 `_mfcc_av`.
 
-**Why have either when TalkNet already works.** Not for the multi-face
-case: both score each candidate face in isolation (single-candidate input
-is contribution (a) of the CVPR paper), so neither can compare two faces
-any more than TalkNet can, and Light-ASD measures WORSE when they compete
--- 16.73 competing-speaker false alarms against TalkNet's 13.84 on
-MSDWild many.val. What they buy here is size and provenance:
+Neither helps with the multi-face case: both score each candidate face in
+isolation, and Light-ASD measures worse than TalkNet when faces compete
+(16.73 vs 13.84 competing-speaker false alarms on MSDWild many.val). What
+they buy is size and provenance:
 
-  - 0.84M params / 0.51G FLOPs (LR-ASD) or 1.0M / 0.6G (Light-ASD),
-    against TalkNet's 15.7M / 1.5G. Stage 6 scores on the GPU in the same
-    process that later asks `free_devices` whether a card is free, and
-    that check measures FOREIGN memory -- so everything this stage holds
-    counts as our own context against the lip-sync stage that follows on
-    ~100 MiB of headroom.
+  - 0.84M params / 0.51G FLOPs (LR-ASD) or 1.0M / 0.6G (Light-ASD) against
+    TalkNet's 15.7M / 1.5G. Stage 6 scores on the GPU in the same process
+    that later asks `free_devices` whether a card is free, and that check
+    measures FOREIGN memory, so everything this stage holds counts against
+    the lip-sync stage that follows on ~100 MiB of headroom.
   - 94.45 / 94.06 AVA val mAP against TalkNet's 92.3.
-  - The weights ship INSIDE the clone (`weight/`), so there is no gdrive
+  - The weights ship inside the clone (`weight/`), so there is no gdrive
     fetch to fail the way TalkNet's does.
 
-**Prefer `lr_asd` over `light_asd`.** It is the same authors' extended
-version and dominates on every published axis: 20% fewer parameters and
-FLOPs, +0.39 AVA val mAP, and +5.0 points of Columbia F1 on the AVA
-weights (86.1 vs 81.1) -- that last one being the generalisation axis,
-which is the one that matters on unseen footage. `light_asd` stays
-registered so the two can be compared on real material rather than on a
-paper table.
+Prefer `lr_asd`: 20% fewer parameters and FLOPs, +0.39 AVA val mAP, and
++5.0 Columbia F1 on the AVA weights (86.1 vs 81.1).
 
-**The default checkpoint is the TalkSet fine-tune, not the AVA one**, for
-both, and that is a deliberate departure from upstream's default. AVA is
-built from movies that include dubbed footage, and an AVA-trained
-detector fires on ~43% of frames in dubbed video where the correct answer
-is zero (Kim et al., Interspeech 2021, measured against 24% for an
-ASW-trained model). This pipeline manufactures exactly that condition.
-The TalkSet weights also score better on Columbia either way (96.4 vs
-86.1 for LR-ASD). Set `<PREFIX>_CHECKPOINT=weight/pretrain_AVA.model` to
-compare.
+The default checkpoint is the TalkSet fine-tune, not upstream's AVA one.
+AVA includes dubbed footage, and an AVA-trained detector fires on ~43% of
+frames in dubbed video where the answer is zero (Kim et al., Interspeech
+2021, vs 24% for an ASW-trained model) -- the condition this pipeline
+manufactures. TalkSet also scores better on Columbia (96.4 vs 86.1 for
+LR-ASD). Set `<PREFIX>_CHECKPOINT=weight/pretrain_AVA.model` to compare.
 
 If a clone exposes different symbols, override via
 `<PREFIX>_MODEL_MODULE` / `<PREFIX>_MODEL_CLASS` rather than editing this
@@ -81,9 +66,9 @@ log = logging.getLogger(__name__)
 class LightASD(BaseASD):
     """Light-ASD (Liao et al., CVPR 2023). Also the base for `LRASD`.
 
-    The five class attributes below are everything that differs between
-    the two upstreams. A subclass overriding them gets the whole scoring
-    path for free -- see the module docstring for why that is safe.
+    The five class attributes below are everything that differs between the
+    two upstreams, so a subclass overriding them inherits the whole scoring
+    path.
     """
 
     name = "light_asd"
@@ -108,14 +93,11 @@ class LightASD(BaseASD):
         window_frames: int = 150,
     ):
         super().__init__(device=device)
-        # Same resolution rule as TalkNet and the lip-sync upstreams: the
-        # vendored path first, `third_party/` as a fallback for a checkout
-        # where the move has not been run, and an env var pointing at a
-        # path that no longer exists treated as a stale pin rather than an
-        # instruction. Neither of these two has ever lived in
-        # `third_party/` on this host -- both are cloned straight to the
-        # vendor root -- so `legacy` is passed for symmetry with TalkNet
-        # and for anyone who put one there by hand before reading this.
+        # Same resolution rule as TalkNet and the lip-sync upstreams:
+        # vendored path first, `third_party/` as a fallback, and an env var
+        # pointing at a missing path treated as a stale pin rather than an
+        # instruction. `legacy` is passed for symmetry; neither clone has
+        # lived in `third_party/` on this host.
         from .._vendor import resolve_vendor_repo
         self.repo_path = resolve_vendor_repo(
             self.vendor_name, f"{self.env_prefix}_REPO",
@@ -126,9 +108,9 @@ class LightASD(BaseASD):
         env_ckpt = os.getenv(f"{self.env_prefix}_CHECKPOINT")
         if checkpoint or env_ckpt:
             ck = Path(checkpoint or env_ckpt).expanduser()
-            # A relative pin is relative to the CLONE, because that is where
-            # upstream keeps its weights -- `weight/finetuning_TalkSet.model`
-            # in `.env` should keep meaning that after a vendor move.
+            # A relative pin is relative to the CLONE, where upstream
+            # keeps its weights, so `weight/finetuning_TalkSet.model` in
+            # `.env` keeps meaning that after a vendor move.
             if not ck.is_absolute() and not ck.exists():
                 ck = self.repo_path / ck
             if not ck.exists():
@@ -141,11 +123,10 @@ class LightASD(BaseASD):
 
         self.crop_size = crop_size
         self.target_fps = target_fps
-        # Same bound, same reason, same blank-means-default rule as
-        # `TALKNET_WINDOW_FRAMES`. These encoders are cheaper per frame
-        # than TalkNet's, so 150 frames is conservative here rather than
-        # tight -- but the activation still scales linearly with track
-        # length, which is the property that produced the stage-6 OOM.
+        # Same bound and blank-means-default rule as
+        # `TALKNET_WINDOW_FRAMES`. These encoders are cheaper per frame than
+        # TalkNet's, but the activation still scales linearly with track
+        # length, which is what produced the stage-6 OOM.
         self.window_frames = int(os.getenv(f"{self.env_prefix}_WINDOW_FRAMES")
                                  or window_frames)
         self._model = None
@@ -169,12 +150,10 @@ class LightASD(BaseASD):
                 "shallow or incomplete rather than that a download is owed."
             )
         # Upstream imports its own submodules as `model.Model`, `loss`, so
-        # the repo root has to be importable as a top-level path.
+        # the repo root must be importable as a top-level path.
         #
-        # Both clones expose a top-level `ASD.py` and a `loss.py`, so with
-        # BOTH on sys.path the first one inserted wins for every later
-        # import -- running light_asd and lr_asd in one process would
-        # score the second with the first one's modules, silently. Hence
+        # Both clones expose a top-level `ASD.py` and `loss.py`, so with both
+        # on sys.path the first inserted wins for every later import. Hence
         # the guard: one Liao-family model per process.
         self._refuse_sibling_on_path()
         if str(self.repo_path) not in sys.path:
@@ -186,16 +165,13 @@ class LightASD(BaseASD):
         import torch
         mod = importlib.import_module(model_module)
         ASD = getattr(mod, model_class)
-        # `__init__(self, lr=0.001, lrDecay=0.95, **kwargs)` upstream, in
-        # both repos -- every argument defaulted, so the bare call is what
-        # their own Columbia_test.py does.
+        # `__init__(self, lr=0.001, lrDecay=0.95, **kwargs)` in both
+        # repos -- all defaulted, so the bare call matches Columbia_test.py.
         model = ASD()
 
-        # Upstream's own `loadParameters` strips a `module.` prefix (not the
-        # `model.` TalkNet strips) and skips keys that are absent or
-        # mis-shaped. Using it rather than reimplementing means a checkpoint
-        # layout change upstream is their problem, not a silent
-        # `strict=False` load onto a randomly-initialised network here.
+        # Upstream's own `loadParameters` strips a `module.` prefix (not
+        # the `model.` TalkNet strips) and skips absent or mis-shaped keys.
+        # Using it keeps a checkpoint layout change upstream's problem.
         loader = getattr(model, "loadParameters", None)
         if callable(loader):
             loader(str(self.checkpoint))
@@ -205,8 +181,8 @@ class LightASD(BaseASD):
                 state = state["model_state_dict"]
             clean = {k.replace("module.", ""): v for k, v in state.items()}
             missing = model.load_state_dict(clean, strict=False)
-            # strict=False is a fallback path, so say what it let through --
-            # a wholly unmatched state dict otherwise loads "successfully"
+            # strict=False is a fallback, so say what it let through: a
+            # wholly unmatched state dict otherwise loads "successfully"
             # and scores noise.
             if getattr(missing, "missing_keys", None):
                 log.warning("%s: %d key(s) missing from the checkpoint; "
@@ -223,26 +199,19 @@ class LightASD(BaseASD):
     def _refuse_sibling_on_path(self) -> None:
         """Refuse if a DIFFERENT clone's `ASD` module is already imported.
 
-        Both repos ship a top-level `ASD.py`, `loss.py` and `model/`
-        package under identical names, and Python caches by module NAME --
-        so the second model loaded in one process silently gets the
-        first one's modules and scores with the wrong network. Stage 6
-        runs one model per process, so this guards a future caller that
-        sweeps both rather than anything today.
+        Both repos ship a top-level `ASD.py`, `loss.py` and `model/` under
+        identical names and Python caches by module name, so the second
+        model loaded in one process silently gets the first one's modules.
 
-        **The check is on the loaded module's FILE, not on `sys.path`.**
-        A first attempt scanned the path and was wrong twice over: a path
-        entry outlives the load that added it, so it refused a model
-        nothing had actually imported, and it had no way to tell
-        re-loading the SAME model (legal) from loading the other one
-        (not). `sys.modules["ASD"].__file__` answers the real question
-        directly.
+        The check is on the loaded module's FILE, not on `sys.path`: a path
+        entry outlives the load that added it, and it cannot tell re-loading
+        the same model (legal) from loading the other one (not).
         """
         mod = sys.modules.get("ASD")
         origin = getattr(mod, "__file__", None)
         if not origin:
             # Absent, or a namespace/stub with no file -- nothing to
-            # conflict with, and guessing would refuse a legitimate load.
+            # conflict with.
             return
         loaded_from = Path(origin).resolve().parent
         if loaded_from == self.repo_path.resolve():
@@ -325,15 +294,13 @@ class LightASD(BaseASD):
                             scores=np.zeros((track.num_frames,),
                                             dtype=np.float32))
 
-        # fps IS passed here, unlike the TalkNet adapter: this family's own
-        # dataLoader scales the MFCC window by 25/fps so the audio grid
-        # lines up with the visual stream at any source rate.
+        # fps IS passed here, unlike the TalkNet adapter: this family's
+        # dataLoader scales the MFCC window by 25/fps.
         feats = mfcc_features(clip_audio, fps=eff_fps)
 
         bounds = window_bounds(n_frames, self.window_frames)
-        # The MFCC grid is a fixed 100 Hz regardless of the window scaling
-        # above -- scaling changes how much audio each row COVERS, not how
-        # many rows per second come out.
+        # The MFCC grid is a fixed 100 Hz whatever the window scaling
+        # above: scaling changes what each row COVERS, not the row rate.
         mfcc_per_frame = MFCC_HZ / eff_fps
 
         chunks: List[np.ndarray] = []
@@ -344,15 +311,14 @@ class LightASD(BaseASD):
                 a1 = min(len(feats), int(round(f1 * mfcc_per_frame)))
                 if a1 - a0 < 4:
                     # The audio encoder downsamples by 4; with fewer rows
-                    # than that it emits nothing, so the window could not
-                    # contribute scores however it was run.
+                    # it emits nothing.
                     chunks.append(np.zeros((want,), dtype=np.float32))
                     continue
                 sc = self._score_window(np.asarray(feats[a0:a1]),
                                         crops[f0:f1], torch)
                 if len(sc) < want:
-                    # Hold the last value rather than let a short window
-                    # shift every LATER frame's score off its own frame.
+                    # Hold the last value, or a short window shifts every
+                    # LATER frame's score off its own frame.
                     sc = np.concatenate([sc, np.full(
                         want - len(sc), sc[-1] if len(sc) else 0.0,
                         dtype=np.float32)])
@@ -376,24 +342,19 @@ class LightASD(BaseASD):
     ) -> np.ndarray:
         """One forward pass over a bounded slice: one score per crop.
 
-        The caller holds the `torch.no_grad()` -- it spans every window.
+        The caller holds the `torch.no_grad()`; it spans every window.
 
-        Two differences from the TalkNet path, both from reading upstream
-        rather than assuming the architectures match:
+        Two differences from the TalkNet path:
 
-        1. **There is no cross-attention.** This family goes frontends ->
-           `forward_audio_visual_backend(embedA, embedV)` directly.
-        2. **That backend is `x = x1 + x2`.** Element-wise addition, so the
-           length trim is load-bearing: a mismatch raises on the add rather
-           than degrading. `align_pair` does it for every adapter here.
+        1. No cross-attention -- frontends go straight to
+           `forward_audio_visual_backend(embedA, embedV)`.
+        2. That backend is `x = x1 + x2`, so the `align_pair` length trim is
+           load-bearing: a mismatch raises on the add rather than degrading.
 
-        Scoring goes through `lossAV.FC` + softmax rather than
-        `lossAV.forward(out, labels=None)`. Upstream's own eval path passes
-        labels and unpacks a 4-tuple, while the `labels=None` branch returns
-        a bare numpy vector of UNNORMALISED logits (`x[:,1]`, no softmax) --
-        which would put this adapter's output on a different scale from
-        TalkNet's, and `ASDResult` promises [0, 1] so the Hungarian solver
-        has one metric to compare on.
+        Scoring goes through `lossAV.FC` + softmax, not
+        `lossAV.forward(out, labels=None)`, whose `labels=None` branch
+        returns unnormalised logits. `ASDResult` promises [0, 1] so the
+        Hungarian solver has one metric to compare on.
         """
         audio_feat = torch.FloatTensor(np.asarray(feats))
         video_feat = torch.FloatTensor(np.asarray(crops))
@@ -418,16 +379,11 @@ class LightASD(BaseASD):
 class LRASD(LightASD):
     """LR-ASD (Liao et al., IJCV 2025) -- the extended Light-ASD.
 
-    Identical upstream API, so this inherits the entire scoring path and
-    overrides only where the clone and its weights live. See the module
-    docstring for the evidence that the API really is identical.
+    Identical upstream API, so this inherits the whole scoring path and
+    overrides only where the clone and its weights live.
 
-    Measured against Light-ASD by its own authors: 0.84M params and 0.51G
-    FLOPs (both ~20% lower), 94.45% AVA val mAP against 94.06%, and 86.1%
-    avg Columbia F1 on the AVA weights against 81.1%. The paper also
-    reports cross-dataset SOTA on Talkies, Columbia and RealVAD with no
-    fine-tuning, which is the property worth having here -- this corpus
-    looks nothing like AVA.
+    Against Light-ASD: 0.84M params / 0.51G FLOPs (~20% lower), 94.45% AVA
+    val mAP vs 94.06%, 86.1% avg Columbia F1 on the AVA weights vs 81.1%.
     """
 
     name = "lr_asd"

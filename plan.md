@@ -551,7 +551,7 @@ Removed registry entries, so the README block is out of date on them: `wav2lip_h
 | `spec.py` | The job's settings as plain label, value and hint lines, plus the raw config for an "Advanced" view |
 | `cost.py` | Turns an edit's dirty stages into what re-runs, what doesn't, and an estimated time |
 
-`ui/auth.py` is deleted in the working tree. The frontends (`ui/web/`, `ui/web2/`, `ui/web-dist/`) were not read, and there may be other `ui/` modules I haven't seen.
+`ui/auth.py` is deleted in the working tree. The frontends (`ui/web/`, `ui/web-dist/`) were not read, and there may be other `ui/` modules I haven't seen.
 
 ### `tests/`
 

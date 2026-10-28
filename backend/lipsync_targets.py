@@ -1,39 +1,26 @@
-"""ASD-gated per-frame lip-sync targets (Route A).
+"""ASD-gated per-frame lip-sync targets.
 
-MuseTalk has NO idea which face is speaking. `get_detections_for_batch` takes
-the first S3FD detection (`d = d[0]`, musetalk/utils/face_detection/api.py:80 --
-the same line CLAUDE.md records for Wav2Lip, because both vendor the same
-face_detection lineage), and the 68 landmarks that actually shape the crop come
-from DWPose `keypoints[0]`: instance 0 of a WHOLE-FRAME pose estimate that is
-never matched to that box. On a multi-face shot the box and the landmarks can
-describe different people, and neither is necessarily the one talking.
+Lip-sync models do not pick the speaking face: MuseTalk takes the first S3FD
+detection (`d = d[0]`) and shapes its crop from DWPose `keypoints[0]`, an
+unrelated whole-frame instance. This module picks the face and the box on our
+side and hands the result over through MuseTalk's own `--use_saved_coord`
+pickle, so nothing upstream is forked.
 
-This module answers both halves on our side and hands MuseTalk the result
-through its own `--use_saved_coord` pickle, so nothing upstream is forked:
+  * `speaking_track_per_frame` folds TalkNet scores over the tracker's face
+    tracks into one chosen track per frame.
+  * `musetalk_box` reproduces `get_landmark_and_bbox`'s arithmetic from
+    InsightFace `landmark_3d_68` run on that track's box.
 
-  1. **Who** -- `speaking_track_per_frame` folds TalkNet's per-frame scores
-     over the tracker's face tracks into one chosen track per frame.
-  2. **Where** -- `musetalk_box` reproduces `get_landmark_and_bbox`'s
-     arithmetic exactly, from InsightFace's `landmark_3d_68` instead of
-     DWPose, run on the chosen track's own box.
+`landmark_3d_68` follows the same iBUG-68 order MuseTalk indexes, so the
+indices transfer 1:1. `2d106det` is a different topology and is not used here.
 
-**The landmark swap is verified, not assumed.** MuseTalk indexes
-`face_land_mark[28..30]` -- the nose bridge in iBUG-68 order -- out of DWPose's
-`keypoints[23:91]`. InsightFace's `landmark_3d_68` was checked against the same
-convention on this host: points 27->30 descend the bridge monotonically, point
-8 is the lowest point (the chin) and 48/54 are the mouth corners. The indices
-therefore transfer 1:1. `2d106det` is a DIFFERENT topology and would need an
-explicit mapping; it is deliberately not used here.
+A frame with no confirmed speaker becomes `(0, 0, 0, 0)`, MuseTalk's
+`coord_placeholder`. Such a frame is written through unchanged only on a
+MuseTalk carrying the 2026-10-18 patch (scripts/inference.py:253); before it,
+a placeholder truncated the render.
 
-**A frame with no confirmed speaker becomes `(0, 0, 0, 0)`.** That is
-MuseTalk's `coord_placeholder`, and since the 2026-10-18 patch
-(scripts/inference.py:253) such a frame is WRITTEN UNCHANGED rather than
-dropped -- so "nobody on screen is talking, leave this alone" is expressible.
-Before that patch a placeholder truncated the render, so this module is only
-safe against a MuseTalk carrying that fix.
-
-Not handled: two people talking in the same frame. MuseTalk animates exactly
-one box per frame, so the higher ASD score wins and the other is left alone.
+Two people talking in one frame is not handled -- MuseTalk animates one box,
+so the higher ASD score wins.
 """
 from __future__ import annotations
 
@@ -53,14 +40,11 @@ PLACEHOLDER: Tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
 #: the repo's `asd_on_screen_threshold` default so one number means one thing.
 ASD_SPEAK_THRESHOLD = 0.5
 
-#: A speaking run shorter than this many frames is noise, not a line, and is
-#: discarded. At 25 fps this is ~0.2 s.
+#: Speaking runs shorter than this are dropped as noise (~0.2 s at 25 fps).
 MIN_SPEAK_RUN = 5
 
-#: A sub-threshold gap SHORTER than this inside a speaking run is filled.
-#: Without it a two-frame ASD dip mid-sentence leaves two un-animated frames
-#: between animated ones, which reads as a mouth stutter -- worse than the
-#: wrong-face problem being fixed. At 25 fps this is ~0.5 s.
+#: Sub-threshold gaps shorter than this inside a run are filled (~0.5 s at
+#: 25 fps). Without it a brief ASD dip mid-sentence reads as a mouth stutter.
 MAX_GAP_FILL = 12
 
 
@@ -72,19 +56,17 @@ def musetalk_box(
 ) -> Optional[Tuple[int, int, int, int]]:
     """The crop box MuseTalk would derive from these landmarks.
 
-    Mirrors `get_landmark_and_bbox` (preprocessing.py:113-129) line for line,
-    including its degenerate-case fallback to the detector box. Reproduced
-    rather than approximated because the model was trained on crops framed
-    this way: a box that merely looks reasonable is a different distribution.
+    Mirrors `get_landmark_and_bbox` (preprocessing.py:113-129) exactly,
+    including its fallback to the detector box: the model was trained on
+    crops framed this way.
     """
     import numpy as np
 
     lm = np.asarray(landmarks68, dtype=np.float64)[:, :2].astype(np.int32)
     pivot = lm[PIVOT_IDX].copy()
     if bbox_shift:
-        # Upstream adds the shift to the pivot's y, which moves the TOP edge.
-        # It does not touch the bottom -- that is `extra_margin`, applied by
-        # inference.py itself at blend time and so deliberately absent here.
+        # The shift moves the TOP edge only. The bottom is `extra_margin`,
+        # applied by inference.py at blend time and not handled here.
         pivot[1] = int(pivot[1]) + int(bbox_shift)
     half_face_dist = int(lm[:, 1].max()) - int(pivot[1])
     upper_bond = max(0, int(pivot[1]) - half_face_dist)
@@ -110,7 +92,7 @@ def speaking_track_per_frame(
     """frame index -> the track_id speaking in it, for frames that have one.
 
     `ASDScore.frames` / `.scores` are parallel and omit frames outside the
-    track, so alignment is explicit rather than positional.
+    track, so frames are matched by value, not by position.
     """
     import numpy as np
 
@@ -181,13 +163,11 @@ def build_coord_list(
     max_gap: int = MAX_GAP_FILL,
     device: str = "cpu",
 ) -> Tuple[List[Tuple], Dict]:
-    """Per-frame MuseTalk coord list, gated on who is actually speaking.
+    """Per-frame MuseTalk coord list, gated on who is speaking.
 
-    Returns `(coord_list, stats)`. `coord_list` is exactly what MuseTalk
-    pickles: one 4-tuple per frame in frame order, `PLACEHOLDER` where the
-    frame must be left alone. `stats` records how many frames each branch
-    produced, because "it ran" and "it animated the right face" are different
-    claims and only the second one matters.
+    Returns `(coord_list, stats)`. `coord_list` is what MuseTalk pickles: one
+    4-tuple per frame in frame order, `PLACEHOLDER` where the frame is left
+    alone. `stats` counts how many frames each branch produced.
     """
     import cv2
     import numpy as np
@@ -254,9 +234,8 @@ def build_coord_list(
         idx += 1
     cap.release()
 
-    # The list must be exactly as long as the frame list MuseTalk reads, or
-    # `zip(coord_list, frame_list)` silently truncates to the shorter one and
-    # the tail of the video is never considered.
+    # Must be exactly as long as MuseTalk's frame list: `zip` truncates to
+    # the shorter one and the tail of the video would go unconsidered.
     if total and len(coords) < total:
         coords.extend([PLACEHOLDER] * (total - len(coords)))
         stats["placeholder"] += total - stats["frames"]
@@ -267,12 +246,9 @@ def build_coord_list(
     return coords, stats
 
 
-#: One loaded head per kind. Keyed because the two consumers want DIFFERENT
-#: heads and neither substitutes for the other: `musetalk_box` reads the
-#: 68-point layout, while LatentSync indexes fixed positions in the 106-point
-#: one (43/48/49/51/50 for the left eyebrow, 101:106 for the right, 74/77/83/86
-#: for the nose -- see `image_processor.affine_transform`). Same detector,
-#: same weights on disk, different output head.
+#: One loaded head per kind. `musetalk_box` needs the 68-point layout;
+#: LatentSync indexes fixed positions in the 106-point one. Same detector and
+#: weights, different output head -- they do not substitute.
 _LMK: Dict[str, object] = {}
 
 LMK_68 = "landmark_3d_68"
@@ -298,17 +274,14 @@ def _landmark_model(*, device: str, ensure, kind: str = LMK_68):
 
 
 def _landmarks_for_box(lmk, frame, box, *, kind: str = LMK_68):
-    """Landmarks for ONE given box -- not whichever face is biggest.
+    """Landmarks for ONE given box, not whichever face is biggest.
 
-    The landmark head takes the box it is handed, which is the whole point:
-    it is how the chosen (speaking) face gets its own landmarks instead of
-    inheriting a whole-frame pose estimate's first instance. It is also the
-    reason this works on a face too small for a detector's own floor --
-    nothing re-detects, so nothing re-filters.
+    The head takes the box it is handed and never re-detects, so this also
+    works on a face below a detector's own size floor.
 
-    Coordinates come back in the FRAME's pixel space, which is what makes
-    them portable: `AlignRestore` scales its template by `resolution / 256`,
-    so the same points drive LatentSync 1.5 at 256 and 1.6 at 512 unchanged.
+    Coordinates come back in the frame's pixel space. `AlignRestore` scales
+    its template by `resolution / 256`, so the same points drive LatentSync
+    1.5 at 256 and 1.6 at 512 unchanged.
     """
     import numpy as np
     from insightface.app.common import Face
@@ -328,30 +301,23 @@ def _landmarks_for_box(lmk, frame, box, *, kind: str = LMK_68):
 # LatentSync targets
 # ---------------------------------------------------------------------------
 #
-# `build_coord_list` above answers "which BOX does MuseTalk paint into".
-# LatentSync does not take a box: its only input from the detection stage is
-# 106 landmarks, from which `image_processor.affine_transform` takes three
-# means and builds the warp. So the two cannot share a return type -- but
-# they MUST share the gating, which is why `speaking_track_per_frame` and
-# `_smooth_runs` are called here rather than reimplemented. A second copy of
-# the threshold/min-run/gap-fill rules would drift from the first, and the
-# drift would show up as "the wrong person is animated" months later.
+# LatentSync takes no box: `image_processor.affine_transform` builds its warp
+# from three means over 106 landmarks. So the return type differs from
+# `build_coord_list`'s, but the gating must not -- hence the shared calls to
+# `speaking_track_per_frame` and `_smooth_runs` rather than a second copy of
+# the threshold/min-run/gap-fill rules.
 
-#: Producer string written into the artifact, so a stale targets file can be
-#: told apart from one built by a later version of this code.
+#: Written into the artifact so a stale targets file is identifiable.
 TARGETS_PRODUCER = "buffalo_l_landmark_2d_106+talknet"
 
 
 def _runs_from_tracks(frame_track) -> "np.ndarray":
     """`run_start[i]` -- True where frame i begins a new contiguous run.
 
-    A run is a maximal stretch of consecutive frames held by one track. The
-    flag exists because `AlignRestore.p_bias` is an EMA on the warp
-    translation carried ACROSS calls: without a reset it damps frame i toward
-    frame i-1 even when the two are different people (a cut), seconds apart
-    (a gap this gating skipped), or either side of a shard boundary. Marking
-    the boundaries here puts that discipline in the artifact, where it can be
-    audited, instead of leaving each consumer to re-derive it.
+    A run is a maximal stretch of consecutive frames held by one track.
+    `AlignRestore.p_bias` is an EMA on the warp translation carried across
+    calls, so without a reset at these boundaries it damps one person's frame
+    toward another's across a cut, a skipped gap or a shard edge.
     """
     import numpy as np
 
@@ -388,18 +354,14 @@ def build_targets(
         frame_lmk    (N, 106, 2) float32 pixel landmarks, NaN where -1
         run_start    (N,)       bool
 
-    Coordinates are in the frame geometry of `video`, and `width`/`height`
-    record which that was, because the render is routinely NOT that size --
-    a 4K source is capped to 1080p before rendering, and landmarks twice the
-    size of the frame they warp place the mouth off-screen without erroring.
-    The consumer scales; this function only has to be honest about the
-    geometry it measured in.
+    Coordinates are in `video`'s frame geometry, recorded as `width`/`height`
+    because the render often is not that size -- a 4K source is capped to
+    1080p first, and oversized landmarks place the mouth off-screen without
+    erroring. The consumer scales.
 
-    Detect at native resolution even when the render will be smaller. The
-    landmark head crops to a fixed 192x192 whatever it is given, so a face
-    that is 160x200 in 4K arrives near-native while the same face at 1080p
-    arrives 2x interpolated. Scaling coordinates down afterwards is exact;
-    re-detecting smaller throws the pixels away for good.
+    Detection runs at native resolution even when the render will be smaller:
+    the landmark head crops to a fixed 192x192 either way, so detecting small
+    throws pixels away while scaling coordinates down afterwards is exact.
     """
     import cv2
     import numpy as np
@@ -411,9 +373,8 @@ def build_targets(
         tracks, asd, threshold=threshold, min_run=min_run, max_gap=max_gap)
 
     by_id = {t.track_id: t for t in tracks.tracks}
-    # Stable string -> small int, so the artifact carries an index rather than
-    # a variable-length string per frame. Sorted so the mapping is reproducible
-    # across runs of the same job.
+    # Stable string -> small int, so the artifact carries an index per frame
+    # rather than a string. Sorted to keep the mapping reproducible.
     track_order = sorted({t for t in speaking.values()})
     track_index = {tid: i for i, tid in enumerate(track_order)}
 
@@ -466,10 +427,8 @@ def build_targets(
         stats["speaking"] += 1
         lm = _landmarks_for_box(lmk, frame, box, kind=LMK_106)
         if lm is None or np.asarray(lm).shape[:2] != (106, 2):
-            # The gating says someone is speaking but the head could not
-            # place the points. Animating from a box alone is not possible
-            # here -- LatentSync needs the landmarks -- so the frame is left
-            # untouched rather than warped from a guess.
+            # Someone is speaking but the head could not place the points.
+            # LatentSync needs landmarks, not a box, so leave the frame.
             frame_track.append(-1)
             frame_box.append(nan_box)
             frame_lmk.append(nan_lmk)
@@ -483,9 +442,8 @@ def build_targets(
         idx += 1
     cap.release()
 
-    # The arrays must be exactly as long as the clip the renderer reads, or
-    # the consumer refuses them -- `lipsync_pipeline` compares lengths and
-    # drops a mismatch rather than animating the wrong frames.
+    # Must be exactly as long as the clip the renderer reads:
+    # `lipsync_pipeline` compares lengths and drops a mismatch.
     if total and len(frame_track) < total:
         pad = total - len(frame_track)
         frame_track.extend([-1] * pad)
@@ -527,22 +485,15 @@ def slice_targets(payload: Dict[str, "np.ndarray"], start: int,
                   stop: int) -> Dict[str, "np.ndarray"]:
     """The window `[start, stop)` of a targets payload, renumbered from zero.
 
-    Every path that cuts a clip -- sharding across GPUs, segmenting for
-    memory, a window render -- renumbers frames from zero, so an array
-    indexed against the whole video lands on the wrong frames in every piece
-    but the first. This is the targets equivalent of
-    `backend.lipsync._split_coords`, and it is deliberately the same shape:
-    cut by MEASURED frame counts, and hand back nothing rather than
-    something misaligned.
+    Sharding, segmenting and window renders all renumber frames from zero, so
+    an array indexed against the whole video lands wrong in every piece but
+    the first. The targets equivalent of `backend.lipsync._split_coords`.
 
-    `run_start` is re-marked on the first kept frame. The warp smoother's
-    carry-over does not survive into a new process either, so the first frame
-    of a shard is unsmoothed whether we say so or not -- saying so makes the
-    render match what actually happens instead of damping toward a frame that
-    was never drawn.
+    `run_start` is re-marked on the first kept frame: the warp smoother's
+    carry-over does not survive into a new process anyway.
 
-    The GEOMETRY is carried through untouched: slicing changes which frames
-    are covered, never the resolution the coordinates were measured in.
+    Geometry is carried through untouched -- slicing changes which frames are
+    covered, never the resolution they were measured in.
     """
     import numpy as np
 
@@ -569,10 +520,9 @@ def slice_targets(payload: Dict[str, "np.ndarray"], start: int,
 def load_targets_payload(path: Path) -> Optional[Dict[str, "np.ndarray"]]:
     """Read a targets .npz back as a plain payload dict, or None.
 
-    The vendored reader (`latentsync/utils/targets.py`) lives in a DIFFERENT
-    conda env and cannot be imported from here, so the schema is necessarily
-    known in two places. `tests/test_latentsync_targets.py` pins them to each
-    other; change one and the test will tell you about the other.
+    The vendored reader (`latentsync/utils/targets.py`) is in another conda
+    env and cannot be imported here, so the schema lives in two places.
+    `tests/test_latentsync_targets.py` pins them together.
     """
     import numpy as np
 

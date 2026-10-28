@@ -44,6 +44,20 @@ rejected rather than executed. The operation catalogue lives **here**, not in
 the user turn — `tests/test_edit_agent.py` fails if it and `backend/edits.py`
 `OPS` disagree in either direction.
 
+Two placeholders are substituted at import: `{{lipsync_models}}` from the
+lip-sync registry and `{{tone_styles}}` from `edits.tone_styles()`, which
+reads `models.tts.bodhan_adapter.INDIC_SPEAK_STYLES`. Both lists were once
+typed out by hand here, and both were wrong — the model list omitted two
+registered adapters, and the tone list ("formal | casual | friendly |
+serious | energetic") contained no value the engine accepts at all, so every
+tone the planner chose was written to `tts_style` and ignored at synthesis.
+
+**Reached only when the rule parser declines.** Since 2026-10-28
+`backend/edit_agent.py::parse_request` runs `_rule_parse` FIRST and returns
+on a match, so this prompt sees only the sentences the patterns could not
+place. Every phrasing in the op catalogue parses without it —
+`scripts/audit_edit_ops.py` checks all of them.
+
 **User turn** (only the parts that vary per request):
 
 ```
@@ -115,7 +129,8 @@ Use only the following operation names and parameters.
 
 3. set_tone
    Change the delivery tone.
-   Required params: tone
+   Required params: tone — one of exactly these engine styles: {{tone_styles}}
+     Do not invent a register. "formal", "casual", "warm" and "urgent" are NOT engine styles and are rejected by the pipeline. If the user asks for a register that is not in the list and none of the listed styles clearly means the same thing, return {"ops": []}.
    Optional params: rewrite_text (boolean; defaults to true)
 
 4. code_mix
@@ -195,7 +210,7 @@ Choose the operation that most directly matches the requested change.
 - Exact replacement wording: set_text. Preserve the user's replacement text exactly.
 - Change the translation while retaining the source meaning: retranslate.
 - Change ONE word or phrase and leave the rest of the line exactly as it is: replace_term. Prefer it over retranslate whenever the request names a specific word, including "translate the word X", "replace X with Y" or "keep X but change it to Y". retranslate regenerates the whole line and will alter wording the request never mentioned.
-- Change delivery style, such as formal, casual, serious, or energetic: set_tone.
+- Change delivery style, such as a news read, a lecture, or an emotion: set_tone. The style must be one of the engine styles listed under operation 3; there is no "formal" and no "casual".
 - Keep specified English technical terms in the translated sentence: code_mix.
 - Change the perceived voice gender: set_gender.
 - Correct who is speaking: set_speaker.
@@ -207,15 +222,15 @@ Do not substitute one operation for another merely because they can produce simi
 
 For requests involving distinct changes, create one operation per change. If one change fully satisfies the request, emit exactly one operation.
 
-For example, "make SPK_01 more formal" requires set_tone with scope {"speaker":"SPK_01"}. Do not add a time range.
+For example, "read SPK_01's lines as a news anchor" requires set_tone with tone "news" and scope {"speaker":"SPK_01"}. Do not add a time range.
 
-"Make the translation more formal and preserve the words gradient and weight in English" requires set_tone and code_mix, each with the same appropriate scope.
+"Make it sound sad and preserve the words gradient and weight in English" requires set_tone (tone "sad") and code_mix, each with the same appropriate scope.
 
 ## PARAMETER RULES
 
 - Include all required parameters and only relevant optional parameters.
 - Do not include default values unless they are needed to make the requested behavior explicit.
-- For set_tone, use rewrite_text=true unless the user explicitly asks to change vocal delivery without rewriting wording.
+- For set_tone, use rewrite_text=true unless the user explicitly asks to change vocal delivery without rewriting wording. Never pass a tone that is not in the engine list; an unknown style is refused by the pipeline, not quietly ignored.
 - For code_mix, include terms only when the user identifies terms to preserve. Do not invent a termbase path.
 - For set_speed, use the numeric factor specified or unambiguously implied by the user. Do not invent a factor for vague requests such as "a little faster"; if the operation requires a factor and no configured default exists, return {"ops": []}.
 - For lipsync_window, use the requested time window. Do not change the lip-sync model unless requested or necessary to specify a model.

@@ -45,10 +45,10 @@ LatentSync/
 # scratch material dropped in by hand (note the trailing dot in the dir name)
 resourses_for_suggested_edits./
 
-# UI build output. `ui/web2/vite.config.ts` sets outDir to '../web-dist', so
-# the bundle lands OUTSIDE web2/ and the scaffold's own ui/web2/.gitignore
+# UI build output. `ui/web/vite.config.ts` sets outDir to '../web-dist', so
+# the bundle lands OUTSIDE web/ and the scaffold's own ui/web/.gitignore
 # cannot reach it — its comment says it is "ignored there", and this is there.
-# Regenerate with: conda run -n dubui npm --prefix ui/web2 run build
+# Regenerate with: conda run -n dubui npm --prefix ui/web run build
 ui/web-dist/
 
 # run logs — every runner here writes logs/<task>_<stamp>.log, and the detached
@@ -116,3 +116,12 @@ ui/web-dist/
 
 # session-generated conversation summaries (not source)
 changes.md
+
+# backup files
+*.bak
+
+# machine-local GPU/device state
+*_state.txt
+
+# diagnostic dumps
+nvidia-bug-report.log*

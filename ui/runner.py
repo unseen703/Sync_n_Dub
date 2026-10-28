@@ -60,7 +60,7 @@ JOBS_DIR = DATA_DIR / "jobs"
 REQUEST_FILE = "request.json"
 
 #: Phases the pipeline does not log, in the order they happen.
-PRE_STAGES = ["fetch", "cut", "probe"]
+PRE_STAGES = ["meta", "fetch", "cut", "probe"]
 
 #: `backend.edits.STAGE_ORDER` names -> the `=== stage N ===` markers the
 #: pipeline logs for them. A re-render replays a subset of the post-MT chain,
@@ -187,6 +187,43 @@ def read_request(job_root: Path) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 # the phases
 # ---------------------------------------------------------------------------
+
+def _ensure_meta(job_root: Path, req: Dict[str, Any]) -> Dict[str, Any]:
+    """`<job>/meta.json` — the uploader's details for this video.
+
+    Normally written at submit by `ui/routes_create.py::_write_meta`, before
+    this process exists, so the usual job of this step is to confirm it is
+    there. It is a real step rather than a cosmetic row because it has a real
+    fallback: a job folder launched outside the form (a replayed request, a
+    hand-made folder) has no `meta.json`, and without one the job card falls
+    back to the job-id slug and the register classifier at 9b1 has no
+    `categories` to read.
+
+    Never fatal. Failing to name a video is not a reason to refuse to dub it.
+    """
+    from ui._io import read_json
+    from ui.progress import write_atomic
+
+    path = Path(job_root) / "meta.json"
+    doc = read_json(path) or {}
+    if doc.get("title") or req.get("upload_id"):
+        return doc
+
+    url = str(req.get("url") or "")
+    if not url or Path(url).exists():       # a local file has no page to read
+        return doc
+    try:
+        from ui import ytmeta
+        fetched = ytmeta.probe(url)
+        doc = {**fetched, **doc}            # never overwrite what submit wrote
+        doc.setdefault("display_name", ytmeta.display_name(fetched, url=url))
+        write_atomic(path, doc)
+        log.info("meta: fetched details for %s", doc.get("title") or url)
+    except Exception as e:                  # noqa: BLE001 - see docstring
+        log.warning("meta: could not read this video's details (%s); "
+                    "the job will be named from its id", e)
+    return doc
+
 
 def _fetch(url: str, job_root: Path) -> Path:
     """Download the source into `<job>/source/`, not `<job>/videos/`.
@@ -355,9 +392,33 @@ def _run_rerun(job_id: str, job_root: Path, jobs_dir: Path) -> int:
         log.warning("could not read this job's pacing from request.json "
                     "(%s); the replay will fall back to the manifest", e)
 
+    # A lip-sync-only replay logs NO stage marker. `edit_agent.rerun` routes
+    # it into `_rerun_lipsync_only`, which calls `run_lipsync` directly and
+    # never reaches the branch in `run_post_mt_stages` that logs
+    # `=== stage 9h ===` (or the ASD marker beside it). The rows stayed
+    # pending, `finish("done")` swept them to `skipped`, and the ribbon
+    # paints skipped as a tick -- a finished render and an absent one read
+    # identically. Job 20261027-213413 has the render on disk and
+    # `9h: skipped` in its progress doc.
+    #
+    # So this submission OWNS both rows and opens them itself, the same way
+    # the runner already handles `fetch`/`cut`/`probe`. Owning 6 also
+    # matters for the bar: phase one planned it deferred, and a deferred row
+    # nobody ever claims holds `Finished` dark forever.
+    _lipsync_only = set(res.dirty_stages) <= {"lipsync"}
+    if _lipsync_only:
+        planned = [{"key": k, "title": None, "label": _label(k),
+                    "state": "pending", "started_at": None, "wall_s": None}
+                   for k in ("6", "9h")]
+
     writer = ProgressWriter(job_root, job_id=job_id, planned=planned,
                             kind="rerun")
     _attach(writer)
+    if _lipsync_only:
+        # ASD first: idempotent, so it either re-scores or reuses what the
+        # cast gate wrote. Opening 9h closes it as done.
+        writer.begin("6", "active speaker detection")
+        writer.begin("9h", "lip-sync")
     _install_sigterm()
     state, error = "done", None
     try:
@@ -534,7 +595,9 @@ def run(job_id: str, *, rerun: bool = False, cast: bool = False,
     # seventh node here because `"auto"` meant a stage that WOULD run without
     # being in `kwargs` yet. Lip-sync is a separate submission now, with its
     # own progress.
-    planned = plan_stages(plan_cfg, pre=list(PRE_STAGES))
+    # `stop_after_mt=True` for the same reason it is forced below: this run
+    # ends at the gate, so the bar must not promise stages it will not run.
+    planned = plan_stages(plan_cfg, pre=list(PRE_STAGES), stop_after_mt=True)
     writer = ProgressWriter(job_root, job_id=job_id, planned=planned)
     _attach(writer)
 
@@ -550,6 +613,9 @@ def run(job_id: str, *, rerun: bool = False, cast: bool = False,
         # Phase one never lip-syncs, so there is no GPU render to clear the
         # way for. The check moved to `POST /api/jobs/{id}/lipsync`, which is
         # where the GPU is actually about to be spent.
+
+        writer.begin("meta", "video details")
+        _ensure_meta(job_root, req)
 
         writer.begin("fetch", "download")
         src = _fetch(str(req["url"]), job_root)
@@ -570,8 +636,14 @@ def run(job_id: str, *, rerun: bool = False, cast: bool = False,
         # Staged flow (2026-10-26): phase one stops after MT so the operator
         # sets gender + voice per speaker before any audio is synthesised. The
         # cast step (`POST /api/jobs/{id}/cast` → `ui.runner --cast`) runs the
-        # post-MT stages. A request can opt out by setting stop_after_mt False.
-        kwargs.setdefault("stop_after_mt", True)
+        # post-MT stages.
+        #
+        # Assigned, not `setdefault` (2026-10-27): EVERY UI job stops at the
+        # gate. The default left `request.json` able to opt out, so a
+        # hand-edited or older request could dub straight through and skip
+        # the casting the operator is meant to do. The CLI is still free to
+        # run end to end -- it never comes through here.
+        kwargs["stop_after_mt"] = True
         result = run_pipeline(str(clip), job_id=job_id, data_dir=DATA_DIR,
                               **kwargs)
 

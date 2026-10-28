@@ -69,6 +69,52 @@ def _lipsync_model_ids() -> str:
     except Exception:                               # noqa: BLE001
         return "wav2lip | musetalk | latentsync"
 
+
+def tone_styles() -> Tuple[str, ...]:
+    """The delivery styles the TTS engine actually accepts, plus `neutral`.
+
+    Read from `models.tts.bodhan_adapter.INDIC_SPEAK_STYLES`, for exactly the
+    reason `_lipsync_model_ids` is read from the lip-sync registry. The op
+    catalogue, the system prompt and the regex parser all used to carry a
+    hand-written list -- "formal | casual | friendly | serious | energetic" --
+    and NONE of those five is an engine value. A tone edit through the agent
+    therefore wrote `tts_style="formal"`, which Bodhan does not know, so the
+    one op whose whole purpose is to change delivery changed nothing. The
+    speaker dropdown never had the bug because `ui.speakers.tone_vocabulary`
+    already read the engine; this is the same read, placed where `backend/`
+    can use it without importing `ui/`.
+
+    `NEUTRAL_STYLE` leads the list: it is not an engine value but a sentinel
+    `models.tts.resolve_style` turns back into "send no style".
+    """
+    try:
+        from models.tts import NEUTRAL_STYLE
+        from models.tts.bodhan_adapter import INDIC_SPEAK_STYLES
+        return (NEUTRAL_STYLE,) + tuple(INDIC_SPEAK_STYLES)
+    except Exception:                               # noqa: BLE001
+        # Same policy as above: a prompt string must not take down an edit.
+        return ("neutral", "happy", "sad", "news")
+
+
+def _tone_style_ids() -> str:
+    return " | ".join(tone_styles())
+
+
+#: The delivery styles the EDIT WORKSPACE offers, narrowed on purpose.
+#:
+#: `tone_styles()` is the full set the engine accepts — fifteen, most of them
+#: emotions (anger, fear, disgust) that belong to a performance, not to a
+#: lecture recording being dubbed. Offering all fifteen in a chip list made
+#: the common choice hard to find and invited a register the material does
+#: not support. These two are the formats this pipeline's material actually
+#: comes in.
+#:
+#: It narrows what is OFFERED, never what is ACCEPTED: typing "make it sad"
+#: still parses and still applies, because `_h_set_tone` validates against
+#: `tone_styles()` and the regex matches every engine style. If the offered
+#: pair ever needs a third, add it here — one list, served to the UI.
+TONE_CHOICES: Tuple[str, ...] = ("TV style news", "educational lecture")
+
 #: Post-MT chain, in execution order. See `run_post_mt_stages`.
 STAGE_ORDER: Tuple[str, ...] = (
     "codemix", "duration", "voices", "tts", "vc", "timing", "mix", "lipsync",
@@ -368,12 +414,16 @@ OP_SPECS: List[OpSpec] = [
         needs_llm=True,
     ),
     OpSpec(
+        # The style list is READ FROM THE ENGINE, never typed here. It used
+        # to read "formal | casual | friendly | serious | energetic", none of
+        # which Bodhan accepts -- see `tone_styles`.
         name="set_tone", dirty_from="tts",
-        params={"tone": "formal | casual | friendly | serious | energetic | …",
+        params={"tone": _tone_style_ids(),
                 "rewrite_text": "true (default) to also rewrite the wording"},
         summary="Change the delivery register: an engine style hint, and (by "
                 "default) an LLM rewrite of the wording to match.",
-        examples=["make the tone more formal after 1:00"],
+        examples=["deliver the lines after 1:00 as educational lecture",
+                  "read from 2:00 to 2:30 as TV style news"],
         needs_llm=True,
     ),
     OpSpec(
@@ -400,8 +450,13 @@ OP_SPECS: List[OpSpec] = [
                            "e.g. SPK_02"},
         summary="Reattribute a stretch of dialogue to a different speaker, "
                 "so it is spoken in THAT speaker's voice.",
+        # Both examples name the speaker EXPLICITLY. "that is the second
+        # speaker" was advertised for months and parses to nothing: a rule
+        # parser cannot turn an ordinal into a diariser label without
+        # guessing whether the count is 0- or 1-based, and a wrong guess is
+        # a real line read in the wrong voice.
         examples=["the line at 1:20 is SPK_02, not SPK_00",
-                  "from 0:30 to 0:45 that is the second speaker"],
+                  "from 0:30 to 0:45 that is actually SPK_02"],
     ),
     OpSpec(
         name="set_voice", dirty_from="voices",
@@ -436,7 +491,12 @@ OP_SPECS: List[OpSpec] = [
                   "redo the lip-sync with wav2lip"],
     ),
     OpSpec(
-        name="mute_cue", dirty_from="tts",
+        # `timing`, not `tts`, because `_h_mute_cue` sets exactly that on
+        # the applied record: TTS still synthesises muted cues so a revert
+        # has the clip, and the freed slot has to be re-planned before mix
+        # drops it. The spec said `tts` while the handler said `timing`, so
+        # the UI quoted a re-speak that never happened.
+        name="mute_cue", dirty_from="timing",
         params={},
         summary="Silence the scoped segment(s) — TTS skips them, the mix "
                 "leaves the M&E bed playing through, and their time is "
@@ -482,8 +542,17 @@ STAGE_PLAIN: Dict[str, str] = {
     "duration": "re-fits the timing, then re-speaks, remixes and re-syncs",
     "voices":   "re-casts the voice, then re-speaks those lines, remixes "
                 "the audio and re-syncs the lips",
-    "tts":      "re-speaks the affected lines, remixes the audio and "
-                "re-syncs the lips",
+    # "re-fits", not "re-speaks": `backend/tts.py` is incremental. It hashes
+    # a RAW signature (text, voice, style, reference, language, model) and a
+    # STRETCH signature (target duration, cap) per segment, and only the
+    # segments whose raw signature moved are sent to the engine. A pure speed
+    # edit moves only the stretch signature, so the cached clip is re-fitted
+    # with no engine call at all -- which is why `set_speed` dirties from
+    # `tts` and still costs nothing at Bodhan. Saying "re-speaks" here quoted
+    # a bill the stage does not run up.
+    "tts":      "re-fits the affected lines — re-speaking only those whose "
+                "wording, voice or style changed — then remixes the audio "
+                "and re-syncs the lips",
     "vc":       "re-converts the voice, remixes and re-syncs",
     "timing":   "re-fits the timing, remixes and re-syncs",
     "mix":      "remixes the audio and re-syncs the lips",
@@ -519,13 +588,26 @@ STAGE_PLAIN: Dict[str, str] = {
 #:             a timestamp or a speaker id. Deliberately not the same string
 #:             as `examples`: those carry their own baked-in scope and are
 #:             used as-is when nothing is selected.
+#:   needs     the ONE value the user still has to supply, named by the
+#:             `<angle>` placeholder inside `fill`, or None when the fill is
+#:             complete as written. Four of these fills used to carry `…` or
+#:             `<voice>` and were sent verbatim: the ellipsis became the
+#:             line's new text, and "translate the whole dub to this
+#:             language" was a 422 every single time, because the prompt
+#:             forbids inventing an ISO code and no regex matches "this".
+#:             The UI reads `needs` to open the right picker (voice, tone,
+#:             language) or to select the placeholder, and refuses to send
+#:             while an unfilled `<…>` is still in the box. A placeholder
+#:             cannot be made parseable by prefilling junk; it can only be
+#:             made impossible to send.
 USER_ACTIONS: Dict[str, Dict[str, Any]] = {
     "set_text": {
         "title": "Rewrite a line",
         "takes": "a moment in the video, and the exact wording you want",
         "changes": "that line is spoken with your wording, word for word",
         "category": "Translation", "scopes": ["segment"], "quick": True,
-        "fill": 'change the wording to "…"',
+        "fill": 'change the wording to "<new wording>"',
+        "needs": "text",
     },
     "replace_term": {
         "title": "Change one word everywhere",
@@ -534,7 +616,8 @@ USER_ACTIONS: Dict[str, Dict[str, Any]] = {
         "changes": "only that word changes; the rest of the line stays "
                    "exactly as it was",
         "category": "Translation", "scopes": ["segment", "all"], "quick": False,
-        "fill": 'replace "…" with "…"',
+        "fill": 'replace "<word>" with "<replacement>"',
+        "needs": "text",
     },
     "retranslate": {
         "title": "Translate a passage again",
@@ -546,11 +629,16 @@ USER_ACTIONS: Dict[str, Dict[str, Any]] = {
     },
     "set_tone": {
         "title": "Change how a line is delivered",
-        "takes": "a time range or a speaker, and a tone such as formal, "
-                 "warm or urgent",
+        # Named the real styles. This read "formal, warm or urgent" — three
+        # registers the engine has never accepted — so the card described an
+        # edit that could not be made.
+        "takes": "a time range or a speaker, and one of two delivery "
+                 "styles: TV style news or educational lecture",
         "changes": "the same words are spoken in a different manner",
         "category": "Voice", "scopes": ["segment", "speaker"], "quick": False,
-        "fill": "deliver this more formally",
+        "fill": "deliver this as <style>",
+        "needs": "tone",
+        "options": list(TONE_CHOICES),
     },
     "code_mix": {
         "title": "Keep English words in English",
@@ -573,7 +661,8 @@ USER_ACTIONS: Dict[str, Dict[str, Any]] = {
         "changes": "those lines move to that speaker and are read in THEIR "
                    "voice; who speaks when is not recomputed",
         "category": "Speakers", "scopes": ["segment"], "quick": False,
-        "fill": "this is actually SPEAKER_01",
+        "fill": "this is actually <speaker>",
+        "needs": "speaker",
     },
     "set_voice": {
         "title": "Pick a specific voice",
@@ -581,6 +670,7 @@ USER_ACTIONS: Dict[str, Dict[str, Any]] = {
         "changes": "that speaker is read by the voice you named",
         "category": "Voice", "scopes": ["speaker"], "quick": True,
         "fill": "use <voice> here",
+        "needs": "voice",
     },
     "set_speed": {
         "title": "Speed up or slow down",
@@ -616,8 +706,9 @@ USER_ACTIONS: Dict[str, Dict[str, Any]] = {
                    "language via Bodhan MT; a whole-dub change re-casts "
                    "every voice from that language's pool, a scoped change "
                    "pins a native voice per cue and leaves the rest alone",
-        "category": "Translation", "scopes": ["dub", "segment"], "quick": True,
-        "fill": "translate the whole dub to this language",
+        "category": "Translation", "scopes": ["all", "segment"], "quick": True,
+        "fill": "change the target language to <language>",
+        "needs": "language",
     },
 }
 
@@ -648,6 +739,10 @@ def action_catalogue() -> List[Dict[str, Any]]:
             "scopes": list(meta.get("scopes", [])),
             "quick": bool(meta.get("quick", False)),
             "fill": meta.get("fill", ""),
+            "needs": meta.get("needs"),
+            # A narrowed pick list, when the op offers fewer values than the
+            # catalogue holds. None means "use the full list for `needs`".
+            "options": list(meta["options"]) if meta.get("options") else None,
         })
     return out
 
@@ -1106,6 +1201,20 @@ def _h_set_tone(data, seg_ids, op, applied, ctx, res):
     tone = str(op.params.get("tone") or op.params.get("style") or "").strip()
     if not tone:
         raise EditError("set_tone needs a `tone`")
+
+    # Pin the value to something the engine knows, and say so loudly when it
+    # is not. Until this check existed a tone edit from the agent wrote
+    # whatever adjective the sentence contained -- "formal", "warm",
+    # "urgent" -- none of which Bodhan accepts, so the op reported success
+    # and changed nothing audible. Matching is case-insensitive because the
+    # engine's own spellings are mixed ("AIR style news", "Customer Care")
+    # and nobody types them that way; the stored value is the engine's.
+    _known = {t.lower(): t for t in tone_styles()}
+    if tone.lower() not in _known:
+        raise EditError(
+            f"{tone!r} is not a delivery style this engine accepts. "
+            f"Pick one of: {', '.join(tone_styles())}")
+    tone = _known[tone.lower()]
     rewrite = op.params.get("rewrite_text")
     rewrite = True if rewrite is None else bool(rewrite)
     by_id = {str(s.get("id")): s for s in data.get("segments", [])}

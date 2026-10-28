@@ -13,7 +13,7 @@ there. Together they're a from-scratch recipe for that env, line for line.
 | `musetalk` | `musetalk.yml` + `musetalk.pip.txt` + `build_mmcv_musetalk.sh` | diffusers/mmcv/mmdet/mmpose pins conflict with `dubbing`. |
 | `latentsync` | `latentsync.yml` + `latentsync.pip.txt` | diffusers/transformers/insightface pins conflict with `dubbing`. |
 | `restore` (on disk: `wav2liphd`) | `restore.yml` + `restore.pip.txt` | `basicsr`/`gfpgan` need a dead-import patch `dubbing` doesn't carry — see `restore.yml` for whether this needs its own env at all. |
-| `dubui` | `dubui.yml` | Node, for building `ui/web2/` — never a runtime dependency of the server. |
+| `dubui` | `dubui.yml` | Node, for building `ui/web/` — never a runtime dependency of the server. |
 
 **Deliberately excluded**: `lipgan` (vestigial — its adapter was removed
 2026-10-23, see `tests/test_lipsync_env_python.py`) and

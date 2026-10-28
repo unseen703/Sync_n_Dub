@@ -11,7 +11,7 @@ speaker's mouth to the new audio.
 - Known bugs and incident history: [docs/ROUGH_EDGES.md](docs/ROUGH_EDGES.md)
 
 
-dev start cmd conda run --no-capture-output -n dubui npm --prefix ui/web2 run dev
+dev start cmd conda run --no-capture-output -n dubui npm --prefix ui/web run dev
 server start cmd $PY -m ui.server --port 7861
 ## Quickstart
 
@@ -108,17 +108,16 @@ apply it, since it re-runs TTS, mix and lip-sync.
 
 ### Building the frontend
 
-Vite app in `ui/web2/`, built to `ui/web-dist/`. Node lives in its own conda
+Vite app in `ui/web/`, built to `ui/web-dist/`. Node lives in its own conda
 env, and bare `npm` is broken on this host (see [docs/HOST.md](docs/HOST.md)):
 
 ```bash
 conda create -n dubui nodejs=20
-conda run -n dubui npm --prefix ui/web2 install
-conda run -n dubui npm --prefix ui/web2 run build
+conda run -n dubui npm --prefix ui/web install
+conda run -n dubui npm --prefix ui/web run build
 ```
 
-If `ui/web-dist/` is missing, the server falls back to the old read-only
-inspector in `ui/web/` (also at `/legacy`).
+If `ui/web-dist/` is missing, the server runs API-only and logs a warning.
 
 ## Editing a finished dub in plain language
 
@@ -331,7 +330,7 @@ Removed registry entries: `wav2lip_hd` and `lipgan` (2026-10-23; restoration is 
 | `spec.py` | The job's settings as plain label, value and hint lines, plus the raw config for an "Advanced" view |
 | `cost.py` | Turns an edit's dirty stages into what re-runs, what doesn't, and an estimated time |
 
-`ui/auth.py` is deleted in the working tree. The frontends (`ui/web/`, `ui/web2/`, `ui/web-dist/`) were not read, and there may be other `ui/` modules I haven't seen.
+`ui/auth.py` is deleted in the working tree. The frontends (`ui/web/`, `ui/web-dist/`) were not read, and there may be other `ui/` modules I haven't seen.
 
 ### `tests/`
 
@@ -382,6 +381,7 @@ Setup and launch
 | `start_ui.sh` | Starts the operator UI with its own interpreter and libstdc++ preload; `--port` to change it; no auth |
 | `ui_run_job.sh` | Launches one UI-submitted job detached from `data/jobs/<job_id>/request.json`; the only launcher that sets the libstdc++ preload |
 | `setup.py` | Old doctor, model fetch and dry run; superseded by `scripts/doctor.py` and `scripts/fetch_assets.py` |
+| `audit_edit_ops.py` | Runs every phrasing the edit agent advertises (op examples + quick-action fills, bare and cue-scoped) through the rule parser and prints the op and scope each produces; no network, no job folder |
 | `move_lipsync_vendor.sh` | Moves the lip-sync upstreams (~21 GB) from `third_party/` to `models/lipsync/vendor/`; the code works before and after |
 | `archive_data.sh` | Packs every `data/` folder except `data/jobs` into verified `data/_archive/*.tar.zst`, then deletes the originals |
 

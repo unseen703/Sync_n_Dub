@@ -1,38 +1,27 @@
 """Timing plans: where each piece of dubbed speech lands on the output timeline.
 
-The problem this solves. Indic translations run 1.15-1.42x longer than their
-English source (`comparison-results.md` §3), and the pipeline's only answer has
-been a +/-10% per-segment stretch followed by one global `atempo`. Both are
-uniform: they compress everything equally, which moves every speech onset. A
-5 s clip placed in a 5 s slot is still badly synced if one of them is silent for
-its first second, and lip-sync responds to where speech events actually fall,
-not to matching totals.
+A plan is not a duration per segment. It is a list of `Piece`s -- each a
+contiguous chunk of a raw TTS clip with its own placement on the output
+timeline and its own local tempo. Pauses are the gaps between consecutive
+`dst_start`s, not objects, so a pause-aware plan costs nothing extra to render.
 
-So a plan is not "a duration per segment". It is a list of `Piece`s, each a
-contiguous chunk of a raw TTS clip, with its own placement on the output
-timeline and its own local tempo. Pauses are not objects that need rendering --
-they are the gaps between consecutive `dst_start`s, which is why a pause-aware
-plan costs nothing extra to render.
-
-Every producer emits the same `TimingPlan`, and `backend.mix` grows exactly one
-strategy that renders any of them:
+Every producer emits the same `TimingPlan`, and `backend.mix` has one strategy
+that renders any of them:
 
     naive_slot     one Piece per segment, target = slot - margin  (the control arm)
     pause_aware    N Pieces anchored to the SOURCE speech onsets, pauses reinserted
     word_anchored  N Pieces cut at clause boundaries from TTS word timings
     dp             the same object, chosen by dynamic programming over a cost
+    warped         pieces addressing a pre-stretched clip; see `backend.warp_plan`
 
-Keeping one output type is what makes the hardest producer (dp) cheap to
-integrate: it has no new rendering surface, only a different search.
-
-Time conventions, which are the likeliest source of an off-by-a-segment bug:
+Time units:
   * `slot`, `src_speech`, `src_pauses`, `dst_start` are ABSOLUTE seconds on the
     source/output timeline.
-  * `Piece.src_span` is RELATIVE to the start of the clip the MIX resolves
-    for that segment -- `tts_raw_audio` for every producer except `warped`,
-    whose pieces address the pre-stretched `tts_warped_audio` instead.
-  * `segments[].words[]` in the merged JSON are absolute; `segments[].tts_words[]`
-    are clip-relative. They are not interchangeable.
+  * `Piece.src_span` is RELATIVE to the start of the clip the mix resolves for
+    that segment -- `tts_raw_audio` for every producer except `warped`, whose
+    pieces address `tts_warped_audio`.
+  * `segments[].words[]` are absolute; `segments[].tts_words[]` are
+    clip-relative. They are not interchangeable.
 """
 from __future__ import annotations
 
@@ -231,9 +220,8 @@ class TimingPlan:
 def raw_clip_duration(seg: dict) -> Optional[float]:
     """Length of the segment's UNSTRETCHED TTS clip, or None.
 
-    Always prefers `tts_raw_audio`: `tts_audio` may already have been stretched
-    by the TTS stage, and planning against an already-stretched clip is how the
-    pipeline came to compress twice.
+    Prefers `tts_raw_audio`; `tts_audio` may already have been stretched by the
+    TTS stage, and planning against that compresses twice.
     """
     import soundfile as sf
 
@@ -248,9 +236,9 @@ def raw_clip_duration(seg: dict) -> Optional[float]:
     return None
 
 
-# A word may sit this far outside its segment's slot before the stream is
-# judged off-timeline: diarization boundaries and forced alignment disagree by
-# a few tens of ms routinely, and that is not corruption.
+# How far outside its slot a word may sit before the stream is judged
+# off-timeline. Diarization boundaries and forced alignment routinely disagree
+# by a few tens of ms.
 WORD_SLOT_TOLERANCE_S = 0.50
 # Below this fraction outside, treat it as boundary noise and keep the stream.
 WORD_SLOT_MAX_OUTSIDE_FRAC = 0.25
@@ -261,13 +249,10 @@ def source_speech_and_pauses(
 ) -> Tuple[List[Span], List[Span]]:
     """Split a segment's source words into speech runs and the gaps between them.
 
-    These word timings are produced by the forced-alignment stage and, before
-    this module existed, were read by nothing at all (`comparison-results.md` §7
-    measured that aligner choice changed zero of 44 outputs). They are the whole
-    basis for pause-aware placement.
-
-    Falls back to one speech run spanning the slot when words are missing, so a
-    segment without alignment degrades to the naive behaviour instead of failing.
+    The word timings come from the forced-alignment stage and are the basis for
+    pause-aware placement. Falls back to one speech run spanning the slot when
+    words are missing, so a segment without alignment degrades to naive
+    placement instead of failing.
     """
     words = [w for w in (seg.get("words") or [])
              if w.get("start") is not None and w.get("end") is not None]
@@ -276,12 +261,11 @@ def source_speech_and_pauses(
     if not words:
         return [Span(start, end)], []
 
-    # `words[]` must be ABSOLUTE and inside this segment's own slot. A
-    # whisperx bug (fixed in models/align/whisperx_adapter.py) shipped 17 of
-    # the 142 merged JSONs on disk with each segment carrying its PREDECESSOR's
-    # word stream -- still monotonic, still plausible, and silently wrong.
-    # Anchoring to those times puts speech seconds away from where it belongs,
-    # so refuse the stream and degrade to the slot rather than trust it.
+    # `words[]` must be absolute and inside this segment's own slot. A segment
+    # can carry its predecessor's word stream (a whisperx bug, fixed in
+    # models/align/whisperx_adapter.py, affected 17 of the 142 merged JSONs on
+    # disk) -- still monotonic and plausible, but seconds out of place. Refuse
+    # the stream and degrade to the slot rather than anchor to it.
     off = [w for w in words
            if not (start - WORD_SLOT_TOLERANCE_S <= float(w["start"])
                    <= end + WORD_SLOT_TOLERANCE_S)]
@@ -331,9 +315,9 @@ def _base_segment_plan(seg: dict, *, pause_min_s: float) -> SegmentPlan:
         src_lead_in_s=max(0.0, speech[0].start - start) if speech else 0.0,
         src_tail_out_s=max(0.0, end - speech[-1].end) if speech else 0.0,
     )
-    # Carried on the plan because `_next_slot_start` sees plans, not
-    # segments, and a muted cue has to disappear from that lookahead for
-    # its seconds to read as gap. See `edits._h_mute_cue`.
+    # Carried on the plan because `_next_slot_start` sees plans, not segments,
+    # and a muted cue must drop out of that lookahead for its seconds to read
+    # as gap. See `edits._h_mute_cue`.
     if seg.get("muted"):
         sp.qc["muted"] = True
     return sp
@@ -345,9 +329,11 @@ def _clamp_tempo(t: float, lo: float, hi: float) -> Tuple[float, bool]:
 
 
 def summarize(plan: TimingPlan, *, source_duration_s: Optional[float] = None) -> dict:
-    """Plan-level aggregates. Overlap is computed here rather than per segment
-    because it is a property of the sequence, and it is the number that tells
-    you whether a producer has started stacking speech on top of itself."""
+    """Plan-level aggregates.
+
+    Overlap is computed here, not per segment: it is a property of the
+    sequence, and it says whether a producer is stacking speech on itself.
+    """
     segs = plan.segments
     if not segs:
         return {"segments": 0}
@@ -360,13 +346,10 @@ def summarize(plan: TimingPlan, *, source_duration_s: Optional[float] = None) ->
             overlap_s += ov
             overlap_n += 1
     tempos = [p.local_tempo for s in segs for p in s.pieces]
-    # Speech-only tempo, which is the number a listener actually hears.
-    # `tempo_max` below is a PIECE number: with pause absorption on, a cue's
-    # pauses are gaps rather than pieces so the two agree, but under the
-    # blob path one `local_tempo` covers speech and silence together and
-    # overstates the rate. Every producer that knows the difference records
-    # `qc["speech_tempo"]`; one that does not is absent here rather than
-    # guessed at, the same convention `unfilled_slot_s` uses.
+    # Speech-only tempo -- the rate a listener hears. `tempo_max` below is a
+    # PIECE number, which under the blob path covers speech and silence
+    # together and overstates the rate. A producer that does not record
+    # `qc["speech_tempo"]` is absent here rather than guessed at.
     sp_tempos = [float(s.qc["speech_tempo"]) for s in segs
                  if s.qc.get("speech_tempo") is not None]
     fit_end = max((s.dst_end for s in segs), default=0.0)
@@ -383,26 +366,24 @@ def summarize(plan: TimingPlan, *, source_duration_s: Optional[float] = None) ->
         "speech_tempo_max": round(max(sp_tempos), 4) if sp_tempos else None,
         "speech_tempo_mean": (round(sum(sp_tempos) / len(sp_tempos), 4)
                               if sp_tempos else None),
-        # The headline for pause absorption: how many cues fitted their slot
-        # without the speech being touched at all.
+        # How many cues fitted their slot without the speech being touched.
         "speech_untouched_segments": sum(
             1 for s in segs if s.qc.get("speech_untouched")),
         "pause_absorbed_s": round(
             sum(float(s.qc.get("pause_absorbed_s") or 0.0) for s in segs), 3),
         "pause_added_s": round(
             sum(float(s.qc.get("pause_added_s") or 0.0) for s in segs), 3),
-        # Deliberately separate from `overrun_into_gap_s`: the same seconds
-        # of gap, but a borrow is a decision and an overrun is damage the
-        # cap could not absorb. Summing them together would hide which.
+        # Separate from `overrun_into_gap_s`: the same seconds of gap, but a
+        # borrow is a decision and an overrun is what the cap could not absorb.
         "borrowed_s": round(
             sum(float(s.qc.get("borrowed_s") or 0.0) for s in segs), 3),
         "borrowed_segments": sum(1 for s in segs if s.qc.get("borrowed_s")),
         "overrun_into_gap_s": round(
             sum(float(s.qc.get("overrun_into_gap_s") or 0.0) for s in segs), 3),
-        # Slot time a producer could not fill because its slowdown floor
-        # bound first -- i.e. audible silence left inside a segment's own
-        # slot. 0.0 means every short clip was stretched out to cover its
-        # slot; a producer that never tries leaves this absent, not zero.
+        # Slot time a producer could not fill because its slowdown floor bound
+        # first -- audible silence left inside a segment's own slot. 0.0 means
+        # every short clip was stretched to cover its slot; a producer that
+        # never tries leaves this absent rather than zero.
         "unfilled_slot_s": round(
             sum(float(s.qc.get("unfilled_s") or 0.0) for s in segs), 3),
         "unfilled_slot_segments": sum(1 for s in segs if s.qc.get("unfilled_s")),
@@ -428,21 +409,16 @@ OVERLAP_POLICIES = ("serialize", "keep")
 def _next_slot_start(plans: List["SegmentPlan"], i: int) -> Optional[float]:
     """Where the next NON-overlapping slot begins, or None at the end.
 
-    Nested cues are skipped on purpose. The caller uses this to measure the
-    source gap after slot `i`, and a cue that starts *inside* slot `i` does
-    not end it -- taking the next slot in list order would measure a negative
-    gap for exactly the segments that are followed by music.
+    The caller measures the source gap after slot `i` with this. Two kinds of
+    cue are skipped:
 
-    MUTED cues are skipped for the same reason, one step further on. The
-    operator took that cue out of the dub, so the next boundary is the next
-    cue that is still spoken. Stopping at the muted one would measure the
-    gap as ending where the dub has nothing left to say, which walls the
-    released seconds off behind a slot nobody occupies.
+      nested -- a cue starting INSIDE slot `i` does not end it, and taking the
+        next slot in list order would report a negative gap for exactly the
+        segments followed by music.
+      muted  -- the operator took that cue out of the dub, so the next
+        boundary is the next cue that is still spoken.
 
-    Widening the gap does not spend it. `borrow_gap_s` is 0.0 by default,
-    so the only visible effect on an unconfigured run is that the barrier
-    now sees the true distance to the next spoken line -- which is the
-    distance the cursor would have to cross anyway.
+    Widening the gap does not spend it: `borrow_gap_s` defaults to 0.0.
     """
     end = plans[i].slot.end
     for j in range(i + 1, len(plans)):
@@ -471,87 +447,60 @@ def plan_naive_slot(
     absorb_max_runs: int = 8,
     out_json: Optional[Path] = None,
 ) -> TimingPlan:
-    """Reproduce today's behaviour AS A TIMING PLAN.
-
-    This exists so the control arm and the treatment arms go through the
-    identical renderer. Without it, any measured difference between "current
-    pipeline" and a new producer would be confounded by the rendering path --
-    different ffmpeg graphs, different resampling, different cap semantics --
-    and the comparison would not be about timing at all.
+    """The control arm: today's behaviour expressed as a timing plan.
 
     One Piece per segment, target = slot - margin, and the same shift-forward
-    cursor `backend.mix` uses today, so overruns cascade rather than overlap.
+    cursor `backend.mix` uses, so overruns cascade rather than overlap. It
+    exists so the control and treatment arms go through the identical
+    renderer and a measured difference is about timing and nothing else.
 
-    The tempo is `raw / target` in BOTH directions: a clip longer than its
-    slot is compressed, and a clip SHORTER than its slot is expanded to fill
-    it, so a short dub line does not leave a hole in the middle of its own
-    slot. `min_tempo` bounds the expansion -- past roughly 1.4x it stops
-    sounding like speech -- and whatever the floor could not absorb is
-    recorded per segment as `qc["unfilled_s"]` and summed into the plan
-    summary as `unfilled_slot_s`. That number is the honest answer to "is
-    there still a pause?", and it is why the floor is reported rather than
-    just applied.
+    The tempo is `raw / target` in both directions: a clip longer than its
+    slot is compressed, a shorter one is expanded to fill it. `min_tempo`
+    bounds the expansion; whatever the floor cannot absorb is recorded per
+    segment as `qc["unfilled_s"]` and summed as `unfilled_slot_s`.
 
     `use_target_duration` reads `segments[].target_duration_s` as the slot
-    length when it is present, instead of `end - start`. That is the field
-    stage 9c (duration planning) and `backend.edits.set_speed` both write, so
-    without it a per-segment speed edit is silently ignored by this producer.
-    It defaults to False so the m2 control arm keeps the exact semantics it
-    was measured with.
+    length when present, instead of `end - start`. Stage 9c and
+    `backend.edits.set_speed` both write that field, so without this a
+    per-segment speed edit is silently ignored. Defaults to False so the m2
+    control arm keeps the semantics it was measured with.
 
-    `overlap_policy="keep"` stops the cursor serialising SIMULTANEOUS SPEECH.
+    `overlap_policy="keep"` stops the cursor serialising simultaneous speech.
     A cue whose slot starts inside the previous cue's slot is a second voice
-    talking over the first, not a cue that follows it, and the monotone cursor
-    cannot express that: it pushes the nested cue past the one it overlaps,
-    which on job 20261022-044302 moved a 0.35 s backchannel (26.22-26.58,
-    inside a 23.93-30.73 turn) out to ~32.2 s -- into the middle of a 7.2 s
-    stretch of music. `keep` places such a cue at its own slot start and does
-    NOT advance the cursor, so the cue it overlaps still owns the timeline.
-    The mix renders this already: `backend.mix._ffmpeg_mix_plan` is one
-    `adelay` per clip into `amix` and has never required non-overlap.
-    `summarize` then reports the overlap honestly instead of reporting zero
-    because the overlap was displaced rather than absent.
+    talking over the first, and the monotone cursor can only push it past the
+    cue it overlaps -- which can land it seconds later, in the middle of
+    music. `keep` places it at its own slot start and does NOT advance the
+    cursor, so the cue it overlaps still owns the timeline.
+    `backend.mix._ffmpeg_mix_plan` is one `adelay` per clip into `amix` and
+    has never required non-overlap.
 
-    `gap_barrier_s` (0.0 = off) stops the cascade walking into that music in
-    the first place. A source gap at least this long after a cue is a wall:
-    the cue's target is shortened to whatever is left before its slot ends,
-    so it is sped up (within `max_tempo`) rather than allowed to run on over
-    non-speech audio. Whatever the cap still cannot absorb is recorded as
-    `qc["overrun_into_gap_s"]` -- the clip is never truncated, because losing
-    a line is worse than a short bleed. Clamping the cue also resets the
-    cursor for free: it now ends before the gap, so the next cue is placed at
-    its own slot start instead of inheriting the drift.
+    `gap_barrier_s` (0.0 = off) makes a source gap at least this long after a
+    cue a wall: the cue's target is shortened to what is left before its slot
+    ends, so it is sped up within `max_tempo` rather than running on over
+    non-speech audio. What the cap cannot absorb is recorded as
+    `qc["overrun_into_gap_s"]`; the clip is never truncated. Clamping also
+    resets the cursor, so the next cue starts at its own slot start.
 
-    `borrow_gap_s` (0.0 = off) turns that same gap from a WALL into a BUDGET.
-    The barrier says "do not run on into the music"; borrowing says "but you
-    may have this much of it, on purpose". The cue's target is extended by
-    `min(borrow_gap_s, gap_after * borrow_frac)` before the tempo is
-    computed, so a cue that needed 1.30x gets 1.20x and one that was pinned
-    at the cap may come under it. Three limits, each for a reason:
-    `borrow_frac` leaves half the silence silent, because the gap is shared
-    and taking all of it restarts the cascade in the next cue; a NESTED cue
-    never borrows, because it does not advance the cursor and two cues would
-    then spend the same seconds; and the LAST cue never borrows, because
-    `_next_slot_start` returns None and there is no measured gap to take
-    from. The seconds are the same ones `overrun_into_gap_s` reports, but
-    the two are opposite claims -- an overrun is damage the cap could not
-    absorb, a borrow is a decision -- so they are recorded separately, and
-    `qc["tempo_unborrowed"]` carries the counterfactual so the trade is
-    legible after the fact rather than inferred.
+    `borrow_gap_s` (0.0 = off) turns that gap into a budget instead: the
+    target is extended by `min(borrow_gap_s, gap_after * borrow_frac)` before
+    the tempo is computed. Three limits: `borrow_frac` leaves part of the
+    silence silent, because taking all of it restarts the cascade in the next
+    cue; a nested cue never borrows, because it does not advance the cursor
+    and two cues would spend the same seconds; the last cue never borrows,
+    because `_next_slot_start` returns None. Recorded as `qc["borrowed_s"]`,
+    separately from `overrun_into_gap_s`, with the counterfactual tempo in
+    `qc["tempo_unborrowed"]`.
 
-    `absorb_pauses` changes WHERE the compression is spent inside the clip.
-    Off (the default) the whole clip gets one `local_tempo`, so the engine's
-    own silence at commas and sentence breaks is compressed at the same rate
-    as the speech -- budget spent on something no listener was going to
-    notice. On, `backend.pause_absorb` VADs the clip, shrinks its gaps to
-    their tiered floors first, and only then speeds the speech up; the cue
-    becomes one Piece per speech run with the kept gaps between them.
-    `qc["speech_tempo"]` is then the number a listener actually hears, and
-    `speech_untouched` records the common case where the silence covered the
-    whole deficit and the speech rendered at exactly 1.0x. It runs in
-    reverse too: a clip shorter than its slot grows its pauses rather than
-    drawling at `min_tempo`. A clip the VAD cannot use falls straight back
-    to the single-Piece blob, so this never costs a render.
+    `absorb_pauses` changes where the compression is spent inside the clip.
+    Off, the whole clip gets one `local_tempo`, so the engine's own silence at
+    commas is compressed at the same rate as the speech. On,
+    `backend.pause_absorb` VADs the clip, shrinks its gaps to their tiered
+    floors first and only then speeds the speech up; the cue becomes one Piece
+    per speech run with the kept gaps between them. `qc["speech_tempo"]` is
+    then the rate a listener hears, and `speech_untouched` marks a cue whose
+    silence covered the whole deficit. It runs in reverse too: a clip shorter
+    than its slot grows its pauses rather than drawling at `min_tempo`. A clip
+    the VAD cannot use falls back to the single-Piece blob.
     """
     if overlap_policy not in OVERLAP_POLICIES:
         raise ValueError(f"unknown overlap_policy {overlap_policy!r}; "
@@ -573,15 +522,13 @@ def plan_naive_slot(
         "absorb_max_runs": absorb_max_runs,
     })
 
-    # Built up front because the gap barrier needs to look AHEAD at the next
-    # slot, which the old one-pass loop could not do.
+    # Built up front: the gap barrier has to look ahead at the next slot.
     segs = list(data.get("segments", []))
     plans = [_base_segment_plan(s, pause_min_s=DEFAULT_PAUSE_MIN_S) for s in segs]
 
     cursor = 0.0
     # End of the last slot that advanced the cursor. A nested cue must not
-    # become the thing the NEXT cue is tested against, or one overlap would
-    # cascade into a chain of them.
+    # become what the next cue is tested against, or one overlap cascades.
     prev_slot_end: Optional[float] = None
     for i, (seg, sp) in enumerate(zip(segs, plans)):
         raw = raw_clip_duration(seg)
@@ -610,10 +557,8 @@ def plan_naive_slot(
         target = max(0.01, slot_dur - safety_margin_s)
         target_unborrowed = target
 
-        # The lookahead is hoisted out of the barrier test because BOTH
-        # features need it and they need it at different thresholds: the
-        # barrier only fires at `gap_barrier_s` (1.0 s by default), while a
-        # 0.4 s gap is too short to be a wall and is still real slack.
+        # Hoisted out of the barrier test: borrowing needs the same lookahead
+        # at a lower threshold than `gap_barrier_s`.
         gap_after: Optional[float] = None
         if not nested:
             nxt = _next_slot_start(plans, i)
@@ -625,10 +570,8 @@ def plan_naive_slot(
         borrow = 0.0
         if borrow_gap_s > 0 and gap_after is not None and not nested:
             if used_target_duration:
-                # `set_speed` shortened this slot deliberately. Borrowing
-                # would hand the seconds straight back and cancel the edit
-                # at exit code 0 -- the same silent-no-op shape CLAUDE.md
-                # records for the replay path.
+                # `set_speed` shortened this slot deliberately; borrowing
+                # would hand the seconds back and cancel the edit silently.
                 sp.qc["borrow_skipped"] = "target_duration_s"
             else:
                 borrow = min(borrow_gap_s, gap_after * borrow_frac)
@@ -642,11 +585,9 @@ def plan_naive_slot(
         if (gap_barrier_s > 0 and not nested and gap_after is not None
                 and gap_after >= gap_barrier_s):
             barrier = True
-            # Run to the music and not one frame past it -- plus whatever
-            # was deliberately borrowed, which is the one part of the gap
-            # this cue is allowed to own. `placed` is already the drifted
-            # position, so this is what is actually left, not the slot's
-            # nominal length.
+            # Run to the gap and no further, plus whatever was borrowed.
+            # `placed` is the drifted position, so this is what is actually
+            # left rather than the slot's nominal length.
             target = max(0.01, min(target, sp.slot.end + borrow - placed))
 
         # 3. how fast, and WHERE the compression is spent
@@ -666,8 +607,7 @@ def plan_naive_slot(
                         max_runs=absorb_max_runs,
                     )
                 except Exception as exc:                    # noqa: BLE001
-                    # A planning optimisation must never be the difference
-                    # between a dub and no dub.
+                    # Fall back to the blob tempo; absorption is optional.
                     log.warning("timing[naive_slot]: pause absorption failed "
                                 "on %s (%s: %s); using the blob tempo",
                                 sp.id, type(exc).__name__, exc)
@@ -685,13 +625,12 @@ def plan_naive_slot(
             tempo, capped = _clamp_tempo(raw / target, min_tempo, max_tempo)
             sp.pieces = [Piece(src_span=Span(0.0, raw), dst_start=placed,
                                local_tempo=tempo, anchor="whole", text=text)]
-            # The blob tempo IS the speech tempo when nothing was absorbed,
-            # and saying so keeps `summarize` from having to guess which
-            # path a segment took.
+            # With nothing absorbed the blob tempo IS the speech tempo;
+            # recording it saves `summarize` guessing which path was taken.
             sp.qc["speech_tempo"] = round(tempo, 4)
             if capped:
                 sp.qc["tempo_cap_hit"] = True
-                # Only an expansion that hit the FLOOR leaves silence. A
+                # Only an expansion pinned at the floor leaves silence; a
                 # compression pinned at the ceiling overruns instead, which
                 # the shift-forward cursor already accounts for.
                 unfilled = target - raw / tempo
@@ -699,10 +638,8 @@ def plan_naive_slot(
                     sp.qc["unfilled_s"] = round(unfilled, 4)
 
         if borrow > 1e-3:
-            # The counterfactual, recorded now because the pre-borrow target
-            # does not survive this loop. Without it you can see WHICH cues
-            # borrowed but never what the borrowing bought, which is the
-            # whole question when deciding whether to keep the feature.
+            # The counterfactual tempo, recorded here because the pre-borrow
+            # target does not survive this loop.
             t_un, _ = _clamp_tempo(raw / target_unborrowed, min_tempo, max_tempo)
             sp.qc["tempo_unborrowed"] = round(t_un, 4)
         if placed > sp.slot.start + 1e-3:
@@ -712,13 +649,12 @@ def plan_naive_slot(
             if over > 1e-3:
                 sp.qc["overrun_into_gap_s"] = round(over, 4)
         if nested:
-            # Deliberately does NOT touch the cursor: the cue this one talks
-            # over still owns the timeline.
+            # Does NOT touch the cursor: the cue this one talks over still
+            # owns the timeline.
             sp.qc["overlap_kept"] = True
         else:
             # `sp.dst_end`, not `placed + pieces[0].dst_dur`: under pause
-            # absorption a cue is several Pieces and the first one's end is
-            # nowhere near the cue's.
+            # absorption a cue is several Pieces.
             cursor = sp.dst_end
             prev_slot_end = (sp.slot.end if prev_slot_end is None
                              else max(prev_slot_end, sp.slot.end))
@@ -740,16 +676,14 @@ def plan_naive_slot(
 def plan_warped(merged_json: Path, **params) -> TimingPlan:
     """The `warped` producer. See `backend.warp_plan` for what it does.
 
-    A thin wrapper so the producer registry keeps working unchanged:
-    `plan()` looks for `plan_<name>` on this module first. The import is
-    lazy because `backend.warp_plan` pulls in scipy, soundfile and a VAD,
-    and a process that only reads a plan back should pay for none of them.
+    A thin wrapper so `plan()`, which looks for `plan_<name>` on this module,
+    keeps working. The import is lazy: `backend.warp_plan` pulls in scipy,
+    soundfile and a VAD.
 
-    It is also the one producer that RENDERS AUDIO -- it writes a warped
-    clip per cue and `tts_warped_audio` onto each segment -- because a
-    `Piece` cannot express a time-varying rate, so the plan it returns is
-    only meaningful against files that already exist. Mix it with
-    `clip_source="warped"`.
+    This is the one producer that RENDERS AUDIO -- it writes a warped clip per
+    cue and `tts_warped_audio` onto each segment, because a `Piece` cannot
+    express a time-varying rate. The plan it returns is only meaningful
+    against those files. Mix it with `clip_source="warped"`.
     """
     from .warp_plan import plan_warped as _impl
 
@@ -764,9 +698,8 @@ def apply_plan_to_merged(
 ) -> dict:
     """Write the plan into `extra["timing_plan"]` plus per-segment qc flags.
 
-    Stored inside the merged JSON because that is the pipeline's existing data
-    bus -- mix and lipsync already read `extra.{duration,tts,mix}` and need no
-    new wiring to see this.
+    Stored in the merged JSON, the pipeline's data bus: mix and lipsync
+    already read `extra.{duration,tts,mix}` and need no new wiring.
     """
     merged_json = Path(merged_json)
     data = json.loads(merged_json.read_text())
@@ -801,9 +734,8 @@ def plan(method: str, merged_json: Path, **params) -> TimingPlan:
     from . import timing as _self
     fn = getattr(_self, f"plan_{method}", None)
     if fn is None:
-        # The heavier producers (word_anchored, dp) live in `timing_advanced`
-        # to keep this module importable without their deps. Import lazily so
-        # a plain `plan("pause_aware", ...)` never pays for them.
+        # word_anchored and dp live in `timing_advanced`; imported lazily so
+        # `plan("pause_aware", ...)` never pays for them.
         try:
             from . import timing_advanced as _adv
         except Exception as e:                       # pragma: no cover
@@ -821,10 +753,9 @@ def plan(method: str, merged_json: Path, **params) -> TimingPlan:
 # producer: pause_aware -- anchor every speech run to its SOURCE onset
 # ---------------------------------------------------------------------------
 
-# A chunk shorter than this (in RAW clip seconds) cannot be rendered: the
-# ffmpeg/rubberband analysis windows are ~10 ms and `backend.stretch.time_stretch`
-# raises rather than emit an empty file. We merge such a run into its neighbour
-# instead of handing the renderer a clip it will reject.
+# Shortest renderable chunk, in RAW clip seconds. The ffmpeg/rubberband
+# analysis windows are ~10 ms and `backend.stretch.time_stretch` raises rather
+# than emit an empty file, so a shorter run is merged into its neighbour.
 MIN_PIECE_SRC_S = 0.06
 
 
@@ -833,10 +764,9 @@ def _merge_tiny_runs(
 ) -> Tuple[List[Span], List[Optional[Span]], List[List[int]]]:
     """Merge speech runs whose proportional share of the clip is unrenderable.
 
-    Returns (merged_runs, pause_before_each_merged_run, source_indices_per_run).
+    Returns (merged_runs, pause_before_each_merged_run, source_indices_per_run);
     `pause_before[0]` is always None. A merged run keeps the FIRST member's
-    onset, because the onset is the thing this producer exists to preserve;
-    the swallowed pause simply stops being reinserted.
+    onset and the swallowed pause stops being reinserted.
     """
     total = sum(s.dur for s in speech)
     if total <= 0:
@@ -879,11 +809,10 @@ def _cut_points_char_mass(
 ) -> Optional[Tuple[List[float], str]]:
     """Cut the clip at TEXT word boundaries nearest each proportional target.
 
-    Without TTS word timings the only signal about where words end is the text
-    itself. Assuming a constant characters-per-second rate turns a character
-    offset into a clip time; snapping to a token boundary first is what makes
-    this better than a blind proportional cut, because it stops a chunk
-    starting mid-word, which is audible as a click even before any stretching.
+    The fallback when there are no TTS word timings: assumes a constant
+    characters-per-second rate to turn a character offset into a clip time,
+    then snaps to a token boundary so a chunk never starts mid-word (audible
+    as a click).
     """
     toks = (text or "").split()
     n = len(weights)
@@ -923,8 +852,8 @@ def _cut_points_tts_words(
 ) -> Optional[Tuple[List[float], str, List[Tuple[int, int]]]]:
     """Cut at the TTS word boundary nearest each proportional target.
 
-    `tts_words[]` are CLIP-RELATIVE (see module docstring), which is exactly the
-    coordinate system `Piece.src_span` wants, so no conversion happens here.
+    `tts_words[]` are clip-relative, the same coordinates `Piece.src_span`
+    uses, so nothing is converted here.
     """
     ws = []
     for i, w in enumerate(tts_words or []):
@@ -970,20 +899,16 @@ def _segment_costs(
     kept_pauses: List[float],
     src_pauses_used: List[Optional[Span]],
 ) -> dict:
-    """Cost terms, defined once here so `plan_dp` can search over the same thing.
+    """Cost terms, defined once here so `plan_dp` searches over the same thing.
 
-    duration -- |rendered speech seconds - SOURCE SPEECH seconds| / source speech
-        seconds. Deliberately measured against the speech budget and not against
-        the slot: optimising toward the slot is "TTS duration == source
-        duration", which is the failure mode this module exists to avoid.
-    pause    -- sum|reinserted pause - source pause| / sum(source pause). 0.0 when
-        the segment has no internal pause, so a one-run segment is never
-        penalised for a structure it does not have.
-    rate     -- duration-weighted mean |local_tempo - 1|. Duration-weighted so a
-        heavy stretch on a 4 s chunk outranks the same stretch on a 0.2 s one.
-    onset    -- mean |piece.dst_start - source run onset| in seconds. This is the
-        quantity the producer is actually trying to minimise; it is reported as
-        a cost term so a DP can trade it against the other three.
+    duration -- |rendered speech seconds - source speech seconds| / source
+        speech seconds. Measured against the speech budget, not the slot.
+    pause    -- sum|reinserted pause - source pause| / sum(source pause); 0.0
+        when the segment has no internal pause.
+    rate     -- duration-weighted mean |local_tempo - 1|, so a heavy stretch on
+        a 4 s chunk outranks the same stretch on a 0.2 s one.
+    onset    -- mean |piece.dst_start - source run onset|, in seconds. The
+        quantity this producer minimises, reported so a DP can trade it off.
     """
     src_speech_s = sum(r.dur for r in runs)
     dst_speech_s = sum(p.dst_dur for p in pieces)
@@ -1027,19 +952,16 @@ def plan_pause_aware(
 ) -> TimingPlan:
     """Place one Piece per SOURCE speech run, anchored to that run's onset.
 
-    Why this is not `plan_naive_slot` with extra steps: naive targets
-    `slot - margin`, and a slot is a diarization turn -- lead-in silence,
-    trailing silence and every internal pause included. Fitting the TTS to that
-    is the "total duration matches" objective the project rejects. Here the
-    budget is `sum(src_speech[].dur)` and the pauses are put back where the
-    source put them, so the thing being matched is WHERE SPEECH STARTS.
+    Unlike `plan_naive_slot`, which targets `slot - margin` (a diarization
+    turn, lead-in and trailing silence included), the budget here is
+    `sum(src_speech[].dur)` and the pauses go back where the source had them,
+    so what is matched is where speech starts.
 
-    The placement rule reduces exactly to `dst_start == src_speech[k].start`
-    whenever the chunk physically fits, and only departs from the onset when it
-    cannot -- at which point it degrades to the tightest legal pause rather than
+    `dst_start == src_speech[k].start` exactly whenever the chunk fits; when it
+    does not, placement degrades to the tightest legal pause rather than
     overlapping. `pause_scale < 1` caps each reinserted pause below its source
-    length to buy room back when the target overruns; `pause_min_keep_s` floors
-    it so a shrunk pause stays a pause instead of a glitch.
+    length to buy room back on an overrun, and `pause_min_keep_s` floors it so
+    a shrunk pause stays a pause.
     """
     merged_json = Path(merged_json)
     data = json.loads(merged_json.read_text())
@@ -1072,8 +994,8 @@ def plan_pause_aware(
             sp.qc["error"] = str(exc)
             sp.pieces = []
 
-        # cross-segment guard: honouring a source onset must never stack speech
-        # on top of the previous segment's tail.
+        # Cross-segment guard: an honoured source onset must not stack speech
+        # on the previous segment's tail.
         if sp.pieces and shift_forward:
             first = sp.pieces[0].dst_start
             if first < cursor - 1e-6:
@@ -1112,9 +1034,9 @@ def _plan_one_pause_aware(
         sp.qc["no_audio"] = True
         return
     if not seg.get("words"):
-        # no forced alignment -> source_speech_and_pauses returned one slot-wide
-        # run, so this segment is naive placement wearing a pause_aware hat. Say
-        # so loudly rather than letting the sweep read it as a working method.
+        # No forced alignment, so `source_speech_and_pauses` returned one
+        # slot-wide run and this segment is really naive placement. Flag it so
+        # a sweep does not read it as pause_aware working.
         sp.qc["degraded_no_words"] = True
 
     runs, pause_before, run_map = _merge_tiny_runs(sp.src_speech, sp.src_pauses, raw)
@@ -1150,7 +1072,7 @@ def _plan_one_pause_aware(
 
     # --- tempo --------------------------------------------------------------
     # One tempo for the whole segment keeps the speaking rate steady inside a
-    # turn, which listeners notice far more than a few tens of ms of onset drift.
+    # turn, which is more audible than a few tens of ms of onset drift.
     seg_tempo, capped = _clamp_tempo(raw / speech_budget, min_tempo, max_tempo)
     if capped:
         sp.qc["tempo_cap_hit"] = True
@@ -1191,10 +1113,10 @@ def _plan_one_pause_aware(
         else:
             src_gap = pause_before[i].dur if pause_before[i] is not None else 0.0
             natural = desired - prev_end
-            # pause_scale caps the reinserted pause; pause_min_keep_s floors it.
-            # With pause_scale == 1 and a chunk that fits, hi == src_gap and
-            # natural == src_gap, so `kept` IS the source pause and `start` IS
-            # the source onset -- the cursor only bites when the chunk overruns.
+            # pause_scale caps the reinserted pause, pause_min_keep_s floors
+            # it. With pause_scale == 1 and a chunk that fits, `kept` is the
+            # source pause and `start` is the source onset; the cursor only
+            # bites on an overrun.
             hi = max(pause_min_keep_s, src_gap * pause_scale)
             kept = min(max(natural, pause_min_keep_s), hi)
             if kept > natural + 1e-9:
@@ -1268,8 +1190,7 @@ def main(argv=None) -> int:
     if fn is None:
         print(f"producer {a.method!r} is not implemented yet", file=sys.stderr)
         return 2
-    # Producers land independently, so pass only what this one actually accepts
-    # instead of exploding on an argument another agent has not added.
+    # Pass only what this producer accepts; they do not share a signature.
     try:
         sig = inspect.signature(fn)
         params = {k: v for k, v in wanted.items() if k in sig.parameters}

@@ -111,12 +111,27 @@ def _from_voices_json(job_root: Path) -> Dict[str, dict]:
 def speaker_genders(job_root: Path, merged: Dict[str, Any]) -> Dict[str, str]:
     """Predicted gender per speaker, from whatever recorded it.
 
-    Stage 9d computes this from the reference clips with the wav2vec2
-    classifier and writes it beside the voice. Re-deriving it here would
-    mean loading 1.2 GB of weights inside a web request, which is not a
-    thing a GET should do.
+    Three sources, oldest-wins by `setdefault` so a later re-run cannot
+    quietly contradict what the operator was shown, with an explicit edit
+    stamped over everything at the end:
+
+    1. `voices/<stem>.gender.json` -- stage 6b, which runs BEFORE the MT
+       gate so this table has a gender to show at the moment it asks for a
+       voice. This is the one that is populated at the gate.
+    2. `voices/<stem>.speaker_voice_map.json` -- stage 9d, past the gate.
+    3. the merged JSON's `extra.speaker_voice_map`.
+
+    Never re-derived here: that would mean loading 1.2 GB of weights inside
+    a web request, which is not a thing a GET should do.
     """
     out: Dict[str, str] = {}
+    for info in (_read_json(p) or {} for p in
+                 (job_root / "voices").glob("*.gender.json")):
+        if isinstance(info, dict):
+            for sid, rec in info.items():
+                g = (rec or {}).get("gender") if isinstance(rec, dict) else None
+                if g:
+                    out.setdefault(str(sid), str(g))
     for info in (_read_json(p) or {} for p in
                  (job_root / "voices").glob("*.speaker_voice_map.json")):
         if isinstance(info, dict):
@@ -282,12 +297,14 @@ def build_table(job_root: Path, config: Dict[str, Any], *,
     # usable face evidence or no rendered dub is simply absent from these,
     # which is why the row falls back to None rather than a broken link.
     try:
-        from .speaker_media import dub_sample_paths, face_crop_paths
+        from .speaker_media import (dub_sample_paths, face_crop_paths,
+                                    speaker_preview_paths)
         dubs = dub_sample_paths(merged)
         crops = face_crop_paths(job_root)
+        previews = speaker_preview_paths(job_root)
     except Exception as e:                              # noqa: BLE001
         log.warning("speakers: face/dub media unavailable (%s)", e)
-        dubs, crops = {}, {}
+        dubs, crops, previews = {}, {}, {}
     voices = resolve_speaker_voices(job_root, config, merged)
     genders = speaker_genders(job_root, merged)
     labels = read_labels(job_root)
@@ -314,8 +331,12 @@ def build_table(job_root: Path, config: Dict[str, Any], *,
             "voice_score": v.get("score"),
             "voice_rationale": v.get("rationale"),
             "tone": tones.get(sid),
-            # The speaker's OWN voice, from the source audio.
-            "reference_url": (_files_url(ref, data_dir) if ref else None),
+            # The speaker's OWN voice, from the source audio. Before the
+            # voices stage has run there is no reference clip, so fall back
+            # to a preview cut from the source: the operator has to hear the
+            # speaker to pick a gender, and that comes before this stage.
+            "reference_url": (_files_url(ref or previews[sid], data_dir)
+                              if (ref or previews.get(sid)) else None),
             # What the dub will actually sound like for this speaker, and
             # the face stage 6 attributed to them. Both are what the review
             # card is for: judging a cast means hearing the new voice beside

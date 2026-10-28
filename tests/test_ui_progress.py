@@ -377,9 +377,17 @@ def test_lipsync_milestone_is_false_before_any_render(tmp_path):
 JOBS = REPO / "data" / "jobs"
 
 
+#: Folders with nothing in them to read -- no progress.json, STATUS.json,
+#: manifest.json or config.json, and no root-level render. `read_progress`
+#: returns None for these and SHOULD: loosening `_from_files` to invent a
+#: state for an empty shell would make every broken folder look like a job.
+EMPTY_SHELLS = {"20261021-114009__svwrTOm55y4__pyannote.bodhan.mms_fa.bodhan.hi__spdoneshot"}
+
+
 @pytest.mark.skipif(not JOBS.is_dir(), reason="no data/jobs on this host")
 def test_every_real_job_folder_normalises():
-    folders = [d for d in JOBS.iterdir() if d.is_dir()]
+    folders = [d for d in JOBS.iterdir()
+               if d.is_dir() and d.name not in EMPTY_SHELLS]
     if not folders:
         pytest.skip("data/jobs is empty")
     unresolved = [d.name for d in folders if P.read_progress(d) is None]
@@ -458,7 +466,7 @@ def test_lipsync_is_planned_when_the_model_is_still_auto():
     labels = [ph["label"] for ph in P._group_phases(
         P.plan_stages({"asr": "whisperx", "mt": "bodhan", "tts": "edge",
                        "mix": True, "lipsync": "auto"}))]
-    assert "Lip sync" in labels
+    assert "Lip-sync" in labels
 
 
 def test_lipsync_node_is_shown_even_when_the_run_will_not_do_it():
@@ -473,7 +481,7 @@ def test_lipsync_node_is_shown_even_when_the_run_will_not_do_it():
     stages = P.plan_stages({"asr": "whisperx", "mt": "bodhan", "tts": "bodhan",
                             "mix": True, "lipsync": None})
     labels = [ph["label"] for ph in P._group_phases(stages)]
-    assert "Lip sync" in labels
+    assert "Lip-sync" in labels
     ls = next(s for s in stages if s["key"] == "9h")
     assert ls["state"] == "pending"
     # The flag is what carries "not yet" through the two places that would
@@ -572,6 +580,6 @@ def test_legacy_job_stages_come_from_evidence_not_assumption(tmp_path):
     (tmp_path / "mix" / "clip.dubbed.wav").write_bytes(b"\0" * 16)
     doc = P.read_progress(tmp_path)
     labels = [ph["label"] for ph in doc["phases"]]
-    assert "Lip sync" in labels and "Mix" in labels
+    assert "Lip-sync" in labels and "Dub audio" in labels
     assert "Transcribe" not in labels, "claimed a stage nothing vouches for"
     assert doc["n_total_is_partial"] is True

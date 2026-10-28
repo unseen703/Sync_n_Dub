@@ -22,13 +22,13 @@ in-env PyTorch port.
 
 ### Node is for the UI build only, and bare `npm` is broken
 
-`ui/web2/` (the operator UI) is a Vite app. Its toolchain lives in a separate
+`ui/web/` (the operator UI) is a Vite app. Its toolchain lives in a separate
 conda env so it never reaches the Python server's PATH:
 
 ```
 conda create -n dubui nodejs=20     # 20.20.2 from pkgs/main
-conda run -n dubui npm --prefix ui/web2 install
-conda run -n dubui npm --prefix ui/web2 run build     # -> ui/web-dist/
+conda run -n dubui npm --prefix ui/web install
+conda run -n dubui npm --prefix ui/web run build     # -> ui/web-dist/
 ```
 
 The route in is `conda run -n dubui`. The system has node **v12.22.9** on

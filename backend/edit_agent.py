@@ -55,7 +55,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from . import jobs as _jobs
 from . import tracing as _tracing
 from .edits import (STAGE_ORDER, sample_prompts_text, EditContext, EditError, EditOp, EditResult,
-                    _lipsync_model_ids,
+                    _lipsync_model_ids, _tone_style_ids,
                     OP_SPECS, OPS, Scope, apply_edits, rerun_stages, revert,
                     _hhmmss, _seg_end, _seg_start, _seg_text)
 
@@ -465,7 +465,8 @@ Use only the following operation names and parameters.
 
 3. set_tone
    Change the delivery tone.
-   Required params: tone
+   Required params: tone — one of exactly these engine styles: {{tone_styles}}
+     Do not invent a register. "formal", "casual", "warm" and "urgent" are NOT engine styles and are rejected by the pipeline. If the user asks for a register that is not in the list and none of the listed styles clearly means the same thing, return {"ops": []}.
    Optional params: rewrite_text (boolean; defaults to true)
 
 4. code_mix
@@ -564,7 +565,7 @@ Choose the operation that most directly matches the requested change.
 - Exact replacement wording: set_text. Preserve the user's replacement text exactly.
 - Change the translation while retaining the source meaning: retranslate.
 - Change ONE word or phrase and leave the rest of the line exactly as it is: replace_term. Prefer it over retranslate whenever the request names a specific word, including "translate the word X", "replace X with Y" or "keep X but change it to Y". retranslate regenerates the whole line and will alter wording the request never mentioned.
-- Change delivery style, such as formal, casual, serious, or energetic: set_tone.
+- Change delivery style, such as a news read, a lecture, or an emotion: set_tone. The style must be one of the engine styles listed under operation 3; there is no "formal" and no "casual".
 - Keep specified English technical terms in the translated sentence: code_mix.
 - Change the perceived voice gender: set_gender.
 - Correct who is speaking: set_speaker.
@@ -579,15 +580,15 @@ Do not substitute one operation for another merely because they can produce simi
 
 For requests involving distinct changes, create one operation per change. If one change fully satisfies the request, emit exactly one operation.
 
-For example, "make SPK_01 more formal" requires set_tone with scope {"speaker":"SPK_01"}. Do not add a time range.
+For example, "read SPK_01's lines as a news anchor" requires set_tone with tone "news" and scope {"speaker":"SPK_01"}. Do not add a time range.
 
-"Make the translation more formal and preserve the words gradient and weight in English" requires set_tone and code_mix, each with the same appropriate scope.
+"Make it sound sad and preserve the words gradient and weight in English" requires set_tone (tone "sad") and code_mix, each with the same appropriate scope.
 
 ## PARAMETER RULES
 
 - Include all required parameters and only relevant optional parameters.
 - Do not include default values unless they are needed to make the requested behavior explicit.
-- For set_tone, use rewrite_text=true unless the user explicitly asks to change vocal delivery without rewriting wording.
+- For set_tone, use rewrite_text=true unless the user explicitly asks to change vocal delivery without rewriting wording. Never pass a tone that is not in the engine list; an unknown style is refused by the pipeline, not quietly ignored.
 - For code_mix, include terms only when the user identifies terms to preserve. Do not invent a termbase path.
 - For set_speed, use the numeric factor specified or unambiguously implied by the user. Do not invent a factor for vague requests such as "a little faster"; if the operation requires a factor and no configured default exists, return {"ops": []}.
 - For lipsync_window, use the requested time window. Do not change the lip-sync model unless requested or necessary to specify a model.
@@ -626,67 +627,81 @@ Return the JSON object only."""
 #: two of them were unreachable through the agent. Substituting at import
 #: keeps `_SYSTEM` a plain string, which is what the drift guards in
 #: `tests/test_edit_agent.py` grep.
-_SYSTEM = _SYSTEM_TEMPLATE.replace("{{lipsync_models}}", _lipsync_model_ids())
+_SYSTEM = (_SYSTEM_TEMPLATE
+           .replace("{{lipsync_models}}", _lipsync_model_ids())
+           .replace("{{tone_styles}}", _tone_style_ids()))
 
 
 def parse_request(nlq: str, *, data: Dict[str, Any],
                   client=None) -> Tuple[List[EditOp], str]:
-    """Return `(ops, source)`; source is "llm", "rules" or "rules-unverified".
+    """Return `(ops, source)`; source is "rules" or "llm".
 
-    **An empty ops array from the LLM is a verdict, not a miss.** Rule 8 of
-    `_SYSTEM` tells the model to return `{"ops": []}` rather than guess when
-    a request is ambiguous or names a speaker or cue the job does not have.
-    This used to log that at WARNING and run the regex parser anyway -- so
-    the one component that had actually read the job's speakers and cues
-    said "I cannot tell what this means", and a pattern match silently
-    overrode it. A regex cannot detect ambiguity: it either matches or it
-    does not, and matching is not the same as being right.
+    **The rule parser runs FIRST.** Most edit requests are a fixed shape —
+    "speed this up by 1.2x", "mute cue 5", "use Amit for SPEAKER_00" — and
+    the regexes read every one of them exactly, locally, in microseconds and
+    for nothing. Sending those to a 12B model over the network bought a
+    round trip per message and a non-deterministic reading of a sentence
+    that had only one reading. The LLM is now what it is good at: the
+    sentences the patterns genuinely cannot place.
 
-    The verdict is carried instead. If the model abstained and the regexes
-    still produce something, it comes back as `"rules-unverified"` with a
-    loud warning so the caller can show the reading before anything runs.
-    If neither produces ops, the error offers phrasings that work rather
-    than the internal op names, which are the agent's vocabulary and not
-    anything the user typed.
+    This reverses a deliberate earlier decision, so the reasoning it
+    replaces is worth keeping. The LLM used to go first because it reads the
+    job's actual speakers and cues and can therefore ABSTAIN — return
+    `{"ops": []}` when a request is ambiguous or names a cue that does not
+    exist — and a regex cannot: it either matches or it does not, and
+    matching is not the same as being right. Running the rules first gives
+    that veto up for every sentence they match.
+
+    What makes the trade acceptable is `_rule_parse`'s own conservatism: it
+    emits only shapes it is sure of, each branch guards the ones that could
+    swallow it, and a match now carries a real scope (`_scope_from` learned
+    cue ids at the same time as this change — before that, a matched rule
+    could be right about the op and silently wrong about half the dub).
+    What remains true is that a regex cannot detect ambiguity. If a wrong
+    reading ever reaches a render, the fix is a narrower branch here, not a
+    second opinion after the fact.
+
+    If neither parser produces ops, the error offers phrasings that work
+    rather than the internal op names, which are the agent's vocabulary and
+    not anything the user typed.
     """
     # `cue 5` / `#5` → `SEG_0004` before either parser runs, so both see the
     # same canonical cue ids the rest of the agent and `edits.py` understand.
     nlq = resolve_cue_aliases(nlq, data)
 
-    llm_abstained = False
+    ops = _rule_parse(nlq)
+    if ops:
+        return ops, "rules"
+
     if client is not None and client.available():
         try:
             ops = _llm_parse(nlq, data=data, client=client)
             if ops:
                 return ops, "llm"
-            llm_abstained = True
             log.warning(
                 "the LLM could not interpret %r -- it returned no operations, "
                 "which is what it is instructed to do when a request is "
                 "ambiguous or names a speaker or cue this job does not have",
                 nlq)
+            raise EditError(
+                f"could not interpret: {nlq!r}\n\n"
+                "  The patterns did not match, and the LLM read this job's "
+                "speakers and cues and could not match your request to any "
+                "of them.\n\n"
+                "  Try one of these shapes:\n\n"
+                + sample_prompts_text(per_op=2, indent="    "))
+        except EditError:
+            raise
         except Exception as e:
-            log.warning("llm parse failed (%s); falling back to the rule "
-                        "parser", e)
-    ops = _rule_parse(nlq)
-    if not ops:
-        raise EditError(
-            f"could not interpret: {nlq!r}\n\n"
-            + ("  The LLM read this job's speakers and cues and could not "
-               "match your request to any of them.\n\n"
-               if llm_abstained else
-               "  No OPENROUTER_API_KEY is set, so only fixed phrasings are "
-               "understood.\n\n")
-            + "  Try one of these shapes:\n\n"
-            + sample_prompts_text(per_op=2, indent="    "))
-    if llm_abstained:
-        log.warning(
-            "UNVERIFIED READING: the LLM declined to interpret this request, "
-            "but the pattern matcher produced %d operation(s) from it. A "
-            "regex matches text; it cannot tell whether the match means what "
-            "you meant. Check the plan below before applying it.", len(ops))
-        return ops, "rules-unverified"
-    return ops, "rules"
+            log.warning("llm parse failed (%s); the rule parser had already "
+                        "declined this request", e)
+
+    raise EditError(
+        f"could not interpret: {nlq!r}\n\n"
+        "  No OPENROUTER_API_KEY is set, so only fixed phrasings are "
+        "understood.\n\n"
+        "  Try one of these shapes:\n\n"
+        + sample_prompts_text(per_op=2, indent="    "))
 
 def _llm_parse(nlq: str, *, data: Dict[str, Any], client) -> List[EditOp]:
     times = [t for t in _find_times(nlq)]
@@ -727,6 +742,10 @@ _POINT_RE = re.compile(rf"\bat\s+{_TS}", re.I)
 _FACTOR_RE = re.compile(r"(?:by\s*)?(\d+(?:\.\d+)?)\s*(?:x|times)\b", re.I)
 _PERCENT_RE = re.compile(r"(?:by\s*)?(\d+(?:\.\d+)?)\s*(?:%|percent)", re.I)
 _QUOTED_RE = re.compile(r'["“”\'](.{2,400}?)["“”\']', re.S)
+#: Canonical cue ids. `resolve_cue_aliases` has already turned `cue 5`, `#5`
+#: and `segment 5` into these before either parser runs, so this is what a
+#: cue-scoped request looks like by the time `_scope_from` sees it.
+_SEG_ID_RE = re.compile(r"\bSEG_\d{4}\b", re.I)
 
 
 def _clean_ts(s: str) -> str:
@@ -745,8 +764,21 @@ def _find_times(text: str) -> List[float]:
 
 
 def _scope_from(text: str) -> Scope:
-    """Best-effort scope: a range beats a point beats a speaker beats all."""
+    """Best-effort scope: explicit cue ids beat a range beats a point beats a
+    speaker beats all.
+
+    The cue-id branch is FIRST and it is the one that was missing. By the
+    time this runs `resolve_cue_aliases` has rewritten `cue 5` into
+    `SEG_0004`, and nothing here matched that shape -- so every cue-scoped
+    request the rules parsed fell through to `Scope(all=True)`. "cue 5:
+    speed this up by 1.2x" sped up the whole dub, silently, and the UI's own
+    selection prefix was the most common way to produce that sentence.
+    """
     from .edits import _as_time
+    segs = _SEG_ID_RE.findall(text)
+    if segs:
+        # First-seen order, de-duplicated: "SEG_0004 and SEG_0004" is one cue.
+        return Scope(segments=list(dict.fromkeys(x.upper() for x in segs)))
     m = _RANGE_RE.search(text)
     if m:
         groups = [g for g in m.groups() if g]
@@ -776,31 +808,96 @@ _VOICE_STOPWORDS = {
 def _rule_parse(nlq: str) -> List[EditOp]:
     """Regex parser. Deliberately conservative: it emits only what it is sure
     of, so a half-understood sentence becomes "I did not understand" rather
-    than a confident wrong edit."""
+    than a confident wrong edit.
+
+    This is now the FIRST parser, not the fallback — see `parse_request`. The
+    branches are ordered so that the narrowest reading wins: a request that
+    quotes a phrase is a phrase edit, not a line edit and not a language
+    switch, and the guards below say so explicitly rather than relying on
+    which regex happens to be tried first.
+    """
     t = nlq.strip()
     low = t.lower()
     ops: List[EditOp] = []
     scope = _scope_from(t)
+    quotes = [q for q in _QUOTED_RE.findall(t) if q.strip()]
+
+    def _has(*names: str) -> bool:
+        return any(o.op in names for o in ops)
+
+    # mute / delete a WHOLE cue
+    #
+    # First, and with one guard: a quoted phrase means the request names text
+    # INSIDE the line, which is `replace_term` below. "There is no separate
+    # delete operation" (`_SYSTEM`, op 11) — mute IS the delete here.
+    #
+    # Until this branch existed `mute_cue` was reachable only through the LLM
+    # and through the mute button, so "mute the line at 0:15" — its own
+    # advertised example — did not parse at all without an API key.
+    if not quotes and (
+            re.search(r"\b(mute|mutes|muted|silence|silenced)\b", low)
+            or (re.search(r"\b(delete|remove|drop|cut|skip|kill)\b", low)
+                and re.search(r"\b(cue|cues|line|lines|segment|segments"
+                              r"|seg_\d{4})\b", low))):
+        ops.append(EditOp(op="mute_cue", scope=scope, params={},
+                          note="silence the scoped cues"))
+
+    # one word or phrase inside the line
+    #
+    # Ordered BEFORE the language switch, because `translate the word
+    # "conditional" into Hindi` — `replace_term`'s own advertised example —
+    # otherwise matched `into Hindi` further down and came back as a
+    # whole-dub language swap: a one-word request re-translating the entire
+    # video and re-casting every voice.
+    #
+    # The quotes are the signal. `find` has to be character-for-character
+    # what is in the cue, so a request that does not quote the phrase is left
+    # to the LLM rather than guessed at from loose words.
+    if quotes and re.search(r"\b(replace|replaces|swap|substitute|change"
+                            r"|remove|delete|drop|get rid of|take out"
+                            r"|translate)\b", low):
+        params: Optional[Dict[str, Any]] = {"find": quotes[0].strip()}
+        if len(quotes) > 1:
+            params["replace"] = quotes[1]
+        elif re.search(r"\b(remove|delete|drop|get rid of|take out|cut)\b",
+                       low):
+            # "" DELETES `find`; omitting it would translate it instead,
+            # which is the one substitution this op must never make by
+            # accident. Spacing and stranded punctuation are repaired by
+            # `_h_replace_term`.
+            params["replace"] = ""
+        elif re.search(r"\btranslate\b", low):
+            pass                    # omitted -> translate `find` in place
+        else:
+            # A single quoted string with a verb like "change" is the whole
+            # new line, not a term: leave it to `set_text` below.
+            params = None
+        if params is not None:
+            ops.append(EditOp(op="replace_term", scope=scope, params=params,
+                              note=f"replace {params['find']!r} in place"))
 
     # lip-sync window
-    if re.search(r"lip[\s-]?sync|lipsync", low):
-        model = None
-        # LONGEST first, and from the registry rather than a list written
-        # here. The old loop tested `wav2lip` before `wav2lip_hd`, so
-        # "lip-sync it with wav2lip_hd" parsed to the plain model — a silent
-        # downgrade on exactly the path that runs when no OPENROUTER_API_KEY
-        # is set, i.e. when this parser is the only one.
-        from models.lipsync import available_models
-        probe = low.replace("-", "_").replace(" ", "_")
-        for name in sorted(available_models(), key=len, reverse=True):
-            if name in probe:
-                model = name
-                break
+    #
+    # The model is resolved first, from the REGISTRY, and a named model is
+    # itself a trigger. The old condition needed the literal word "lipsync",
+    # so "run musetalk on the last 20 seconds" — an advertised example —
+    # matched nothing. LONGEST first, so "wav2lip_hd" is not read as the
+    # plain model: that silent downgrade is what this loop exists to stop.
+    from models.lipsync import available_models
+    probe = low.replace("-", "_").replace(" ", "_")
+    ls_model = None
+    for name in sorted(available_models(), key=len, reverse=True):
+        if name in probe:
+            ls_model = name
+            break
+    if re.search(r"lip[\s-]?sync|lipsync", low) or (
+            ls_model and re.search(r"\b(run|use|redo|rerun|re-?run|with|on)\b",
+                                   low)):
         sc = scope
-        if sc.end_s is None and sc.start_s is None and not sc.speaker:
+        if sc.is_empty():
             sc = Scope(all=True)
         ops.append(EditOp(op="lipsync_window", scope=sc,
-                          params={k: v for k, v in (("model", model),) if v},
+                          params={k: v for k, v in (("model", ls_model),) if v},
                           note="lip-sync the named window only"))
 
     # speed
@@ -825,9 +922,15 @@ def _rule_parse(nlq: str) -> List[EditOp]:
                                f"by {factor:.2f}x"))
 
     # code-mix
-    if re.search(r"code[\s-]?mix", low):
-        terms = re.search(r"keep\s+(.+?)\s+in\s+english", low)
-        params: Dict[str, Any] = {}
+    #
+    # "keep X in English" is the phrasing the op catalogue advertises and the
+    # one people actually type; the literal words "code-mix" are the jargon.
+    # Matching only the jargon left the advertised example unparseable.
+    if re.search(r"code[\s-]?mix", low) or re.search(
+            r"\b(keep|keeps|leave|retain|preserve)\b[^.]*\bin\s+english\b", low):
+        terms = re.search(r"\b(?:keep|leave|retain|preserve)\s+(.+?)\s+in\s+english",
+                          low)
+        params = {}
         if terms:
             params["terms"] = [w.strip() for w in
                                re.split(r",|\band\b", terms.group(1))
@@ -840,7 +943,11 @@ def _rule_parse(nlq: str) -> List[EditOp]:
     # Ordered BEFORE gender/voice because "the speaker at 1:20 is SPK_02"
     # trips the gender regex on the bare word "speaker" otherwise, and a
     # misread reattribution is a wrong voice on a real line.
-    m = re.search(r"\b(?:is|are|should\s+be|belongs?\s+to|=)\s*"
+    #
+    # `actually`/`really` are allowed between the verb and the id because the
+    # workspace's own fill phrasing puts one there.
+    m = re.search(r"\b(?:is|are|should\s+be|belongs?\s+to|=)\s+"
+                  r"(?:actually\s+|really\s+)?"
                   r"(SPK_\d+|SPEAKER[_ ]?\d+)\b", t, re.I)
     if m and not re.search(r"\bvoice\b", low):
         spk = m.group(1).upper().replace("SPEAKER ", "SPK_").replace(
@@ -882,7 +989,11 @@ def _rule_parse(nlq: str) -> List[EditOp]:
                           note=f"pin voice {m.group(1)}"))
 
     # literal replacement text
-    if re.search(r"\b(change|replace|set)\b.*\bto\b", low):
+    #
+    # Skipped when `replace_term` already claimed the quoted phrase: two ops
+    # on one sentence would replace the whole line AND a word inside it.
+    if re.search(r"\b(change|replace|set)\b.*\bto\b", low) and not _has(
+            "replace_term"):
         q = _QUOTED_RE.search(t)
         if q:
             ops.append(EditOp(op="set_text", scope=scope,
@@ -890,22 +1001,30 @@ def _rule_parse(nlq: str) -> List[EditOp]:
                               note="replace the line verbatim"))
 
     # tone
-    m = re.search(r"\b(formal|informal|casual|friendly|serious|energetic|"
-                  r"calm|polite|neutral)\b", low)
-    if m and re.search(r"tone|register|style|sound more|make it more", low):
-        ops.append(EditOp(op="set_tone", scope=scope,
-                          params={"tone": m.group(1)},
-                          note=f"shift the register to {m.group(1)}"))
+    #
+    # The vocabulary is the ENGINE's, read through `edits.tone_styles()`.
+    # This used to match "formal | casual | friendly | serious | energetic",
+    # and Bodhan accepts none of those five — so every tone the rules parsed
+    # was written to `tts_style` and then ignored at synthesis.
+    # Longest-first so "news" inside "AIR style news" does not win.
+    from .edits import tone_styles
+    tone = None
+    for style in sorted(tone_styles(), key=len, reverse=True):
+        if re.search(rf"(?<![\w]){re.escape(style.lower())}(?![\w])", low):
+            tone = style
+            break
+    if tone and re.search(r"tone|register|style|deliver|delivery|sounds?\b"
+                          r"|read it|say it|make it|more\b", low):
+        ops.append(EditOp(op="set_tone", scope=scope, params={"tone": tone},
+                          note=f"shift the register to {tone}"))
 
     # target-language switch -- `translate ... to <lang>`, `change (the)
     # (target) language to <lang>`, `dub (it) in <lang>`, `retranslate ...
-    # into <lang>`. Ordered BEFORE retranslate so that a request naming a
-    # target language is a language SWITCH, not a same-language rewrite.
-    # Replace_term's `translate the word "X" to Y` has already fired above
-    # and consumed the word. We additionally require a known Indic language
-    # on the right -- `translate to English` is latn and comes back as
-    # nothing rather than a wrong op.
-    iso = _resolve_target_language(t)
+    # into <lang>`. Ordered AFTER replace_term so that `translate the word
+    # "X" into Hindi` is a term translation, not a whole-dub swap. We
+    # additionally require a known Indic language on the right -- `translate
+    # to English` is latn and comes back as nothing rather than a wrong op.
+    iso = _resolve_target_language(t) if not _has("replace_term") else None
     if iso:
         # No scope hint -> whole dub. A scope term the user included is
         # honoured verbatim (segments / time window). Speaker-only is left
@@ -917,9 +1036,16 @@ def _rule_parse(nlq: str) -> List[EditOp]:
                           note=f"switch target language to {iso}"))
 
     # retranslate
-    if re.search(r"re[\s-]?translate|better translation|wrong translation|"
-                 r"fix the translation|translation is", low) and not any(
-                     o.op in ("set_text", "set_target_language") for o in ops):
+    #
+    # Widened to the phrasings the catalogue advertises ("make the
+    # translation simpler", "translate this again"), and guarded against
+    # every op that also rewrites wording — `code_mix` in particular, whose
+    # own example "code-mix the translation" contains the trigger words.
+    if re.search(r"re[\s-]?translate|translate\b[^.]*\bagain\b"
+                 r"|better translation|wrong translation|fix the translation"
+                 r"|translation is|the translation\b", low) and not _has(
+                     "set_text", "set_target_language", "replace_term",
+                     "code_mix"):
         ops.append(EditOp(op="retranslate", scope=scope,
                           params={"instruction": t},
                           note="re-translate the scoped cues"))
@@ -1294,8 +1420,7 @@ def rerun(plan: EditPlan, *, device: Optional[str] = None,
         # lip-sync replay (for face selection). Pass the configured model when
         # either stage is replayed; `_run_asd_stage` is idempotent and reuses
         # scores already on disk, so this never double-scores.
-        asd_model=((res.asd_model or cfg.get("asd_model") or cfg.get("asd"))
-                   if ("lipsync" in stages or "voices" in stages) else None),
+        asd_model=("loconet" if ("lipsync" in stages or "voices" in stages) else None),
         asd_on_screen_threshold=cfg.get("asd_on_screen_threshold", 0.3),
         # 9b
         translit_model=(res.translit_model if "codemix" in stages else None),
@@ -1466,7 +1591,7 @@ def _rerun_lipsync_only(plan: EditPlan, *, num_gpus: Optional[int]) -> Dict[str,
     # a fresh job reaches here with none and lip-syncs UNGATED. `_run_asd_stage`
     # is idempotent: it scores loconet the first time and reuses after (and
     # reuses the cast gate's scores when present).
-    asd_model = cfg.get("asd_model") or cfg.get("asd") or "loconet"
+    asd_model = "loconet"
     try:
         _turns = _turns_from_merged(
             json.loads(Path(view.merged_json).read_text()))

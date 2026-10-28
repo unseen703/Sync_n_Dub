@@ -283,7 +283,10 @@ async def youtube_probe(req: ProbeRequest) -> Dict[str, Any]:
     meta["max_lipsync_s"] = max_lipsync_s()
 
     try:
-        detected = await run_in_threadpool(detect_from_probe, meta)
+        detected = await run_in_threadpool(
+            detect_from_probe, meta,
+            url=str(meta.get("webpage_url") or req.url),
+        )
         if detected:
             meta["detected_source_language"] = detected
     except Exception as e:
@@ -428,7 +431,7 @@ async def upload_video(file: UploadFile = File(...)) -> Dict[str, Any]:
     try:
         detected = await run_in_threadpool(
             detect_from_probe,
-            {"title": title},
+            {"duration_s": dur},
             video_path=dest,
         )
         if detected:
@@ -535,7 +538,9 @@ async def create_job(req: JobRequest, response: Response) -> Dict[str, Any]:
     }
     write_atomic(job_root / "request.json", request_doc)
 
-    planned = plan_stages(cfg, pre=list(_pre_stages()))
+    # The submission stops at the MT gate (`ui/runner.py` forces
+    # `stop_after_mt`), so the queue entry plans only what phase one runs.
+    planned = plan_stages(cfg, pre=list(_pre_stages()), stop_after_mt=True)
     outcome = await run_in_threadpool(
         jobqueue.submit, job_id, job_root, JOBS_DIR, planned=planned,
     )

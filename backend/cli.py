@@ -1008,7 +1008,7 @@ def main(argv: list[str] | None = None) -> int:
         face_tracker=args.face_tracker,
         face_every_n=args.face_every_n,
         face_min_score=args.face_min_score,
-        asd_model=args.asd,
+        asd_model=args.asd  or "loconet",
         asd_on_screen_threshold=args.asd_on_screen_threshold,
         asr_model=args.asr,
         # 'auto' is the explicit way back to detection; argparse cannot

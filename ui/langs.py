@@ -47,8 +47,8 @@ LANGUAGES: Dict[str, Dict[str, str]] = {
     "ur":  {"english": "Urdu",      "native": "اردو",         "script": "arab"},
 }
 
-#: Font family per script, matching the `.lang-*` rules in the old
-#: `ui/web/styles.css` — which were correct and simply never applied.
+#: Font family per script, matching the `.lang-*` rules of the old
+#: (removed) inspector UI, which were correct and simply never applied.
 SCRIPT_FONTS: Dict[str, str] = {
     "deva": "Noto Sans Devanagari",
     "beng": "Noto Sans Bengali",

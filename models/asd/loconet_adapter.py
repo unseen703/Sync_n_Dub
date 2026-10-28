@@ -1,75 +1,52 @@
 """LoCoNet-ASD adapter (Wang et al., CVPR 2024).
 
-Wraps the official `SJTUwxz/LoCoNet_ASD` clone (vendored under
+Wraps the `SJTUwxz/LoCoNet_ASD` clone (vendored under
 `models/asd/vendor/loconet`) driven by the `Superxixixi/LoCoNet_ASD` AVA
-weights. It is the first ASD model here that is **not** a per-face scorer.
+weights. The only ASD model here that is not a per-face scorer: it models
+the speakers in a scene jointly (short-term inter-speaker convolution
+interleaved with long-term intra-speaker attention), and its gain is
+concentrated in the multi-speaker case (+3% mAP).
 
-**Why it earns a place next to TalkNet and the Liao family.** Every other
-model in this directory scores each candidate face in isolation -- that is
-the limitation `backend/lipsync_targets.py` and all of
-`docs/ROUGH_EDGES.md`'s "who is speaking among several" grief exists to work
-around, and Light-ASD actually measures WORSE than TalkNet when faces
-compete. LoCoNet instead models the speakers in a scene jointly (short-term
-inter-speaker convolution interleaved with long-term intra-speaker
-attention), and the paper's gain is concentrated in exactly the
-multi-speaker case (+3% mAP). So this is the first candidate *fix* for the
-crowd problem rather than a cheaper second opinion.
-
-It differs from the MFCC adapters in three load-bearing ways, each read off
-the clone rather than the paper:
+Three load-bearing differences from the MFCC adapters:
 
 1. **The audio frontend is VGGish, not MFCC.** `model/loconet_encoder.py`
-   builds `torchvggish.vggish.VGGish` and the val loader feeds it
+   builds `torchvggish.vggish.VGGish`, and the val loader feeds it
    `vggish_input.waveform_to_examples` log-mel (64 bands) at 4x the video
-   frame rate -- *not* the 13-d MFCC that `_mfcc_av` produces. So the audio
-   half of `_mfcc_av` is deliberately NOT reused here; we call the clone's
-   own `vggish_input`, on the int16-valued wav the val loader reads with
-   `scipy.io.wavfile`. Only `crop_all_tracks` (112px grayscale crops) is
-   shared, because the visual input really is identical.
+   frame rate. So the audio half of `_mfcc_av` is NOT reused -- this calls
+   the clone's own `vggish_input` on the int16-valued wav. Only
+   `crop_all_tracks` is shared, since the visual input is identical.
 
 2. **Scoring is joint, per scene.** The model takes `NUM_SPEAKERS` (=3)
-   candidate faces at once, with the target at slot 0 and up to two
-   co-occurring faces as context, padded by repeating the target when fewer
-   co-occur -- exactly what upstream's `get_speaker_context` does for an
-   isolated speaker. To produce a score for EVERY track we run once per
-   track with that track at slot 0 (the same semantics as the AVA eval,
-   which reads slot 0's output). Output demuxes back to one `ASDScore` per
-   track, so the stage-6 consumer is unchanged.
+   faces at once: the target at slot 0 plus up to two co-occurring faces as
+   context, padded by repeating the target when fewer co-occur. To score
+   every track it runs once per track with that track at slot 0, then
+   demuxes back to one `ASDScore` per track, so stage 6 is unchanged.
 
 3. **It is constructed, not imported.** There is no clean `Model()` class.
-   We bypass upstream's `loconet.py` (its module top does
-   `from xxlib.utils.distributed import ...`, and `xxlib` is not in the
-   clone -- it is only used by the training path) and build
-   `locoencoder(cfg)` + the `loss_multi` heads directly, with a 3-field cfg
-   shim instead of dragging in `dlhammer`'s argv bootstrap. Weights load via
-   the same `model.module.` strip upstream's own `loadParameters` uses.
+   Upstream's `loconet.py` imports `xxlib`, which is not in the clone, so
+   this builds `locoencoder(cfg)` + the `loss_multi` heads directly with a
+   3-field cfg shim. Weights load via the same `model.module.` strip
+   upstream's `loadParameters` uses.
 
-**VGGish's own ImageNet-audio weights are not fetched.** `locoencoder`
-builds `VGGish(pretrained=True)`, which would `load_state_dict_from_url` at
-construction -- then our checkpoint overwrites the audio encoder anyway. We
-no-op that download so the load is offline and reproducible; the missing-key
-report after loading will say if the checkpoint somehow lacked the audio
-encoder (it does not for a full LoCoNet state_dict).
+VGGish's own weights are not fetched: `locoencoder` builds
+`VGGish(pretrained=True)`, which would download at construction, and our
+checkpoint overwrites the audio encoder anyway. The download is no-opped so
+the load is offline.
 
-**AVA-only weights.** Upstream ships no TalkSet fine-tune, and the Light-ASD
-docstring's warning applies with full force: an AVA-trained detector fires
-on ~43% of frames in dubbed footage where the answer is zero (Kim et al.,
-Interspeech 2021). This pipeline manufactures exactly that condition, so
-read LoCoNet's scores on a dubbed source with that bias in mind -- it is a
-better *relative* ranker of competing faces than an absolute speaking gate.
+AVA-only weights -- upstream ships no TalkSet fine-tune. An AVA-trained
+detector fires on ~43% of frames in dubbed footage where the answer is zero
+(Kim et al., Interspeech 2021), which is the condition this pipeline
+manufactures, so read these scores as a relative ranker of competing faces
+rather than an absolute speaking gate.
 
-**One `model`-package-shipping ASD model per process.** Like the Liao
-family, this clone has a top-level `model/` package; loading it and
-Light-ASD/LR-ASD in one process would collide on that name. Stage 6 runs one
-ASD model per process, so nothing hits it today.
+One `model`-package-shipping ASD model per process: this clone and the Liao
+family both ship a top-level `model/` package and would collide on that
+name. Stage 6 runs one ASD model per process.
 
-**CUDA only.** Upstream's VGGish moves itself to cuda at construction and the
-scoring tensors follow; CPU inference would need patches upstream. Stage 6
-runs on the GPU, so this matches how it is called.
+CUDA only -- upstream's VGGish moves itself to cuda at construction.
 
 If a clone exposes different symbols, override via `LOCONET_MODEL_MODULE` /
-`LOCONET_MODEL_CLASS` (module path + attribute of the encoder factory)
-rather than editing this file.
+`LOCONET_MODEL_CLASS` rather than editing this file.
 """
 from __future__ import annotations
 
@@ -94,8 +71,8 @@ class LoCoNetASD(BaseASD):
     env_prefix = "LOCONET"
     legacy_path = "third_party/LoCoNet_ASD"
     clone_url = "https://github.com/SJTUwxz/LoCoNet_ASD.git"
-    #: Relative to the clone. The Superxixixi HF `pytorch_model.bin`, fetched
-    #: by `scripts/fetch_assets.py` to this name beside the repo.
+    #: Relative to the clone. The Superxixixi HF `pytorch_model.bin`,
+    #: fetched by `scripts/fetch_assets.py` to this name beside the repo.
     default_checkpoint = "loconet_ava.model"
 
     def __init__(
@@ -120,8 +97,8 @@ class LoCoNetASD(BaseASD):
         env_ckpt = os.getenv(f"{self.env_prefix}_CHECKPOINT")
         if checkpoint or env_ckpt:
             ck = Path(checkpoint or env_ckpt).expanduser()
-            # A relative pin is relative to the CLONE, same rule as the Liao
-            # adapters -- the weights live beside the repo.
+            # A relative pin is relative to the CLONE, same rule as the
+            # Liao adapters.
             if not ck.is_absolute() and not ck.exists():
                 ck = self.repo_path / ck
             if not ck.exists():
@@ -134,16 +111,16 @@ class LoCoNetASD(BaseASD):
 
         self.crop_size = crop_size
         self.target_fps = target_fps
-        # Same VRAM bound and blank-means-default rule as the other adapters,
-        # but the activation is ~NUM_SPEAKERS x heavier per window here
+        # Same VRAM bound and blank-means-default rule as the other
+        # adapters, but the activation is ~NUM_SPEAKERS x heavier per window
         # because every candidate face goes through the visual frontend
-        # together. 150 is conservative; upstream's CLIP_LENGTH is 200.
+        # together. Upstream's CLIP_LENGTH is 200.
         self.window_frames = int(os.getenv(f"{self.env_prefix}_WINDOW_FRAMES")
                                  or window_frames)
         self.num_speakers = int(os.getenv(f"{self.env_prefix}_NUM_SPEAKERS")
                                 or num_speakers)
-        # multi.yaml values; overridable without a yaml because the encoder
-        # reads only these three fields.
+        # multi.yaml values, overridable without a yaml because the
+        # encoder reads only these three fields.
         self.av_layers = int(os.getenv(f"{self.env_prefix}_AV_LAYERS") or 3)
         self.adjust_attention = int(
             os.getenv(f"{self.env_prefix}_ADJUST_ATTENTION") or 0)
@@ -160,7 +137,7 @@ class LoCoNetASD(BaseASD):
 
         A full `dlhammer` bootstrap reads argv and a yaml; the encoder only
         touches `MODEL.NUM_SPEAKERS`, `MODEL.AV_layers` and
-        `MODEL.ADJUST_ATTENTION`, so a nested namespace is the honest minimum.
+        `MODEL.ADJUST_ATTENTION`, so a nested namespace suffices.
         """
         from types import SimpleNamespace
         return SimpleNamespace(MODEL=SimpleNamespace(
@@ -193,10 +170,10 @@ class LoCoNetASD(BaseASD):
         if str(self.repo_path) not in sys.path:
             sys.path.insert(0, str(self.repo_path))
 
-        # VGGish would download its own weights at construction; our
-        # checkpoint supplies the audio encoder, so make that a no-op and keep
-        # the load offline. strict=False upstream means an empty dict is a
-        # clean skip, not an error.
+        # VGGish would download its own weights at construction, but our
+        # checkpoint supplies the audio encoder, so no-op it and keep the
+        # load offline. strict=False upstream makes an empty dict a clean
+        # skip, not an error.
         orig_loader = torch.hub.load_state_dict_from_url
         torch.hub.load_state_dict_from_url = lambda *a, **k: {}
         try:
@@ -209,9 +186,9 @@ class LoCoNetASD(BaseASD):
             from torchvggish import vggish_input
 
             cfg = self._make_cfg()
-            # Mirror upstream's `loconet` (rank=None) object: `.model` is the
-            # encoder, `.lossAV/.lossA/.lossV` the heads. Building the same
-            # shape lets us reuse upstream's exact `model.module.` key strip.
+            # Mirror upstream's `loconet` (rank=None) object: `.model` is
+            # the encoder, `.lossAV/.lossA/.lossV` the heads, so upstream's
+            # `model.module.` key strip applies unchanged.
             wrapper = torch.nn.Module()
             wrapper.model = locoencoder(cfg)
             wrapper.lossAV = loss_multi.lossAV()
@@ -223,18 +200,17 @@ class LoCoNetASD(BaseASD):
         state = torch.load(str(self.checkpoint), map_location="cpu")
         if isinstance(state, dict) and "model_state_dict" in state:
             state = state["model_state_dict"]
-        # Upstream `loadParameters` (rank=None branch) strips `model.module.`
-        # from the DDP-saved checkpoint; the remaining `model.*` / `lossAV.*`
-        # then land on the wrapper above. See loconet.py:171.
+        # Upstream `loadParameters` (rank=None branch) strips
+        # `model.module.` from the DDP-saved checkpoint; the remaining
+        # `model.*` / `lossAV.*` land on the wrapper above. loconet.py:171.
         clean = {k.replace("model.module.", ""): v for k, v in state.items()}
         info = wrapper.load_state_dict(clean, strict=False)
         n_missing = len(getattr(info, "missing_keys", []) or [])
         n_total = len(wrapper.state_dict())
         if n_missing > n_total * 0.1:
-            # A mostly-unmatched load scores noise at exit code 0 -- the most
-            # expensive failure in this directory. Say it loudly; the usual
-            # cause is a checkpoint keyed for the HF `modeling_loconet.py`
-            # wrapper rather than the SJTUwxz layout.
+            # A mostly-unmatched load scores noise at exit code 0. The
+            # usual cause is a checkpoint keyed for the HF
+            # `modeling_loconet.py` wrapper rather than the SJTUwxz layout.
             log.warning(
                 "loconet: %d/%d state_dict keys did not load from %s -- "
                 "scores may be meaningless. Check the checkpoint's key scheme.",
@@ -243,8 +219,8 @@ class LoCoNetASD(BaseASD):
         wrapper.eval()
         if self.device.startswith("cuda"):
             wrapper = wrapper.to(self.device)
-            # VGGish.forward sends its input to self.device, set at its own
-            # construction; keep it on ours after the move.
+            # VGGish.forward sends its input to self.device, set at its
+            # own construction; keep it on ours after the move.
             wrapper.model.audioEncoder.device = torch.device(self.device)
 
         self._enc = wrapper.model
@@ -282,13 +258,13 @@ class LoCoNetASD(BaseASD):
             audio = audio.mean(axis=1)
         # The val loader hands wavfile.read's int16 straight to
         # vggish_input, so the log-mel the AVA weights saw is on the int16
-        # value scale. Match it -- do NOT normalise to [-1, 1] here.
+        # scale. Do NOT normalise to [-1, 1] here.
         audio = np.asarray(audio)
 
         crops_by_track = crop_all_tracks(
             tracks.tracks, video_path, self.crop_size, cv2)
-        # frame -> crop, per track, so a context face can be looked up at the
-        # target's frame indices.
+        # frame -> crop, per track, so a context face can be looked up at
+        # the target's frame indices.
         crop_at: Dict[str, Dict[int, np.ndarray]] = {}
         for tr in tracks.tracks:
             crops = crops_by_track.get(tr.track_id)
@@ -322,10 +298,9 @@ class LoCoNetASD(BaseASD):
     ) -> List[FaceTrack]:
         """Up to NUM_SPEAKERS-1 co-occurring faces, most-overlapping first.
 
-        Upstream picks context by frame overlap with the target and, when too
-        few co-occur, pads by repeating -- for an isolated speaker it fills
-        every slot with the target itself, which is the input distribution
-        the AVA weights were evaluated on.
+        Upstream picks context by frame overlap and pads by repeating when
+        too few co-occur, filling every slot with the target for an isolated
+        speaker -- the input distribution the AVA weights were evaluated on.
         """
         tgt_frames = set(int(f) for f in target.frames)
         scored: List[Tuple[int, FaceTrack]] = []
@@ -337,8 +312,8 @@ class LoCoNetASD(BaseASD):
                 scored.append((overlap, tr))
         scored.sort(key=lambda t: t[0], reverse=True)
         context = [tr for _, tr in scored[:self.num_speakers - 1]]
-        # Pad to NUM_SPEAKERS-1 context slots by repeating what we have, or
-        # the target when nothing co-occurs.
+        # Pad to NUM_SPEAKERS-1 slots by repeating what we have, or the
+        # target when nothing co-occurs.
         while len(context) < self.num_speakers - 1:
             context.append(context[-1] if context else target)
         return context
@@ -372,7 +347,7 @@ class LoCoNetASD(BaseASD):
                 win_frames = frames_abs[f0:f1]
 
                 # (S, w, z, z): each slot's crop at the target's frame
-                # indices; a slot absent on a frame contributes zeros, as the
+                # indices. A slot absent on a frame contributes zeros, as the
                 # val loader does for a context speaker outside its span.
                 visual = np.zeros((self.num_speakers, w, z, z), dtype=np.float32)
                 for s, tr in enumerate(slots):
@@ -382,8 +357,8 @@ class LoCoNetASD(BaseASD):
                         if c is not None:
                             visual[s, j] = c
 
-                # Shared audio for the window, on the int16 scale, as
-                # 64-band log-mel at 4x the frame rate.
+                # Shared audio for the window: 64-band log-mel at 4x the
+                # frame rate, on the int16 scale.
                 a0 = win_frames[0] * samples_per_frame
                 a1 = min(len(audio), (win_frames[-1] + 1) * samples_per_frame)
                 clip_audio = audio[a0:a1]
@@ -409,11 +384,9 @@ class LoCoNetASD(BaseASD):
                  w: int, torch) -> np.ndarray:
         """One joint forward over the window; returns slot-0 (target) scores.
 
-        Replicates `loconet.evaluate_network`'s inner block for b=1:
-        audio frontend (shared, then repeated per speaker) -> visual frontend
-        -> cross-attention -> AV backend -> `lossAV.FC` + softmax. We read the
-        target row rather than upstream's `[:, 0]` eval slice, which is the
-        same slot.
+        Replicates `loconet.evaluate_network`'s inner block for b=1: audio
+        frontend (shared, then repeated per speaker) -> visual frontend ->
+        cross-attention -> AV backend -> `lossAV.FC` + softmax.
         """
         S = self.num_speakers
         vis = torch.FloatTensor(visual)                  # (S, w, z, z)

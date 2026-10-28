@@ -205,11 +205,17 @@ after parsing, so `resolve_speed_setup` is the accurate source.
 
 **There is an operator UI, and it is a second entry point into the pipeline.**
 `ui/server.py` (FastAPI, loopback-only, port 7861) serves a built Vite app from
-`ui/web-dist/`, falling back to the old read-only inspector in `ui/web/` when
-no build exists. Jobs submitted from it are launched DETACHED through
+`ui/web-dist/` (API-only, with a warning, when no build exists). Jobs submitted from it are launched DETACHED through
 `scripts/ui_run_job.sh`, which is the only launcher that exports the
 `libstdc++` preload — starting `ui.runner` with a bare `Popen` walks stage 9h
 into the cv2/insightface import-order trap in section 1.
+
+**Speaker preview before casting.** The voices stage writes
+`voices/<stem>.refs/*.wav` only after the cast is chosen, so a job waiting on
+the cast has no reference clips. `ui.speaker_media.speaker_preview_paths` cuts
+each speaker's longest solo stretch (max 8 s) from the vocals stem into
+`voices/previews/` so the cast row can play it. It is kept out of `*.refs`
+on purpose; the pipeline must never mistake a preview for its own reference.
 
 Three things about it are easy to get wrong:
 
@@ -443,7 +449,7 @@ the relabelled turn list.
 **There is a second page now: Talking Head (`#/talking-head`).** Added
 2026-10-20. A still portrait plus a chosen line, rather than a video plus its
 own soundtrack — `ui/talking_head.py`, `ui/routes_talkinghead.py`, and
-`ui/web2/src/components/talkinghead/`. Three gates in order: a photo WITH a
+`ui/web/src/components/talkinghead/`. Three gates in order: a photo WITH a
 face, a language, a line.
 
 **The lines are DATA, not code** — `data/talking_head/dialogues.json`, five

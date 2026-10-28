@@ -22,6 +22,8 @@ from __future__ import annotations
 
 import json
 import logging
+import re
+import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -137,4 +139,114 @@ def face_crop_paths(job_root: Path, *, video: Optional[Path] = None,
         existing[spk] = dst
     cap.release()
     log.info("speaker crops: %d written to %s", len(existing), out_dir)
+    return existing
+
+
+#: Where the pre-cast preview clips land. NOT `voices/<stem>.refs/`: that glob
+#: is how `ui.speakers._reference_clips` (and the voices stage) recognise the
+#: references the pipeline itself wrote, and a preview must never pass for one.
+PREVIEW_SUBDIR = "voices/previews"
+
+#: Longest preview. Long enough to judge a voice, short enough to stay a clip.
+PREVIEW_MAX_S = 8.0
+
+_RTTM_LINE = re.compile(r"^SPEAKER\s+\S+\s+\S+\s+([\d.]+)\s+([\d.]+)\s+"
+                        r"\S+\s+\S+\s+(\S+)")
+
+
+def _turns(job_root: Path) -> List[tuple]:
+    """`(start, end, speaker)` from the first RTTM in `diarization/`.
+
+    Same pick as `ui.speakers._from_rttm`, so the preview and the speech
+    totals on the row describe the same turns.
+    """
+    d = job_root / "diarization"
+    for p in sorted(d.glob("*.rttm")) if d.is_dir() else []:
+        try:
+            lines = p.read_text().splitlines()
+        except OSError:
+            continue
+        out = []
+        for line in lines:
+            m = _RTTM_LINE.match(line.strip())
+            if m:
+                s = float(m.group(1))
+                out.append((s, s + float(m.group(2)), m.group(3)))
+        if out:
+            return out
+    return []
+
+
+def _solo_spans(turns: List[tuple]) -> Dict[str, List[tuple]]:
+    """Per speaker, the stretches nobody else is talking over."""
+    out: Dict[str, List[tuple]] = {}
+    for s, e, spk in turns:
+        spans = [(s, e)]
+        for s2, e2, spk2 in turns:
+            if spk2 == spk:
+                continue
+            nxt = []
+            for a, b in spans:
+                if e2 <= a or s2 >= b:
+                    nxt.append((a, b))
+                    continue
+                if s2 > a:
+                    nxt.append((a, s2))
+                if e2 < b:
+                    nxt.append((e2, b))
+            spans = nxt
+        out.setdefault(spk, []).extend(spans)
+    return out
+
+
+def _preview_source(job_root: Path) -> Optional[Path]:
+    """The cleanest source audio on disk: vocals stem, else the dialogue mix."""
+    for pattern in ("stems/*/*/vocals.wav", "audio/*.dialogue.16k.mono.wav",
+                    "audio/*.16k.mono.wav"):
+        hit = next(iter(sorted(job_root.glob(pattern))), None)
+        if hit is not None:
+            return hit
+    return None
+
+
+def speaker_preview_paths(job_root: Path, *,
+                          regenerate: bool = False) -> Dict[str, Path]:
+    """`{speaker: clip.wav}` — the speaker's own voice, cut from the source.
+
+    This exists because the voices stage only writes its reference clips
+    AFTER the cast is chosen, and the operator needs to hear a speaker to
+    choose their gender. Picks the longest stretch of that speaker talking
+    alone, capped at `PREVIEW_MAX_S`. No model runs. Returns only what
+    exists afterwards; a speaker with no solo stretch of `MIN_SAMPLE_S` is
+    absent rather than given a link to nothing.
+    """
+    out_dir = job_root / PREVIEW_SUBDIR
+    existing = {p.stem: p for p in sorted(out_dir.glob("*.wav"))} \
+        if out_dir.is_dir() and not regenerate else {}
+    if existing:
+        return existing
+
+    src = _preview_source(job_root)
+    spans = _solo_spans(_turns(job_root))
+    if src is None or not spans:
+        return existing
+
+    from backend.media_io import _ffmpeg_bin
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for spk, items in sorted(spans.items()):
+        a, b = max(items, key=lambda ab: ab[1] - ab[0])
+        if b - a < MIN_SAMPLE_S:
+            continue
+        dst = out_dir / f"{spk}.wav"
+        cmd = [_ffmpeg_bin(), "-y", "-loglevel", "error",
+               "-ss", f"{a:.3f}", "-t", f"{min(b - a, PREVIEW_MAX_S):.3f}",
+               "-i", str(src), "-ac", "1", "-ar", "24000", str(dst)]
+        try:
+            subprocess.run(cmd, check=True, capture_output=True, timeout=60)
+        except (OSError, subprocess.SubprocessError) as e:
+            log.warning("speaker preview: ffmpeg failed for %s (%s)", spk, e)
+            continue
+        if dst.is_file():
+            existing[spk] = dst
+    log.info("speaker previews: %d written to %s", len(existing), out_dir)
     return existing

@@ -1,41 +1,14 @@
-"""Voice assignment per speaker (plan §8).
+"""Per-speaker TTS voice assignment: gender filter, then ECAPA timbre match.
 
-Three signals, combined in order of trust:
+Stage 9d calls `assign_voices` and writes `SpeakerVoice[]` to
+`<job>/voices/<stem>.<voice_engine>.voices.json` only when `voice_engine` is
+set; the default Edge/IndicF5 path builds `speaker_voice_map` in memory and
+persists nothing. Either way the map reaches
+`backend.tts.synthesize_segments`, and the voice that spoke is recorded per
+segment as `tts_voice`.
 
-  1. **Attributes.** Predicted speaker gender + rough age tag → the subset
-     of TTS voices tagged compatibly. Highest trust: it is cheap, almost
-     always right, and when it is wrong the mistake is listenable.
-
-  2. **Screen time.** Rank speakers by total speech seconds. Protagonists
-     deserve "lead-voice" slots (richer, more expressive stock voices);
-     bit-parts take whatever is left over.
-
-  3. **Speaker-embedding similarity.** ECAPA-TDNN cosine between a
-     reference clip of each stock voice and ~10 s of each speaker's
-     cleanest speech window — a *prior*, not a verdict, per plan §4.
-     We use it as a tiebreaker inside each attribute cohort.
-
-Where the output actually goes
-------------------------------
-This block used to describe `manifest.speakers[].assigned_voice` and
-`speakers[].reference_audio`. That was plan §3's intent and was never built:
-no manifest has a `speakers` key. What really happens, in
-`pipeline.run_post_mt_stages` stage 9d:
-
-  * `assign_voices(...)` returns `SpeakerVoice[]`, which stage 9d writes to
-    `<job>/voices/<stem>.<voice_engine>.voices.json` via
-    `assignments_to_jsonable` — **only when `voice_engine` is set.**
-  * The default Edge / IndicF5 path takes 9d's `else` branch, builds
-    `speaker_voice_map` in memory, and persists no assignment file at all.
-  * Either way the map reaches `backend.tts.synthesize_segments` as
-    `speaker_voice_map`, and the voice that actually spoke is recorded per
-    segment in the merged JSON (`tts_voice`, plus `extra.tts`).
-
-`extract_speaker_references` writes the reference clips to
-`<job>/voices/<stem>.refs/<SPEAKER_ID>.wav`, not `audio/ref/`.
-
-The TTS stage reads the voice and nothing else about assignment; the
-rationale is kept for the eval report and for the UI's voice picker.
+`extract_speaker_references` writes reference clips to
+`<job>/voices/<stem>.refs/<SPEAKER_ID>.wav`.
 """
 from __future__ import annotations
 
@@ -145,16 +118,11 @@ def load_voice_catalog(
     language: Optional[str] = None,
     catalog_json: Optional[Path] = None,
 ) -> List[Voice]:
-    """Load the voice catalog for `engine`.
+    """Load the voice catalog for `engine`, same-language voices first.
 
-    Same-language voices come first; cross-language voices follow (bodhan's
-    indic-speak supports "any voice can speak any language").  This ordering
-    lets ``assign_voices`` prefer native voices while falling back to
-    cross-language ones when the same-gender pool is exhausted.
-
-    Falls back to the hard-coded defaults so a fresh clone works offline.
-    ``catalog_json`` lets callers override with a real catalog pulled from
-    the Bodhan console once published.
+    Any indic-speak voice can read any language, so cross-language voices
+    follow rather than being dropped. Falls back to the hard-coded defaults
+    when `catalog_json` is absent.
     """
     if catalog_json and Path(catalog_json).exists():
         rows = json.loads(Path(catalog_json).read_text())
@@ -185,26 +153,20 @@ def load_voice_catalog(
     return voices
 
 
-#: Where `scripts/build_voice_refs.py` writes one sample clip per catalog
-#: voice. Resolved relative to the repo root.
+#: Where `scripts/build_voice_refs.py` writes one sample clip per voice.
 VOICE_REF_DIR = Path(__file__).resolve().parent.parent / "data" / "voice_refs"
 
 
 def attach_voice_references(
     voices: List[Voice], *, ref_dir: Optional[Path] = None,
 ) -> int:
-    """Point each voice at its reference clip, if one has been rendered.
+    """Point each voice at its reference clip and return how many were attached.
 
-    `assign_voices` scores an ECAPA cosine between the real speaker and each
-    catalog voice, but that term can only fire when the catalog voice has
-    audio to embed. The built-in catalog ships names only, so without this
-    the embedding term is silently inert -- it scores nothing and the
-    assignment falls back to gender + language alone, which is exactly the
-    kind of dead branch that looks like a working feature in the log.
-
-    Clips are discovered by convention at `<ref_dir>/<engine>/<voice>.wav`
-    so a fresh clone keeps working with no catalog edit; render them with
-    `scripts/build_voice_refs.py`. Returns the number attached.
+    The built-in catalog ships names only, so without this the ECAPA
+    similarity term in `assign_voices` scores nothing and the assignment
+    falls back to gender + language. Clips are found at
+    `<ref_dir>/<engine>/<voice>.wav`; render them with
+    `scripts/build_voice_refs.py`.
     """
     base = Path(ref_dir) if ref_dir is not None else VOICE_REF_DIR
     found = 0
@@ -215,13 +177,9 @@ def attach_voice_references(
         if cand.exists():
             v.reference_audio = cand
             found += 1
-    # Report how many HAVE a clip, not how many this call attached. Those
-    # differ, and the difference used to raise a false alarm: the built-in
-    # catalog is a module-level list of shared `Voice` objects, so the first
-    # `load_voice_catalog` attaches all 45 and every call after it attaches
-    # 0 -- and logged "no voice reference clips found; the ECAPA similarity
-    # term is INACTIVE" over a catalog that was fully equipped. Anyone
-    # acting on that line would go rebuild clips that already existed.
+    # Count voices that HAVE a clip, not ones this call attached: the
+    # built-in catalog is a module-level list of shared `Voice` objects, so
+    # only the first `load_voice_catalog` attaches anything.
     have = sum(1 for v in voices if v.reference_audio is not None)
     if voices:
         log.info("voices: %d/%d catalog voices have reference clips "
@@ -247,11 +205,9 @@ def extract_speaker_references(
     min_s: float = 3.0,
     max_s: float = 15.0,
 ) -> Dict[str, Path]:
-    """Cut 3–15 s of each speaker's cleanest-looking speech into a WAV.
+    """Cut 3-15 s of each speaker's longest single turn into a WAV.
 
-    "Cleanest-looking" is a cheap proxy: longest single turn. Good enough
-    for embedding similarity and as a cloning reference; the plan does
-    not call for VAD-level cleanup here.
+    Longest-turn is the proxy for "cleanest"; no VAD cleanup.
     """
     import soundfile as sf
     out_dir = Path(out_dir); out_dir.mkdir(parents=True, exist_ok=True)
@@ -277,9 +233,7 @@ def extract_speaker_references(
             refs[spk] = dest
             break
         else:
-            # No turn long enough; concatenate shortest-order until we hit
-            # `min_s`. Rare in practice but worth having for 2-sentence
-            # cameos.
+            # No turn long enough: concatenate shortest-first until `min_s`.
             buf = []
             got = 0.0
             for t in sorted(ts, key=lambda t: (t.end - t.start), reverse=True):
@@ -305,11 +259,7 @@ def extract_speaker_references(
 # ---------------------------------------------------------------------------
 
 def _ecapa_embed(wav_paths: List[Path], *, device: Optional[str] = None):
-    """Return (N, 192) embeddings via SpeechBrain ECAPA-TDNN.
-
-    Lazy, optional: if speechbrain is missing we return `None` and let the
-    caller fall back to attribute+screen-time only.
-    """
+    """Return (N, 192) ECAPA-TDNN embeddings, or None if speechbrain is missing."""
     try:
         import torch
         from speechbrain.inference import EncoderClassifier  # type: ignore
@@ -360,11 +310,10 @@ class SpeakerVoice:
     engine: str
     voice: str
     score: float
-    #: Mixed types on purpose: the numeric terms (`embed_cos`,
-    #: `gender_match`, `language_match`) alongside `basis`, the string that
-    #: says which of them actually decided. A `score` of 0.0 is ambiguous on
-    #: its own -- it is both "no timbre match available" and "a genuinely
-    #: orthogonal voice" -- and `basis` is what tells those two apart.
+    #: Numeric terms (`embed_cos`, `gender_match`, `language_match`) plus
+    #: `basis`, the string naming which decided. `score` 0.0 means either no
+    #: timbre match was available or the voice is orthogonal; `basis`
+    #: distinguishes them.
     rationale: Dict[str, object]
     reference_audio: Optional[Path] = None
 
@@ -379,50 +328,24 @@ def assign_voices(
     device: Optional[str] = None,
     allow_voice_reuse: bool = False,
 ) -> List[SpeakerVoice]:
-    """Pick one unique TTS voice per speaker: nearest voice, same gender.
+    """Pick one unique TTS voice per speaker: same gender, nearest timbre.
 
-    Gender is the ONLY classification. Language is not a filter and not a
-    score -- indic-speak voices read any of the 22 languages, so a Hindi dub
-    is free to use the Tamil-recorded `Arun` if he is the closest timbre
-    match. Restricting to same-language voices would throw away 95% of the
-    candidate pool for no quality gain.
+    Speakers are ranked by screen time and pick in that order. For each, the
+    same-gender pool is ranked by ECAPA cosine against that speaker's
+    reference clip, so `SpeakerVoice.score` is the cosine itself in [-1, 1],
+    not a composite.
 
-    Strategy:
-      1. Load the full catalog -- every voice, every language.
-      2. Split into male / female / neutral pools.
-      3. Rank speakers by screen time (the longest speaker picks first).
-      4. For each speaker, rank the SAME-GENDER pool by ECAPA cosine
-         similarity to that speaker's own reference clip and take the best.
+    Gender is a hard filter; language is a preference, since indic-speak
+    voices read any of the 22 languages. An opposite-gender voice is reached
+    only when the same-gender pool is exhausted and `allow_voice_reuse` is
+    False, and is logged as a warning.
 
-    `SpeakerVoice.score` is therefore the cosine similarity itself, in
-    [-1, 1], not a composite -- read it directly as "how close this voice
-    is to the source speaker".
-
-    Opposite-gender voices are reachable only when every same-gender voice
-    is already taken and `allow_voice_reuse` is False; that fallback is
-    logged as a warning rather than taken silently.
-
-    When the cosine cannot rank
-    ---------------------------
-    The timbre match needs three things that can each be absent: a clip of
-    the real speaker, a clip of the catalog voice, and `speechbrain` to
-    embed them with. Any one missing and every candidate scores 0.0.
-
-    That used to resolve itself by accident -- a stable sort over a catalog
-    `load_voice_catalog` happens to order native-language-first -- which is
-    the shape of a feature that works until someone reorders a list. It is
-    now an explicit, recorded decision: **a voice recorded in the TARGET
-    LANGUAGE, of the speaker's gender.** `rationale.basis` says which path
-    ran (`"embedding"` or `"language+gender"`) so a finished run carries the
-    evidence rather than an unexplained `score: 0.0`.
-
-    Same-language is a preference, not a filter. Bodhan's indic-speak voices
-    read any of the 22 languages, so when the target language's voice of
-    that gender is already taken, a cross-language one of the right gender
-    beats the right language in the wrong gender -- gender is the hard
-    constraint throughout. English is the case that always lands here: it is
-    a valid `lang` for the engine but no voice is RECORDED in it, so an
-    English dub has no native candidates at all.
+    The cosine needs a speaker clip, a catalog clip and `speechbrain`. With
+    any of them missing every candidate scores 0.0, and the choice falls back
+    to a voice recorded in the target language of the speaker's gender.
+    `rationale.basis` records which path ran (`"embedding"` or
+    `"language+gender"`). English always lands on the fallback: the engine
+    accepts it as a `lang` but no voice is recorded in it.
     """
     catalog = load_voice_catalog(
         engine, language=target_language, catalog_json=catalog_json,
@@ -461,9 +384,8 @@ def assign_voices(
     for spk in ranked:
         gender = spk.get("predicted_gender")
 
-        # Gender is a HARD filter, not a weight. A male speaker is matched
-        # only against male voices; the opposite pool is a last resort when
-        # the same-gender one is exhausted, and says so in the log.
+        # Gender is a hard filter, not a weight. The opposite pool is a
+        # last resort when the same-gender one is exhausted.
         if gender == "male":
             primary, fallback = male_pool, neutral_pool + female_pool
         elif gender == "female":
@@ -488,16 +410,14 @@ def assign_voices(
                 log.warning("voices: every voice already assigned; reusing "
                             "within the same-gender pool for %s", spk["id"])
 
-        # Rank by similarity when there is a similarity to rank by; gender is
-        # already guaranteed by the pool, so the cosine is the whole of it.
-        # When there is not, fall back to the target language -- explicitly,
-        # and recorded, rather than leaning on the catalog's incidental order.
+        # Rank by cosine when there is one; the pool already guarantees
+        # gender. Otherwise fall back to the target language explicitly,
+        # rather than relying on the catalog's incidental order.
         can_embed = bool(voice_embs) and spk["id"] in speaker_embs
-        # No method could read this speaker's gender, so `gender` above is
-        # `FALLBACK_GENDER`, a placeholder rather than a prediction. Ranking
-        # that by timbre dresses a guess up as a match, so the request here
-        # is the plain one: a voice RECORDED IN THE TARGET LANGUAGE of that
-        # gender. Set by `pipeline.py` from `GenderVote.decided_by`.
+        # Gender is unknown, so `gender` above is `FALLBACK_GENDER`, a
+        # placeholder rather than a prediction. Rank by target language
+        # instead of dressing a guess up as a timbre match. Set by
+        # `pipeline.py` from `GenderVote.decided_by`.
         no_gender_evidence = spk.get("gender_basis") == "fallback"
         if no_gender_evidence:
             log.warning("voices: %s has no gender evidence; casting a "
@@ -515,13 +435,12 @@ def assign_voices(
                 sim = _cosine(speaker_embs[spk["id"]], voice_embs[v.voice])
                 why["embed_cos"] = sim
                 score = sim
-            # The language term is the tiebreaker, never the ranking: it
-            # cannot outvote a timbre match, and it only decides anything
-            # when `score` is tied -- which is exactly the no-embedding case.
+            # Language is the tiebreaker only: it cannot outvote a timbre
+            # match and decides anything only when `score` is tied.
             scored.append((score, native, v, why))
 
-        # Language first when there is no gender evidence, similarity first
-        # otherwise. Both orderings keep the other term as the tiebreaker.
+        # Language first without gender evidence, similarity first with it;
+        # either way the other term is the tiebreaker.
         scored.sort(key=(lambda row: (-row[1], -row[0])) if no_gender_evidence
                     else (lambda row: (-row[0], -row[1])))
         best_score, _native, best_voice, why = scored[0]
@@ -543,10 +462,9 @@ def assign_voices(
                  spk["id"], gender, best_voice.voice, best_score, why)
 
     if fallback_used:
-        # One line, at the end, naming the cause -- because the per-speaker
-        # lines above look identical whichever path ran, and a reader who
-        # does not know to check `basis` would read `score: 0.00` as a bad
-        # match rather than as no match having been attempted.
+        # The per-speaker lines above look identical whichever path ran, so
+        # name the cause once here: `score: 0.00` means no match was
+        # attempted, not a bad match.
         missing = []
         if not reference_audio:
             missing.append("no speaker reference clips")

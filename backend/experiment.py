@@ -1,27 +1,20 @@
 """Run the same clip through several dubbing variants, holding everything else fixed.
 
-What this module is for
------------------------
-The comparison this project is building is "which timing/stretch/synthesis
-method dubs best", and the only way that question has an answer is if every
-arm sees the *same* upstream input. Two things make that true, and they are
-the only two interesting ideas in this file:
+Every arm must see the same upstream input, which two mechanisms provide:
 
-  `reuse_prefix`      download -> ASR -> align -> MT runs ONCE and is cached at
-                      `data/exp/<base>/_shared/prefix.mt.json`. Bodhan's ASR
-                      and MT are network calls with real variance; running
-                      them eight times per clip would put that variance inside
-                      a measurement designed to hold them constant. The cached
-                      prefix is COPIED into each variant and never mutated.
+  `reuse_prefix`      download -> ASR -> align -> MT runs ONCE and is cached
+                      at `data/exp/<base>/_shared/prefix.mt.json`. Bodhan's
+                      ASR and MT are network calls with real variance, so
+                      re-running them per arm would put that variance inside
+                      the measurement. The cached prefix is COPIED into each
+                      variant and never mutated.
 
   `reuse_tts_from`    a variant may take another variant's `tts/raw/` by
-                      symlink. Methods that only change *placement* -- the
+                      symlink. An arm that only changes PLACEMENT -- the
                       timing producer, the render-time stretch filter, the mix
-                      strategy -- operate on exactly the same synthesised
-                      waveform, so re-synthesising for each of them is both
-                      wasted money and a second source of variance. Only the
-                      arms that change *what is said or how fast it is spoken*
-                      pay for their own TTS pass.
+                      strategy -- runs on the same synthesised waveform. Only
+                      an arm that changes what is said, or how fast it is
+                      spoken, pays for its own TTS pass.
 
 Output tree (one directory per variant, nothing shared but the prefix)::
 
@@ -36,25 +29,23 @@ Output tree (one directory per variant, nothing shared but the prefix)::
 
 How it drives the pipeline
 --------------------------
-Nothing here re-implements a stage. `backend.pipeline.run_pipeline` already
-grew `variant_tag` / `exp_root` / `post_mt_only_from` for exactly this, so the
-bootstrap and the post-MT chain go through it, and the stage functions
-(`backend.timing.plan`, `backend.mix.mix_dubbed_audio`) are called directly
-where the pipeline cannot interleave them.
+Nothing here re-implements a stage. The bootstrap and the post-MT chain go
+through `backend.pipeline.run_pipeline` (via `variant_tag` / `exp_root` /
+`post_mt_only_from`); `backend.timing.plan` and `backend.mix.mix_dubbed_audio`
+are called directly where the pipeline cannot interleave them.
 
-Two places where the pipeline API does not reach far enough, both reported
-rather than worked around silently:
+Two places the pipeline API does not reach, both reported rather than worked
+around silently:
 
-  * the timing plan has to be built AFTER the TTS clips exist and BEFORE the
-    mix reads them, and `run_post_mt_stages` runs TTS and mix in one call. So
+  * the timing plan must be built AFTER the TTS clips exist and BEFORE the mix
+    reads them, while `run_post_mt_stages` runs TTS and mix in one call. So
     the mix is invoked directly, with the source video / M&E stem taken off
-    the `PipelineResult` the bootstrap already returned.
+    the `PipelineResult` the bootstrap returned.
   * `tts_kwargs` is the one `synthesize_segments` knob with no `run_pipeline`
-    counterpart, so a variant that sets it still pays for a second synthesis
-    pass, logged as `resynthesis_reason`. Everything else in the `tts`
-    section -- `speed_control` and its `speed_*` companions included, since
-    `run_pipeline` grew `tts_speed_*` -- is forwarded onto the pipeline's own
-    stage-9f pass by `_forward_tts_to_pipeline`, so M1 runs ONE TTS pass.
+    counterpart, so a variant that sets it pays for a second synthesis pass,
+    logged as `resynthesis_reason`. Everything else in the `tts` section,
+    `speed_control` and its `speed_*` companions included, is forwarded onto
+    the pipeline's own stage-9f pass by `_forward_tts_to_pipeline`.
 
 Config shape. A variant's `config` has four optional sections, each validated
 against the real signature of the function it feeds, so a typo'd knob fails at
@@ -66,8 +57,7 @@ load time instead of forty minutes into a sweep::
      "mix":      {...mix_dubbed_audio knobs...} | null}
 
 `null` skips that stage. `variant.json` records the resolved value of every
-knob in every live section, defaults included, because "which defaults were in
-force" is the first question asked of any result six weeks later.
+knob in every live section, defaults included.
 """
 from __future__ import annotations
 
@@ -90,12 +80,10 @@ SCHEMA_VERSION = 1
 #: Sections a variant's `config` may carry. Order is execution order.
 SECTIONS = ("pipeline", "tts", "timing", "mix")
 
-#: The `run_pipeline` knobs a variant is allowed to move. `run_pipeline` has
-#: sixty-odd parameters and most of them belong to stages 1..9a, which the
-#: prefix froze on purpose; listing the post-MT subset keeps `variant.json`
-#: readable and makes "a variant changed an upstream knob" impossible rather
-#: than merely discouraged. Every name is checked against the real signature
-#: at import time.
+#: The `run_pipeline` knobs a variant is allowed to move: the post-MT subset.
+#: Everything else belongs to stages 1..9a, which the prefix froze, so this
+#: list makes an upstream knob change impossible rather than discouraged.
+#: Every name is checked against the real signature at import time.
 PIPELINE_KNOBS = (
     "translit_model",
     "duration_adjust",
@@ -108,9 +96,8 @@ PIPELINE_KNOBS = (
     "tts_max_stretch",
     "stretch_backend",
     "tts_apply_stretch",
-    # Engine-side speed control (method M1). `run_pipeline` forwards these
-    # straight to `synthesize_segments`, so a variant that moves them is
-    # served by the pipeline's own TTS pass -- no second synthesis call.
+    # Engine-side speed control (M1). `run_pipeline` forwards these straight
+    # to `synthesize_segments`, so moving them needs no second TTS pass.
     "tts_speed_control",
     "tts_speed_bounds",
     "tts_speed_tolerance",
@@ -135,11 +122,10 @@ PIPELINE_KNOBS = (
     "mt_n_best",
     "mt_length_penalties",
     "mt_diversity_penalty",
-    # Upstream model selection. These drive stages 7/8/9a, which the shared
-    # prefix freezes, so they are *prefix* knobs: `ensure_prefix` forwards
-    # them, and `_run_one` does not (under `post_mt_only_from` stages 1..9a
-    # are skipped and they would be silent no-ops). Without them nameable in
-    # a suite, `--input <video>` can only work for a clip whose
+    # Upstream model selection, driving stages 7/8/9a. These are PREFIX
+    # knobs: `ensure_prefix` forwards them and `_run_one` does not, since
+    # `post_mt_only_from` skips 1..9a and they would be silent no-ops.
+    # Without them a suite's `--input <video>` only works for a clip whose
     # `data/mt/<base>.*.mt.json` already exists.
     "asr_model",
     "asr_language",
@@ -152,10 +138,8 @@ PIPELINE_KNOBS = (
     "skip_stems",
 )
 
-#: The subset of `PIPELINE_KNOBS` that belongs to stages 1..9a and is therefore
-#: handed to `ensure_prefix`, not to a variant's post-MT replay. Named here so
-#: "which knobs reach the prefix pass" is one list instead of a literal buried
-#: in `run_experiment`.
+#: The subset of `PIPELINE_KNOBS` belonging to stages 1..9a, handed to
+#: `ensure_prefix` rather than to a variant's post-MT replay.
 PREFIX_KNOBS = (
     "asr_model",
     "asr_language",
@@ -171,17 +155,17 @@ PREFIX_KNOBS = (
     "skip_stems",
 )
 
-#: Knobs that only ever act in stages 1..9a. `run_pipeline` accepts them in the
-#: post-MT replay but ignores them (stage 7/8 live in the non-replay branch),
-#: so passing them per-variant would read as "this variant re-ran ASR" and mean
-#: nothing. Stripped from `run_kwargs` in `_run_one`. `mt_model` is NOT here:
-#: `_bootstrap_post_mt_only` takes it and records it on the result.
+#: Knobs that only act in stages 1..9a. `run_pipeline` accepts them in the
+#: post-MT replay but ignores them, so passing them per-variant would read as
+#: "this variant re-ran ASR" and mean nothing. Stripped from `run_kwargs` in
+#: `_run_one`. `mt_model` is NOT here: `_bootstrap_post_mt_only` takes it and
+#: records it on the result.
 _PREFIX_ONLY_KNOBS = ("asr_model", "asr_language", "align_model",
                       "mt_n_best", "mt_length_penalties",
                       "mt_diversity_penalty")
 
 #: `synthesize_segments` parameters a variant may set. The rest are wiring
-#: (`merged_json`, `out_dir`, `speaker_voice_map`, ...) that this module owns.
+#: (`merged_json`, `out_dir`, `speaker_voice_map`, ...) owned by this module.
 TTS_KNOBS = (
     "tts_model",
     "sample_rate",
@@ -209,11 +193,10 @@ MIX_KNOBS = (
 )
 
 #: `tts` section knob -> the `run_pipeline` knob that carries it into
-#: `synthesize_segments`. `run_pipeline` now forwards all of these, so a
-#: variant that names one in its `tts` section is served by the pipeline's own
-#: synthesis pass and pays for exactly ONE. `tts_kwargs` is absent on purpose:
-#: it has no pipeline counterpart, and a variant that sets it still needs the
-#: extra pass (reported as `resynthesis_reason`, never assumed away).
+#: `synthesize_segments`, so a variant naming one is served by the pipeline's
+#: own synthesis pass. `tts_kwargs` is absent on purpose: it has no pipeline
+#: counterpart, so a variant that sets it needs a second pass, reported as
+#: `resynthesis_reason`.
 _TTS_KNOB_TO_PIPELINE = {
     "tts_model": "tts_model",
     "sample_rate": "tts_sample_rate",
@@ -228,26 +211,22 @@ _TTS_KNOB_TO_PIPELINE = {
 
 
 # ---------------------------------------------------------------------------
-# startup: the environment this runner's subprocesses need
-#
-# `backend.cli` is the other entry point into the same pipeline and already
-# does both of these. Neither is re-implemented here; both are delegated, so
-# there is one .env rule and one ffmpeg shim, not two of each.
+# startup: the environment this runner's subprocesses need. Both are
+# delegated to `backend.cli` / `backend.stem_separation`, so there is one .env
+# rule and one ffmpeg shim, not two of each.
 # ---------------------------------------------------------------------------
 
 def _ensure_ffmpeg_on_path() -> None:
     """Put an `ffmpeg` on PATH for this process and everything it spawns.
 
-    `backend.media_io` calls the imageio-ffmpeg binary by absolute path and
-    never needs this, but whisperx's `load_audio` shells out to a bare
-    `ffmpeg`, so stage 7 dies with `FileNotFoundError` in any shell that has
-    no system ffmpeg -- which is the plain shell this runner is started from.
+    Needed because whisperx's `load_audio` shells out to a bare `ffmpeg`, so
+    stage 7 raises FileNotFoundError in a shell with no system ffmpeg.
+    (`backend.media_io` calls the imageio binary by absolute path and does not
+    need this.)
 
-    Delegates to `backend.stem_separation._ensure_ffmpeg_on_path`, the helper
-    that already builds and caches the `/tmp/dubbingstudio-ffmpeg-shim/ffmpeg`
-    symlink for demucs. One shim, one mechanism, two callers. It is a no-op
-    when `shutil.which("ffmpeg")` already resolves, so calling it twice or
-    from a shell that has ffmpeg costs nothing.
+    Delegates to `backend.stem_separation._ensure_ffmpeg_on_path`, which
+    builds and caches the shim symlink for demucs. A no-op when
+    `shutil.which("ffmpeg")` already resolves.
     """
     from .stem_separation import _ensure_ffmpeg_on_path as _ensure
     _ensure()
@@ -256,12 +235,9 @@ def _ensure_ffmpeg_on_path() -> None:
 def _load_env(allow_insecure_env: bool = False) -> None:
     """Load `.env`, keeping `backend.cli`'s file-permission check.
 
-    `backend.experiment` is a second entry point into the same pipeline and
-    needs the same secrets -- without `HF_TOKEN` in the environment the
-    diarizer fails with "community-1 requires HF_TOKEN". Both the check and
-    the load are imported from `backend.cli` rather than re-implemented, so
-    the mode-0600 rule has exactly one definition and cannot drift between
-    the two entry points.
+    This is a second entry point into the same pipeline and needs the same
+    secrets -- without `HF_TOKEN` the diarizer fails. The check and the load
+    are imported from `backend.cli`, so the mode-0600 rule has one definition.
     """
     from dotenv import load_dotenv
     from .cli import _check_env_permissions
@@ -298,9 +274,9 @@ def _defaults_for(fn, names: Sequence[str]) -> Dict[str, Any]:
 def _timing_defaults(producer: str) -> Dict[str, Any]:
     """Every knob of `plan_<producer>`, defaults included.
 
-    Resolved through `backend.timing` rather than off a hard-coded table, so
-    the two producers that `backend.timing_advanced` attaches at import time
-    are found the same way the dispatcher finds them.
+    Resolved through `backend.timing`, not a hard-coded table, so the two
+    producers `backend.timing_advanced` attaches at import time are found the
+    same way the dispatcher finds them.
     """
     from . import timing as _t
     from . import timing_advanced as _adv   # noqa: F401  (registers dp/word_anchored)
@@ -432,10 +408,10 @@ class ExperimentResult:
 def load_suite(path: Path) -> Tuple[dict, List[Variant]]:
     """Read a suite file. JSON only -- this repo has no YAML dependency.
 
-    Returns `(base_config, variants)`. `base_config` is the per-section
-    defaults every variant inherits; duplicate ids, unknown keys and
-    `reuse_tts_from` pointing at a variant that does not exist (or is defined
-    later) are all rejected here rather than mid-sweep.
+    Returns `(base_config, variants)`; `base_config` holds the per-section
+    defaults every variant inherits. Duplicate ids, unknown keys and a
+    `reuse_tts_from` naming a variant that does not exist or is defined later
+    are all rejected here rather than mid-sweep.
     """
     path = Path(path)
     doc = json.loads(path.read_text())
@@ -463,8 +439,8 @@ def load_suite(path: Path) -> Tuple[dict, List[Variant]]:
             raise ValueError(f"{path}: duplicate variant id {v.id!r}")
         seen.add(v.id)
         if v.reuse_tts_from is not None and v.reuse_tts_from not in seen:
-            # `not in seen` rather than `not in all ids`: the donor must be
-            # EARLIER in the list, because that is the order they run in.
+            # `not in seen`, not `not in all ids`: the donor must be EARLIER
+            # in the list, which is the order they run in.
             raise ValueError(
                 f"{path}: variant {v.id!r} reuses TTS from "
                 f"{v.reuse_tts_from!r}, which is not defined before it")
@@ -478,9 +454,9 @@ def load_suite(path: Path) -> Tuple[dict, List[Variant]]:
 def resolve_config(variant: Variant, base_config: Optional[dict] = None) -> dict:
     """Expand a variant's config into every knob of every live section.
 
-    Validation happens here, which is why `load_suite` + `resolve_config` is a
-    complete dry check of a suite file: an unknown knob raises naming the
-    function whose signature it failed against.
+    Validation happens here, so `load_suite` + `resolve_config` is a complete
+    dry check of a suite file: an unknown knob raises, naming the function
+    whose signature it failed against.
     """
     from . import mix as _mix
     from . import tts as _tts
@@ -492,9 +468,9 @@ def resolve_config(variant: Variant, base_config: Optional[dict] = None) -> dict
                          f"{', '.join(sorted(bad))}; known: {', '.join(SECTIONS)}")
 
     out: Dict[str, Any] = {}
-    #: what the suite actually WROTE per section, before defaults were filled
-    #: in. `_forward_tts_to_pipeline` needs this to tell "the author asked for
-    #: 1.15x" from "1.15 happens to be the default".
+    #: What the suite actually WROTE per section, before defaults were filled
+    #: in. `_forward_tts_to_pipeline` uses it to tell an explicit 1.15x from a
+    #: 1.15 that is merely the default.
     explicit: Dict[str, Dict[str, Any]] = {}
 
     for name, fn, knobs in (("pipeline", run_pipeline, PIPELINE_KNOBS),
@@ -514,17 +490,13 @@ def resolve_config(variant: Variant, base_config: Optional[dict] = None) -> dict
             raise ValueError(
                 f"variant {variant.id!r}: section {name!r} has unknown knob(s) "
                 f"{', '.join(sorted(unknown))}; settable: {', '.join(knobs)}")
-        # A PREFIX knob set by a VARIANT is the most dangerous thing a suite
-        # can say, because the failure is silent and looks like a result.
-        # Stages 1..9a run exactly once per sweep (`ensure_prefix`), driven
-        # ONLY by `base_config.pipeline`; `_run_one` always passes
-        # `post_mt_only_from`, and `_PREFIX_ONLY_KNOBS` is stripped from
-        # `run_kwargs` right before the call. So a variant that says
-        # `mt_n_best: 4` would run against the cached n_best=1 prefix,
-        # produce no `candidates_text`, rank a pool of one, and report the
-        # BASELINE's numbers under M8's name -- with no error anywhere. That
-        # is precisely how M8 came to be an orphan in the first place.
-        # Fail here instead, and say where the knob does belong.
+        # Reject a PREFIX knob set by a VARIANT. Stages 1..9a run once per
+        # sweep (`ensure_prefix`), driven only by `base_config.pipeline`;
+        # `_run_one` always passes `post_mt_only_from` and strips
+        # `_PREFIX_ONLY_KNOBS` from `run_kwargs`. So a variant that says
+        # `mt_n_best: 4` would run against the cached n_best=1 prefix and
+        # report the baseline's numbers under its own name, with no error
+        # anywhere. Fail here instead, and say where the knob belongs.
         if name == "pipeline" and name in variant.config:
             leaked = sorted(set(variant.config[name]) & set(PREFIX_KNOBS))
             if leaked:
@@ -575,15 +547,13 @@ def _forward_tts_to_pipeline(
 ) -> Optional[str]:
     """Push the variant's `tts` section onto its `pipeline` section in place.
 
-    `run_pipeline` grew `tts_speed_control` and its `tts_speed_*` companions,
-    so every `synthesize_segments` knob a suite can name except `tts_kwargs`
-    now has a pipeline counterpart (`_TTS_KNOB_TO_PIPELINE`). Copying the
-    explicitly-set ones across means the pipeline's own stage-9f pass
-    synthesises at the requested rate and `_run_one` never makes a second
-    `synthesize_segments` call -- the arm stops paying for an entire wasted
-    TTS pass, and the two passes stop being a second source of variance.
+    Every `synthesize_segments` knob a suite can name except `tts_kwargs` has
+    a `run_pipeline` counterpart (`_TTS_KNOB_TO_PIPELINE`). Copying the
+    explicitly-set ones across lets the pipeline's own stage-9f pass
+    synthesise at the requested rate, so `_run_one` makes no second
+    `synthesize_segments` call.
 
-    Returns the `resynthesis_reason`: `None` when the pipeline can carry
+    Returns the `resynthesis_reason`: None when the pipeline can carry
     everything, otherwise the sentence `_run_one` logs before buying the extra
     pass. A knob that cannot be forwarded is REPORTED, never dropped.
     """
@@ -595,8 +565,8 @@ def _forward_tts_to_pipeline(
     unforwardable = sorted(k for k in set_in_tts
                            if k not in _TTS_KNOB_TO_PIPELINE)
     if unforwardable:
-        # Only `tts_kwargs` can land here today; named rather than hard-coded
-        # so a future TTS_KNOBS entry without a counterpart says so out loud.
+        # Only `tts_kwargs` lands here today; named rather than hard-coded so
+        # a future TTS_KNOBS entry without a counterpart says so.
         return (f"run_pipeline has no counterpart for tts knob(s) "
                 f"{', '.join(unforwardable)}")
 
@@ -616,8 +586,7 @@ def _forward_tts_to_pipeline(
         pipe_name = _TTS_KNOB_TO_PIPELINE[tts_name]
         if pipe_name in set_in_pipe and _jsonable(set_in_pipe[pipe_name]) != _jsonable(value):
             # Two sections of one variant asking for different things is a
-            # suite bug; silently preferring one would make `variant.json`
-            # lie about what ran.
+            # suite bug; preferring one would make `variant.json` lie.
             raise ValueError(
                 f"variant {variant.id!r}: tts.{tts_name}={value!r} conflicts "
                 f"with pipeline.{pipe_name}={set_in_pipe[pipe_name]!r}; these "
@@ -656,9 +625,8 @@ def _base_name(input_: str, prefix_json: Optional[Path]) -> str:
 def _find_merged_json(base: str, data_dir: Path) -> Optional[Path]:
     """The newest `data/mt/<base>.*.mt.json`, or None.
 
-    Looked up rather than rebuilt: an ASR+MT pass over a clip already on disk
-    costs minutes and network calls, and the sweep's whole premise is that
-    every arm shares one.
+    Looked up rather than rebuilt: an ASR+MT pass costs minutes and network
+    calls, and every arm of the sweep shares one.
     """
     hits = sorted((Path(data_dir) / "mt").glob(f"{base}.*.mt.json"),
                   key=lambda p: p.stat().st_mtime, reverse=True)
@@ -668,9 +636,9 @@ def _find_merged_json(base: str, data_dir: Path) -> Optional[Path]:
 def _resolve_video(input_: str, base: str, data_dir: Path) -> Optional[Path]:
     """The source video behind `input_`, which may itself be a merged JSON.
 
-    `run_pipeline(post_mt_only_from=...)` wants the video, not the JSON: handed
-    a `.mt.json` it would try to *download* it. So a JSON input is mapped back
-    to `data/videos/<base>.<ext>` here.
+    `run_pipeline(post_mt_only_from=...)` wants the video, not the JSON --
+    handed a `.mt.json` it tries to download it -- so a JSON input is mapped
+    back to `data/videos/<base>.<ext>` here.
     """
     p = Path(input_).expanduser()
     if p.suffix.lower() in VIDEO_SUFFIXES and p.exists():
@@ -699,9 +667,9 @@ def ensure_prefix(
       3. otherwise stages 1..9a run once through `run_pipeline` with every
          post-MT stage off, and its merged JSON is copied in.
 
-    The copy is the point. Every variant mutates its own `plan.mt.json`, and
-    the file those copies descend from must still be byte-identical at the end
-    of the sweep -- `data/mt/*.mt.json` is not a scratch directory.
+    Always a COPY: every variant mutates its own `plan.mt.json`, and the file
+    they descend from must still be byte-identical at the end of the sweep.
+    `data/mt/*.mt.json` is not a scratch directory.
     """
     shared = Path(root) / "_shared"
     dest = shared / "prefix.mt.json"
@@ -726,8 +694,8 @@ def ensure_prefix(
         return None, False
 
     log.info("=== prefix: stages 1..9a (runs ONCE for %d-variant sweep) ===", 0)
-    # The only call in this module that reaches whisperx, and whisperx is the
-    # thing that shells out to a bare `ffmpeg`.
+    # The only call here that reaches whisperx, which shells out to a bare
+    # `ffmpeg`.
     _ensure_ffmpeg_on_path()
     res = run_pipeline(input_, data_dir=Path(data_dir), **(pipeline_kwargs or {}))
     if res.mt_json is None:
@@ -756,9 +724,9 @@ def _tts_dir_for(variant_dir: Path, base: str, tts_model: Optional[str]) -> Path
 def _link_tts(donor_tts: Path, dest_tts: Path) -> Path:
     """Symlink the donor's `raw/` under this variant, give it its own `stretched/`.
 
-    Only `raw/` is shared, and only by link: every variant that reuses a clip
-    reads it through a path INSIDE its own tree, so "variant A wrote into
-    variant B" stays detectable by looking at paths alone.
+    Only `raw/` is shared, and only by link, so every variant reads its clips
+    through a path INSIDE its own tree and a cross-variant write is visible
+    from the paths alone.
     """
     dest_tts.mkdir(parents=True, exist_ok=True)
     raw_link = dest_tts / "raw"
@@ -781,9 +749,9 @@ def _link_tts(donor_tts: Path, dest_tts: Path) -> Path:
 def _repoint_clips(plan_json: Path, donor_raw: Path, own_raw: Path) -> int:
     """Rewrite `tts_raw_audio` / `tts_audio` from the donor's path onto ours.
 
-    Without this a reusing variant's merged JSON points straight at the
-    donor's directory, and the next stage that writes a derived file next to
-    its input would write into another variant's tree.
+    Without it a reusing variant's merged JSON points at the donor's
+    directory, and any stage writing a derived file beside its input writes
+    into another variant's tree.
     """
     data = json.loads(Path(plan_json).read_text())
     donor_raw = Path(donor_raw).resolve()
@@ -837,7 +805,7 @@ def run_experiment(
     `input_` is a video path, a URL, or a merged `*.mt.json` from an earlier
     run (the usual case: the prefix is already on disk and costs nothing).
 
-    `only` restricts the run to those variant ids -- but a restricted run still
+    `only` restricts the run to those variant ids. A restricted run still
     needs its donors, so a variant naming `reuse_tts_from` is refused when the
     donor is neither selected nor already on disk. `dry_run` resolves and
     validates every config and lays out the tree without running a stage.
@@ -848,15 +816,15 @@ def run_experiment(
     if not variants:
         raise ValueError("run_experiment: no variants")
 
-    # Resolve EVERY config before touching the disk: a typo in variant 8 must
-    # not surface after variants 1..7 have burned an hour of GPU.
+    # Resolve EVERY config before touching the disk, so a typo in variant 8
+    # surfaces before variants 1..7 burn an hour of GPU.
     resolved: Dict[str, dict] = {}
     for v in variants:
         resolved[v.id] = resolve_config(v, base_config)
 
-    # The upstream model choice is a property of the SHARED prefix, so only
-    # `base_config` can carry it. A variant naming one would be resolved,
-    # written into `variant.json`, and then do nothing -- refuse instead.
+    # Upstream model choice is a property of the SHARED prefix, so only
+    # `base_config` may carry it. A variant naming one would be resolved,
+    # written into `variant.json` and then do nothing -- refuse instead.
     _model_knobs = ("asr_model", "asr_language", "align_model", "mt_model")
     for v in variants:
         stray = sorted(set((v.config.get("pipeline") or {})) & set(_model_knobs))
@@ -905,8 +873,8 @@ def run_experiment(
                      prefix_json=prefix_json, data_dir=data_dir,
                      done=done, dry_run=dry_run)
         except Exception as exc:
-            # One dead arm must not cost the other seven. The sweep reports it
-            # and carries on; `ExperimentResult.ok` is how a caller notices.
+            # One dead arm must not cost the others: report and carry on.
+            # `ExperimentResult.ok` is how a caller notices.
             log.exception("variant %s failed: %s", v.id, exc)
             vr.error = f"{type(exc).__name__}: {exc}"
         vr.wall_clock_s = round(time.perf_counter() - t0, 3)
@@ -995,17 +963,16 @@ def _run_one(
     tts_model = pipe_cfg.get("tts_model") or (tts_cfg or {}).get("tts_model")
 
     # --- 1. bootstrap + post-MT chain --------------------------------------
-    # `variant_tag` is what copies `source_json` to `<exp_root>/<base>/<id>/
-    # plan.mt.json` and redirects stages 9b..9h into that directory; this call
-    # is the whole reason it exists.
+    # `variant_tag` copies `source_json` to `<exp_root>/<base>/<id>/
+    # plan.mt.json` and redirects stages 9b..9h into that directory.
     boot: Optional[PipelineResult] = None
     stage_keys = ("translit_model", "duration_adjust", "voice_engine",
                   "tts_model", "vc_model")
     live_stages = ([] if donor_vr is not None
                    else [k for k in stage_keys if pipe_cfg.get(k)])
-    # The bootstrap is needed for two different reasons: to RUN a post-MT
-    # stage, or just to learn where the source video and the M&E stem are so
-    # the mix can be driven. A placement-only variant needs neither.
+    # The bootstrap runs for either of two reasons: to run a post-MT stage,
+    # or just to learn where the source video and M&E stem are so the mix can
+    # be driven. A placement-only variant needs neither.
     needs_pipeline = bool(live_stages) or mix_cfg is not None
     if not needs_pipeline:
         if Path(source_json).resolve() != plan_json.resolve():
@@ -1013,17 +980,16 @@ def _run_one(
         log.info("variant %s: placement only, no pipeline stage to run", v.id)
     else:
         run_kwargs = dict(pipe_cfg)
-        # Stages 7/8 live in `run_pipeline`'s non-replay branch, and this call
-        # always passes `post_mt_only_from`. Forwarding ASR/align selection
-        # here would be accepted and ignored, i.e. it would read in
-        # `variant.json` as "this arm re-ran ASR" and mean nothing. The prefix
-        # owns them; `ensure_prefix` is where they were used.
+        # Stages 7/8 live in `run_pipeline`'s non-replay branch and this call
+        # always passes `post_mt_only_from`, so ASR/align selection forwarded
+        # here is accepted and ignored. The prefix owns them; `ensure_prefix`
+        # is where they were used.
         for k in _PREFIX_ONLY_KNOBS:
             run_kwargs.pop(k, None)
         if donor_vr is not None:
-            # The donor already ran 9b..9f and we inherited the merged JSON it
-            # produced. Re-running any of them here would both cost a second
-            # TTS pass and overwrite the very clips we are reusing.
+            # The donor already ran 9b..9f and this variant inherited its
+            # merged JSON. Re-running them would cost a second TTS pass and
+            # overwrite the clips being reused.
             run_kwargs.update(translit_model=None, duration_adjust=False,
                               voice_engine=None, tts_model=None, vc_model=None)
         run_kwargs["mix"] = False          # the timing plan has to land first
@@ -1035,11 +1001,10 @@ def _run_one(
                         v.id, cfg["resynthesis_reason"])
         video = _resolve_video(input_, base, data_dir)
         # `run_pipeline` builds its variant directory as
-        # `<exp_root>/<video.stem>/<variant_tag>`, so the only way its tree and
-        # ours are the same tree is for the experiment directory to be named
-        # after the clip. Checked rather than assumed: silently writing a
-        # second copy of every artifact one directory over is the kind of bug
-        # that is only noticed when the disk fills.
+        # `<exp_root>/<video.stem>/<variant_tag>`, so its tree and ours only
+        # coincide when the experiment directory is named after the clip.
+        # Checked, not assumed: otherwise every artifact is silently written
+        # twice, one directory apart.
         if video is not None and video.stem != Path(root).name:
             raise ValueError(
                 f"exp_id {Path(root).name!r} does not match the clip name "
@@ -1069,10 +1034,9 @@ def _run_one(
             log.info("variant %s: reused %d clip path(s) from %s via %s",
                      v.id, n, v.reuse_tts_from, raw_link)
         elif _has_clips(plan_json):
-            # The donor never ran a TTS pass of its own -- the clips it is
-            # "sharing" came in with the prefix and both variants inherited
-            # the same read-only paths. Nothing to link, and nothing unsafe:
-            # neither variant writes there.
+            # The donor ran no TTS pass of its own: the clips it is sharing
+            # came in with the prefix and both variants inherited the same
+            # read-only paths. Nothing to link, and neither writes there.
             log.info("variant %s: donor %s has no TTS pass; using the clips "
                      "inherited with the prefix", v.id, v.reuse_tts_from)
             vr.reused_tts_from = f"{v.reuse_tts_from} (inherited prefix clips)"
@@ -1116,7 +1080,7 @@ def _run_one(
 
     # --- 4. mix ------------------------------------------------------------
     # Called directly: `run_post_mt_stages` runs TTS and mix in one pass, and
-    # the timing plan has to be built between them.
+    # the timing plan is built between them.
     if mix_cfg is not None:
         from .mix import mix_dubbed_audio
         if boot is None or boot.video is None:
@@ -1166,9 +1130,9 @@ def _write_metrics(
 ) -> Path:
     """Per-variant `metrics.json`: always the cheap facts, eval scores if possible.
 
-    The eval harness is optional on purpose -- it needs golden references this
-    clip may not have, and a missing reference must not turn a finished dub
-    into a failed variant.
+    The eval harness is optional: it needs golden references the clip may not
+    have, and a missing reference must not turn a finished dub into a failed
+    variant.
     """
     doc: Dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
@@ -1245,9 +1209,9 @@ def main(argv=None) -> int:
     logging.basicConfig(level=getattr(logging, a.log_level.upper(), logging.INFO),
                         format="%(levelname)s %(name)s: %(message)s")
 
-    # Same startup contract as `backend.cli.main`: secrets out of `.env`
-    # (HF_TOKEN for pyannote), and an `ffmpeg` on PATH for whisperx. `validate`
-    # touches neither, so it stays runnable without a `.env` at all.
+    # Same startup contract as `backend.cli.main`: secrets from `.env`
+    # (HF_TOKEN for pyannote) and an `ffmpeg` on PATH for whisperx.
+    # `validate` touches neither and runs without a `.env`.
     if a.cmd == "run":
         _load_env(allow_insecure_env=a.allow_insecure_env)
         _ensure_ffmpeg_on_path()

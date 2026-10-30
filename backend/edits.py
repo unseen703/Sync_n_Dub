@@ -88,8 +88,8 @@ def tone_styles() -> Tuple[str, ...]:
     `models.tts.resolve_style` turns back into "send no style".
     """
     try:
-        from models.tts import NEUTRAL_STYLE
-        from models.tts.bodhan_adapter import INDIC_SPEAK_STYLES
+        from backend.tts.tts import NEUTRAL_STYLE
+        from backend.tts.bodhan_adapter import INDIC_SPEAK_STYLES
         return (NEUTRAL_STYLE,) + tuple(INDIC_SPEAK_STYLES)
     except Exception:                               # noqa: BLE001
         # Same policy as above: a prompt string must not take down an edit.
@@ -1381,7 +1381,7 @@ def _h_set_tone(data, seg_ids, op, applied, ctx, res):
     # there is nothing for an LLM to rewrite the wording INTO -- asking it to
     # would get a paraphrase at best and, because a paraphrase is a different
     # length, a different timing fit for no stated reason.
-    from models.tts import NEUTRAL_STYLE
+    from backend.tts.tts import NEUTRAL_STYLE
     if rewrite and tone.strip().lower() == NEUTRAL_STYLE:
         applied.warnings.append(
             "neutral removes the delivery style rather than setting one, so "

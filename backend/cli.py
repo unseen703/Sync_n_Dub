@@ -58,13 +58,13 @@ def _speed_bounds(s: str) -> tuple:
 
 
 def _speed_control_modes():
-    from backend.tts import SPEED_CONTROL_MODES
+    from backend.tts.tts import SPEED_CONTROL_MODES
     return SPEED_CONTROL_MODES
 
 
 def _emotion_models():
     try:
-        from models.emotion import available_models
+        from backend.emotion.emotion import available_models
         return available_models()
     except ImportError:
         return []
@@ -88,15 +88,15 @@ def _tts_styles():
 
     Listed here so the CLI offers exactly what the UI dropdowns do.
     """
-    from models.tts import NEUTRAL_STYLE
+    from backend.tts.tts import NEUTRAL_STYLE
     try:
-        from models.tts.bodhan_adapter import INDIC_SPEAK_STYLES
+        from backend.tts.bodhan_adapter import INDIC_SPEAK_STYLES
         return ("auto", NEUTRAL_STYLE) + tuple(INDIC_SPEAK_STYLES)
     except ImportError:
         return ("auto", NEUTRAL_STYLE)
 from backend.translate import available_models as _mt_models
 from backend.translate.translit import available_models as _translit_models
-from models.tts import available_models as _tts_models
+from backend.tts.tts import available_models as _tts_models
 
 from .pipeline import DEFAULT_DATA_DIR, REPO_ROOT, run_pipeline
 

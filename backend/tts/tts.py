@@ -19,7 +19,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
-from models.tts import TTSRequest, available_models, get_tts, resolve_style
+from backend.tts.tts import TTSRequest, available_models, get_tts, resolve_style
 
 from .stretch import wsola_stretch_cap
 from .sanitize import sanitize_for_tts

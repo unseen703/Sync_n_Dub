@@ -90,7 +90,7 @@ def annotate_segments_with_emotion(
     `backend/edits.py` — an explicit human edit outranks the classifier.
     """
     import soundfile as sf
-    from models.emotion import get_emotion
+    from backend.emotion.emotion import get_emotion
 
     merged_json = Path(merged_json)
     data = json.loads(merged_json.read_text())

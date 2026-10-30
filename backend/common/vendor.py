@@ -1,8 +1,8 @@
 """Locate a vendored upstream, either side of the `third_party/` move.
 
-The vendored repos live under `models/<stage>/vendor/`, but ~21 GB has to be
-moved there by hand. So this resolves either location by EXISTENCE, and is
-correct before the move, after it, and on a checkout where it never
+The vendored repos live under `backend/<stage>/vendor/`, but ~21 GB has to
+be moved there by hand. So this resolves either location by EXISTENCE, and
+is correct before the move, after it, and on a checkout where it never
 happened.
 """
 from __future__ import annotations
@@ -15,7 +15,7 @@ from typing import Optional
 _log = logging.getLogger(__name__)
 
 #: Where a lip-sync adapter's vendored upstream lives, relative to the repo
-#: root, so nothing under `models/` reaches outside it.
+#: root. Other stages (asd, …) pass their own `vendor_root`.
 VENDOR_ROOT = "backend/lipsync/vendor"
 
 
@@ -31,10 +31,11 @@ def resolve_vendor_repo(name: str, env_var: str,
     if explicit:
         return Path(explicit)
 
-    # parents[1], not [2]: this file is `models/_vendor.py`. Getting the index
-    # wrong resolves every vendor path above the repo root, and the only
-    # symptom is "repo not found" at a path that was never right.
-    root = Path(__file__).resolve().parents[1]
+    # parents[2]: this file is `backend/common/vendor.py`, so climb two to
+    # reach the repo root. Getting the index wrong resolves every vendor
+    # path above or below the repo root, and the only symptom is "repo not
+    # found" at a path that was never right (e.g. backend/backend/...).
+    root = Path(__file__).resolve().parents[2]
     new = root / VENDOR_ROOT / name
     if vendor_root:
         new = root / vendor_root / name

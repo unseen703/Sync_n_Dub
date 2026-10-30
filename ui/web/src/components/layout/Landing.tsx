@@ -5,18 +5,6 @@ import { useStore } from '../../store/useStore';
 import { LANGUAGES } from '../../lib/lang';
 import { StartPanel } from './StartPanel';
 
-/**
- * What the user sees before they have picked a dub — and the first thing a
- * newcomer sees at all.
- *
- * Every claim on this page maps to something the pipeline actually does, so
- * it stays true as the product grows: the language list is the same table
- * `ui/langs.py` serves, the four steps are the seven pipeline phases folded
- * in half, and the lip-sync line names the three models `GET /api/options`
- * actually offers. Nothing here promises a capability the server does not
- * have — a landing page that oversells is the first place a tool starts
- * lying about itself.
- */
 const STEPS = [
   {
     Icon: IconFilm,
@@ -73,8 +61,7 @@ export function Landing() {
         </h1>
 
         <p className="max-w-2xl text-[15px] leading-relaxed text-ink2">
-          Transcribe, translate and re-voice your video in any supported Indian language
-          — with optional lip-sync to match the speaker's mouth.
+          Transcribe, translate and re-voice your video in any supported Indian language.
         </p>
 
         <div className="flex flex-wrap items-center gap-3">
@@ -91,9 +78,6 @@ export function Landing() {
         </div>
       </div>
 
-      {/* The home page starts a dub itself. The dialog is still there for
-          the window picker and the lip-sync model; this covers the common
-          case in one screen. */}
       <div className="mt-8">
         <StartPanel />
       </div>

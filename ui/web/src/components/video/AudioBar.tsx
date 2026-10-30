@@ -7,20 +7,6 @@ import { IconAlert, IconDownload, IconPause, IconPlay } from '../ui/Icons';
 import { Tooltip } from '../ui/Tooltip';
 import type { MediaRef } from '../../api/types';
 
-/**
- * Requirement 9: play and download for BOTH original and dubbed audio,
- * directly below the video.
- *
- * Both share one `HTMLAudioElement`, so starting one stops the other.
- * That is the behaviour you want here: the comparison is sequential, and
- * two tracks of the same lecture playing at once is just noise.
- *
- * The `full_quality: false` note is NOT optional chrome. When stems were
- * skipped there is no 44.1 kHz stereo extraction on disk and the only
- * "original audio" is the 16 kHz mono file made for diarization. Playing
- * that unlabelled next to a 48 kHz dub makes the dub sound better than it
- * is, and would be the UI lying about what the pipeline produced.
- */
 function Track({ track, tone }: { track: MediaRef | null; tone: 'slate' | 'accent' }) {
   const playingSrc = useAudioPreview();
   const isPlaying = Boolean(track && playingSrc === track.url);
@@ -97,7 +83,6 @@ function Track({ track, tone }: { track: MediaRef | null; tone: 'slate' | 'accen
           ) : null}
         </div>
 
-        {/* Scrubber — only meaningful while this track is the one playing. */}
         <div
           role="presentation"
           onClick={(e) => {

@@ -1,10 +1,6 @@
 """ASR adapter registry — Bodhan Indic-Transcribe only.
 
   - bodhan : Bodhan Indic-Transcribe (Core / Flex) via REST
-
-`whisperx`, `indicconformer`, `indictranscribe_core` and
-`indictranscribe_flex` were removed on 2026-10-28. In git at
-b823223.
 """
 from __future__ import annotations
 
@@ -32,11 +28,10 @@ get_asr = _registry.get
 def available_models(language: Optional[str] = None) -> list[str]:
     """Registered ASR adapter names.
 
-    `language` is accepted and ignored. bodhan leaves it None and
-    delegates language detection downstream, so with only bodhan registered
-    the filter can never drop anything. The parameter stays because `cli.py`
-    and the UI both pass it, and because the filtering comes back the moment
-    a second, language-limited adapter does.
+    `language` is accepted and ignored: no registered adapter limits its
+    language inventory, so the filter can never drop anything. The parameter
+    stays because the CLI and UI pass it, and filtering returns the moment a
+    language-limited adapter is added.
     """
     return sorted(_REGISTRY_SPEC)
 

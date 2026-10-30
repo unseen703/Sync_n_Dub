@@ -2,15 +2,10 @@
 
   - emotion2vec : iic/emotion2vec_plus_large — utterance-level SER via FunASR
 
-An emotion adapter reads the SOURCE speaker's audio per segment and reports
-how that line was delivered. `backend.emotion` turns those labels into
-per-segment `tts_style` values, which `backend/tts.py` already consumes
-(`seg.get("tts_style") or info.get("style")`).
-
-Adding a model is one adapter plus one line in `_REGISTRY_SPEC` below. The
-lazy-import pattern matches `models.faces.detect`: an env missing FunASR can
-still `from models.emotion import available_models` without blowing up, and
-only pays the import cost when a model is actually requested.
+An adapter reads the SOURCE speaker's audio per segment and reports how that
+line was delivered; `backend.emotion` turns the labels into `tts_style`
+values. Adapters import lazily, so an env without FunASR can still list the
+registry.
 """
 from __future__ import annotations
 

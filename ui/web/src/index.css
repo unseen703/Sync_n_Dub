@@ -2,105 +2,66 @@
 @tailwind components;
 @tailwind utilities;
 
-/*
-  The palette lives here, as RGB triplets, so `tailwind.config.js` can hand
-  them out with alpha support and `index.html`'s pre-bundle skeleton can use
-  the same literals.
-
-  Why still dark: this app's centre column is a 16:9 video frame. A light
-  chrome throws a bright halo around it and shifts the apparent gamma of the
-  thing you are judging — which, in a tool whose job is "does her mouth match
-  on this word", is the one surface that must not lie. The old theme was not
-  wrong to be dark; it was wrong to put #475569 text on #0b0f17 (2.4:1).
-  Every ink token below clears 4.5:1 on every surface token.
-*/
 :root {
   color-scheme: dark;
 
-  --c-canvas: 10 13 19; /* #0A0D13 */
-  --c-surface: 18 23 34; /* #121722 */
-  --c-raised: 26 33 48; /* #1A2130 */
+  --c-canvas: 10 13 19;
+  --c-surface: 18 23 34;
+  --c-raised: 26 33 48;
 
-  --c-line: 38 47 65; /* #262F41 — hairline, decorative only */
-  --c-edge: 100 114 142; /* #64728E — control boundary, >=3:1 on every surface */
+  --c-line: 38 47 65;
+  --c-edge: 100 114 142;
 
-  --c-ink: 242 245 249; /* #F2F5F9 */
-  --c-ink-2: 199 209 223; /* #C7D1DF */
-  --c-ink-3: 159 172 191; /* #9FACBF */
-  --c-ink-4: 126 140 160; /* #7E8CA0 — the dimmest text in the app */
+  --c-ink: 242 245 249;
+  --c-ink-2: 199 209 223;
+  --c-ink-3: 159 172 191;
+  --c-ink-4: 126 140 160;
 
-  --c-brand: 79 70 229; /* #4F46E5 — fill; white on it is 6.3:1 */
-  --c-brand-soft: 99 102 241; /* #6366F1 — decoration only, NOT a text colour */
-  --c-brand-ink: 165 180 252; /* #A5B4FC — brand as text, 9.8:1 */
+  --c-brand: 79 70 229;
+  --c-brand-soft: 99 102 241;
+  --c-brand-ink: 165 180 252;
 
-  --c-aqua: 34 211 238; /* #22D3EE */
-  --c-aqua-ink: 103 232 249; /* #67E8F9 — 13.4:1 */
+  --c-aqua: 34 211 238;
+  --c-aqua-ink: 103 232 249;
 
-  /* The STAGED value — what a change will make this read as, beside the
-     struck-through value it replaces. Its own token rather than `brand-ink`:
-     brand already means "this control is active/selected" all over the app,
-     and a staged edit is a different claim — not yet true. Reusing it would
-     have made a pending change look like a current state. 7.8:1. */
-  --c-blue-ink: 96 165 250; /* #60A5FA */
+  --c-blue-ink: 96 165 250;
 
-  --c-ok: 110 231 183; /* #6EE7B7 — 12.8:1 */
-  --c-warn: 251 191 36; /* #FBBF24 — 11.7:1 */
-  --c-danger: 252 165 165; /* #FCA5A5 — 10.3:1 */
-  --c-danger-fill: 225 29 72; /* #E11D48 — white on it is 4.7:1 */
+  --c-ok: 110 231 183;
+  --c-warn: 251 191 36;
+  --c-danger: 252 165 165;
+  --c-danger-fill: 225 29 72;
 
   --rail: 19rem;
-  --spec: 20rem;
   --brandbar: 3.25rem;
 
 }
 
-/*
-  Light mode.
-
-  The argument above for staying dark was about one surface: a bright chrome
-  throws a halo around the 16:9 frame and shifts its apparent gamma, which in
-  a tool whose question is "does her mouth match on this word" is the one
-  place the screen must not lie. That argument is about the VIDEO SURROUND,
-  not the whole app — which is why every NLE ships a light theme and still
-  mats the canvas in neutral grey.
-
-  So: light chrome, dark stage. No token is needed for that — the player's
-  frame in `DualVideoPlayer.tsx` is `bg-black`, which does not follow the
-  theme, so the video keeps a neutral surround in both. (A `--c-stage` token
-  was added here first and consumed by nothing, which would have made this
-  paragraph a promise the CSS did not keep.)
-
-  Every ink token below was measured against every surface token:
-    ink 17.4  ink-2 9.6  ink-3 6.5  ink-4 5.0   (AA floor is 4.5)
-    brand-ink 7.4  aqua-ink 5.0  blue-ink 6.1  ok 5.1  warn 6.6  danger 5.8
-    edge 3.3  (3:1 is the floor for a control boundary)
-*/
 :root[data-theme='light'] {
   color-scheme: light;
 
-  --c-canvas: 244 247 251; /* #F4F7FB */
-  --c-surface: 255 255 255; /* #FFFFFF */
-  --c-raised: 255 255 255; /* #FFFFFF — lifted by shadow, not by tint */
+  --c-canvas: 244 247 251;
+  --c-surface: 255 255 255;
+  --c-raised: 255 255 255;
 
-  --c-line: 226 232 240; /* #E2E8F0 — hairline, decorative only */
-  --c-edge: 122 138 159; /* #7A8A9F — 3.3:1 on canvas, 3.5:1 on white */
+  --c-line: 226 232 240;
+  --c-edge: 122 138 159;
 
-  --c-ink: 11 18 32; /* #0B1220 — 17.4:1 */
-  --c-ink-2: 51 65 85; /* #334155 — 9.6:1 */
-  --c-ink-3: 74 90 112; /* #4A5A70 — 6.5:1 */
-  --c-ink-4: 92 107 130; /* #5C6B82 — 5.0:1, the dimmest text */
+  --c-ink: 11 18 32;
+  --c-ink-2: 51 65 85;
+  --c-ink-3: 74 90 112;
+  --c-ink-4: 92 107 130;
 
-  --c-brand: 67 56 202; /* #4338CA — white on it is 8.3:1 */
-  --c-brand-soft: 99 102 241; /* decoration only, NOT a text colour */
-  --c-brand-ink: 67 56 202; /* #4338CA — 7.4:1 */
+  --c-brand: 67 56 202;
+  --c-brand-soft: 99 102 241;
+  --c-brand-ink: 67 56 202;
 
-  --c-aqua: 14 116 144; /* #0E7490 */
-  --c-aqua-ink: 14 116 144; /* 5.0:1 */
-  --c-blue-ink: 29 78 216; /* #1D4ED8 — 6.1:1 */
-  --c-ok: 4 120 87; /* #047857 — 5.1:1 */
-  --c-warn: 146 64 14; /* #92400E — 6.6:1 */
-  --c-danger: 190 18 60; /* #BE123C — 5.8:1 */
-  --c-danger-fill: 190 18 60; /* white on it is 5.8:1 */
+  --c-aqua: 14 116 144;
+  --c-aqua-ink: 14 116 144;
+  --c-blue-ink: 29 78 216;
+  --c-ok: 4 120 87;
+  --c-warn: 146 64 14;
+  --c-danger: 190 18 60;
+  --c-danger-fill: 190 18 60;
 
 }
 
@@ -154,7 +115,6 @@ body {
     background: transparent;
   }
 
-  /* One visible focus ring everywhere, at 9.8:1 against the canvas. */
   :focus-visible {
     outline: 2px solid rgb(var(--c-brand-ink));
     outline-offset: 2px;
@@ -172,10 +132,7 @@ body {
 }
 
 @layer components {
-  /* ---- type scale -------------------------------------------------------
-     Four steps, and nothing below 11px. The old UI reached 10px for labels
-     the user is meant to read, which is below the point where the ink
-     contrast above stops being the binding constraint.                     */
+
   .t-title {
     @apply text-[15px] font-semibold leading-tight text-ink;
   }
@@ -195,7 +152,6 @@ body {
     @apply font-mono text-[11.5px] tracking-tight;
   }
 
-  /* ---- surfaces ---------------------------------------------------------- */
   .card {
     @apply rounded-2xl border border-line bg-surface/70 backdrop-blur-[2px];
   }
@@ -203,8 +159,6 @@ body {
     @apply rounded-2xl border border-line bg-raised shadow-xl shadow-black/40;
   }
 
-  /* The one input idiom. `border-edge` rather than a hairline, because an
-     input whose boundary you cannot see is an input you cannot find. */
   .field {
     @apply h-9 w-full rounded-xl border border-edge/70 bg-canvas/60 px-3 text-[13px]
            text-ink placeholder:text-ink4 transition-colors;
@@ -216,12 +170,10 @@ body {
     @apply border-brand-ink outline-none;
   }
 
-  /* Sections of the stage column. */
   .panel-head {
     @apply flex items-center justify-between gap-3 px-1;
   }
 
-  /* Skeleton shimmer, shared with index.html's inline copy. */
   .sk {
     @apply relative overflow-hidden rounded-2xl border border-line bg-surface/70;
   }
@@ -239,7 +191,6 @@ body {
     }
   }
 
-  /* Visually hidden, still announced. */
   .sr-only-focusable:not(:focus):not(:focus-within) {
     position: absolute;
     width: 1px;
@@ -266,16 +217,6 @@ body {
   }
 }
 
-/*
-  Indic script classes. `src/lib/lang.ts::ensureScriptFont` injects the
-  @font-face rules and the real `.lang-<script>` font-family at runtime, for
-  the one script the active job needs. Until then these elements simply use
-  the UI font — degraded, never broken.
-
-  Keyed on SCRIPT, not language: 23 languages share 12 scripts, and Hindi,
-  Marathi, Nepali, Sanskrit, Konkani, Maithili, Bodo and Dogri all want the
-  same Devanagari file.
-*/
 [class*='lang-'] {
   font-feature-settings: normal;
   line-height: 1.7;

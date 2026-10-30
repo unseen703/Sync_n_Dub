@@ -2,18 +2,6 @@ import { useId } from 'react';
 import { cn } from '../../lib/cn';
 import { fmtClock } from '../../lib/format';
 
-/**
- * Which part of the video to dub.
- *
- * There is no clip-window flag anywhere in the pipeline — running on a time
- * range means cutting the video and audio with ffmpeg first, which the
- * server does before `run_pipeline` ever sees the file. So this control is
- * the whole interface to that: whatever it produces is literally the cut.
- *
- * Two sliders rather than a custom two-thumb widget: native range inputs
- * are keyboard-accessible and screen-reader-labelled for free, and the
- * visual track below them is what carries the "this is one range" reading.
- */
 function parseClock(s: string): number | null {
   const parts = s.trim().split(':').map((p) => p.trim());
   if (parts.some((p) => p !== '' && !/^\d+$/.test(p))) return null;
@@ -25,19 +13,6 @@ function parseClock(s: string): number | null {
   return null;
 }
 
-/*
- * Two <input type="range"> stacked on one track.
- *
- * `pointer-events-none` on the INPUT and `pointer-events: auto` on the THUMB
- * is the whole trick, and leaving it out is why the left handle could not be
- * dragged: both inputs are `inset-x-0 w-full`, so the one painted second
- * covers the first completely and swallows every click on the track — the
- * start thumb was under the end input's hit area at all times.
- *
- * With events confined to the thumbs, each input only hears about its own
- * handle. The `ring-canvas` keeps the two thumbs distinguishable when they
- * are adjacent.
- */
 const TRACK =
   'absolute inset-x-0 top-2 h-4 w-full appearance-none bg-transparent pointer-events-none';
 

@@ -1,10 +1,9 @@
-"""Shared types + abstract base for machine-translation adapters.
+"""Shared types and abstract base for machine-translation adapters.
 
-An MT adapter takes a list of source-language strings plus a target
-language code (and optional target script) and returns the translations,
-in order. Translation is per-segment: the pipeline passes one ASR segment
-at a time so the manifest's `segments[].mt_text` and `mt_candidates`
-contract (plan §3) stays the single owner of segment-level timing.
+An adapter takes source strings plus a target language (and optional script)
+and returns the translations in order. Translation is per-segment, so the
+manifest's `segments[].mt_text` / `mt_candidates` stays the single owner of
+segment-level timing.
 """
 from __future__ import annotations
 
@@ -18,15 +17,13 @@ from typing import List, Optional, Sequence, Tuple
 
 log = logging.getLogger(__name__)
 
-# Default length-penalty sweep for n-best generation. Beam search scores a
-# hypothesis as logP / len**length_penalty, so <1 rewards short output and >1
-# rewards long: sweeping it is the cheapest way to buy LENGTH spread, which is
-# the only axis the duration ranker can actually use.
+# Length-penalty sweep for n-best. Beam search scores logP / len**penalty, so
+# <1 rewards short output and >1 long; sweeping it is what buys the length
+# spread the duration ranker needs.
 DEFAULT_LENGTH_PENALTIES: Tuple[float, ...] = (0.6, 1.0, 1.4)
 
-# Diverse beam search needs groups to disagree; 1.0 is the Vijayakumar et al.
-# default and empirically the point where Hindi hypotheses stop being
-# word-for-word identical without going off-meaning.
+# Diverse beam search needs groups to disagree. 1.0 is the point where Hindi
+# hypotheses stop being word-for-word identical without going off-meaning.
 DEFAULT_DIVERSITY_PENALTY: float = 1.0
 
 
@@ -39,10 +36,9 @@ class MTRequest:
     # How many alternative wordings the caller wants back. 1 keeps the old
     # single-hypothesis path exactly as it was.
     n_best: int = 1
-    # Slot length this segment has to fit, in seconds. Adapters do not read it
-    # today -- it rides along so a length-aware decoder (or a logit processor)
-    # can be added without another contract change, and so the manifest can
-    # record what the ranker was aiming at.
+    # Slot length this segment has to fit, in seconds. No adapter reads it
+    # today; it rides along for the manifest and for a future length-aware
+    # decoder.
     length_hint_s: Optional[float] = None
     extra: dict = field(default_factory=dict)
 
@@ -129,16 +125,12 @@ class BaseMT(ABC):
     ) -> MTResult:
         """Return up to `n_best` alternative wordings per request.
 
-        Default implementation: delegate to `translate()` and report the single
-        hypothesis as a one-element candidate list. Adapters that can really do
-        n-best set `supports_nbest = True` and override this.
-
-        Contract every override must honour:
-          * `MTSegment.text` stays the top-1, byte-identical to what
-            `translate()` would have returned, so no existing caller changes
-            behaviour when n-best is switched on.
-          * `MTSegment.extra["candidates"]` is a `List[str]`, best first, with
-            `candidates[0] == text` and no duplicates.
+        The default delegates to `translate()` and reports the one hypothesis
+        as a single-element candidate list. Overrides set
+        `supports_nbest = True` and must honour two rules: `MTSegment.text`
+        stays byte-identical to what `translate()` would return, and
+        `extra["candidates"]` is a deduped `List[str]`, best first, with
+        `candidates[0] == text`.
         """
         if n_best > 1 and not self.supports_nbest:
             log.info("%s: n_best=%d requested but adapter has no n-best path; "
@@ -165,17 +157,16 @@ class BaseMT(ABC):
 # ---------------------------------------------------------------------------
 
 _WS_RE = re.compile(r"\s+")
-# Devanagari danda / double danda plus the usual Latin sentence enders. Two
-# hypotheses that differ only by a trailing danda are the same hypothesis for
-# duration purposes, and keeping both would waste a candidate slot.
+# Devanagari danda / double danda plus the Latin sentence enders. Hypotheses
+# differing only by a trailing danda are the same for duration purposes.
 _TRIM_CHARS = " \t\r\n.,;:!?।॥‘’“”\"'"
 
 
 def candidate_key(text: str) -> str:
     """Normalised dedup key: NFC, case-folded, whitespace- and edge-punct-free.
 
-    Deliberately NOT the stored form -- we dedupe on this but keep the original
-    surface string, because the TTS stage pronounces punctuation-driven pauses.
+    Not the stored form — callers dedupe on this but keep the original surface
+    string, since TTS pronounces punctuation-driven pauses.
     """
     t = unicodedata.normalize("NFC", (text or "")).strip()
     t = _WS_RE.sub(" ", t)
@@ -185,8 +176,8 @@ def candidate_key(text: str) -> str:
 def dedupe_candidates(texts: Sequence[str], *, limit: Optional[int] = None) -> List[str]:
     """Order-preserving dedupe by `candidate_key`, dropping empties.
 
-    Order in == priority out, so callers put the anchor (the exact `translate()`
-    top-1) first and the sweep behind it.
+    Order in is priority out, so callers put the `translate()` top-1 first and
+    the sweep behind it.
     """
     seen: set[str] = set()
     out: List[str] = []
@@ -205,12 +196,9 @@ def dedupe_candidates(texts: Sequence[str], *, limit: Optional[int] = None) -> L
 
 
 # transformers >= 4.57 serves group beam search from this hub repo instead of
-# `generate()`. Using it downloads and executes third-party code, so it is
-# OPT-IN: set MT_GROUP_BEAM_REMOTE=1. Measured on 6 NPTEL segments,
-# indictrans2-en-indic-dist-200M, n_best=4 -- diverse beam lifts the per-segment
-# candidate length spread from a median of 5 chars (plain beam) to 8, max 10 to
-# 27, and removes the one segment in six where plain beam found no spread at
-# all. Costs ~2.0 s/batch against ~0.7 s.
+# `generate()`. It downloads and executes third-party code, so it is opt-in via
+# MT_GROUP_BEAM_REMOTE=1. Roughly triples batch time (~2.0 s against ~0.7 s) in
+# exchange for more candidate length spread.
 GROUP_BEAM_REMOTE_REPO = "transformers-community/group-beam-search"
 
 
@@ -232,22 +220,14 @@ def group_beam_remote_kwargs() -> dict:
 
 
 def plain_beam_fallback(gen_kwargs: dict) -> dict:
-    """The plain-beam equivalent of a diverse-beam pass.
+    """Strip the group-beam kwargs so the pass runs as plain beam search.
 
-    transformers >= 4.57 moved group beam search OUT of `generate()` and into
-    the hub repo `transformers-community/group-beam-search`; the old
-    `num_beam_groups=` call now raises unless the caller also passes
-    `custom_generate=` and `trust_remote_code=True`. Measured on transformers
-    4.57.6 with ai4bharat/indictrans2-en-indic-dist-200M: every diverse-beam
-    pass raised, the adapter logged a warning and skipped it, and the anchor
-    was the only surviving hypothesis -- 1 candidate per segment, which is
-    method 8 silently dead.
-
-    Dropping the two group knobs leaves a plain beam pass at the SAME
-    `length_penalty`, and `length_penalty` is the knob the duration ranker
-    actually consumes: it is what buys LENGTH spread across the sweep.
-    Diversity within a pass is lost; spread across the sweep is not. Returns
-    the kwargs unchanged when there was nothing to strip.
+    On transformers >= 4.57 `num_beam_groups=` raises unless `custom_generate=`
+    and `trust_remote_code=True` are also passed, and an unhandled raise leaves
+    one candidate per segment. Dropping the group knobs keeps the same
+    `length_penalty`, which is the knob the duration ranker consumes: diversity
+    within a pass is lost, spread across the sweep is not. Returns the kwargs
+    unchanged when there was nothing to strip.
     """
     return {k: v for k, v in gen_kwargs.items()
             if k not in ("num_beam_groups", "diversity_penalty",
@@ -260,11 +240,9 @@ def plan_beam_groups(
     """Pick (num_beams, num_beam_groups, num_return_sequences) for diverse beam.
 
     transformers requires `num_beams % num_beam_groups == 0` and
-    `num_return_sequences <= num_beams`. Plain beam search with
-    `num_return_sequences=K` returns K hypotheses off ONE beam tree that differ
-    by a token or two -- near-zero length spread, which is useless for picking
-    a translation that fits a slot. One beam per group is the maximally diverse
-    legal configuration, so that is the default.
+    `num_return_sequences <= num_beams`. One beam per group is the maximally
+    diverse legal configuration; plain beam returns K near-identical
+    hypotheses off one tree, with near-zero length spread.
     """
     k = max(1, int(n_best))
     groups = max(1, k)

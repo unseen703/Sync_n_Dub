@@ -2,7 +2,6 @@ import { Dialog } from './Dialog';
 import { Kbd } from '../layout/Landing';
 import { SHORTCUTS } from '../../hooks/useShortcuts';
 
-/** The discoverable half of `useShortcuts`. Loaded on demand. */
 export function ShortcutsDialog({
   open,
   onOpenChange,

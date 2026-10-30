@@ -492,6 +492,9 @@ async def create_job(req: JobRequest, response: Response) -> Dict[str, Any]:
         num_speakers=req.num_speakers,
         skip_stems=req.skip_stems, style=style,
         source_language=(req.source_language or None),
+        # None on the wire means "the form sent no choice" — default to the
+        # ticked state, which is what a stale bundle without the checkbox posts.
+        code_mix=(True if req.code_mix is None else bool(req.code_mix)),
     )
     cfg = presets.plan_config(kwargs)
     # The planned config must describe the run that will happen, including a

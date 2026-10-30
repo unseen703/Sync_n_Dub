@@ -6,12 +6,9 @@ that drops kwargs the chosen class does not accept. A stage's `__init__.py`
 keeps only its docstring, `_REGISTRY_SPEC`, its `base` re-exports, and any
 stage-specific helper.
 
-`_REGISTRY_SPEC` must stay a dict literal at module level: tooling and
-`tests/test_lightasd_adapter.py` read it with `ast.parse` without importing
-the module, so a spec assembled by a helper reads as zero adapters.
-
-The error messages are pinned by `scripts/ab_refactor.py` -- change the
-wording and that check fails.
+`_REGISTRY_SPEC` must stay a dict literal at module level: tooling reads
+it with `ast.parse` without importing the module, so a spec assembled by
+a helper reads as zero adapters.
 """
 from __future__ import annotations
 

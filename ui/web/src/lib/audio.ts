@@ -1,12 +1,4 @@
-/**
- * One `HTMLAudioElement` for every preview in the app.
- *
- * The voice picker can list 44 voices and the speaker table one reference
- * clip per speaker. Giving each row its own element means 44 media elements
- * competing for decoders, and means two previews can play at once — which,
- * when you are trying to tell two voices apart, is the one thing that must
- * not happen.
- */
+/** Shared audio-preview controller. Inputs identify an audio source; outputs report or update the active preview. */
 type Listener = (src: string | null) => void;
 
 let el: HTMLAudioElement | null = null;
@@ -31,7 +23,6 @@ function set(src: string | null) {
   listeners.forEach((fn) => fn(src));
 }
 
-/** Play `src`, or stop if it is already the one playing. Returns the new state. */
 export function toggle(src: string | null | undefined): boolean {
   if (!src) return false;
   const a = node();
@@ -60,13 +51,10 @@ export function playing(): string | null {
   return current;
 }
 
-/** The shared element, for callers that need `currentTime`/`duration`.
- *  Returns null before the first play so nothing is constructed eagerly. */
 export function element(): HTMLAudioElement | null {
   return el;
 }
 
-/** Seek within whatever is currently playing. No-op otherwise. */
 export function seek(src: string, fraction: number): void {
   if (!el || current !== src || !isFinite(el.duration)) return;
   el.currentTime = Math.max(0, Math.min(1, fraction)) * el.duration;

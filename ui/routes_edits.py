@@ -306,7 +306,10 @@ def _payload(job_id: str, raw_edits: List[Dict[str, Any]],
         "job_id": job_id,
         "updated": _now(),
         "edits": raw_edits,
-        "ops": [o.to_dict() for o in ops],
+        "ops": [{**o.to_dict(),
+                 "kind": E.classify_op(
+                     o, getattr(prev.get("ctx"), "source_language", None))}
+                for o in ops],
         "dirty_stages": list(res.dirty_stages),
         "speaker_voice_overrides": res.speaker_voice_overrides,
         "segments": res.touched,
@@ -1373,7 +1376,8 @@ def get_edit_history(job_id: str) -> Dict[str, Any]:
                       or ("whole dub" if scope.get("all") else None)
                       or "—")
             ops_summary.append({"op": name, "target": target,
-                                "params": op.get("params") or {}})
+                                "params": op.get("params") or {},
+                                "kind": op.get("kind") or None})
 
         records.append({
             "file": path.name,
@@ -1455,7 +1459,7 @@ def get_versions(job_id: str) -> Dict[str, Any]:
 
 def _launch_rerun(job_id: str, root: Path, *, flag: str = "--rerun"
                   ) -> Dict[str, Any]:
-    """`scripts/ui_run_job.sh <job_id> <flag>`, detached (`--rerun` or `--cast`).
+    """`./ui_run_job.sh <job_id> <flag>`, detached (`--rerun` or `--cast`).
 
     Goes through the shell launcher rather than calling `python -m ui.runner`
     directly, for one reason: **LD_PRELOAD**. A voice change dirties the
@@ -1476,7 +1480,7 @@ def _launch_rerun(job_id: str, root: Path, *, flag: str = "--rerun"
     imply they were not.
     """
     logf = root / "run.log"
-    launcher = REPO_ROOT / "scripts" / "ui_run_job.sh"
+    launcher = REPO_ROOT / "ui_run_job.sh"
     if launcher.is_file():
         cmd = [str(launcher), job_id, flag]
     else:
@@ -1669,6 +1673,8 @@ def stage_mute(job_id: str, body: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
     sid = str(body.get("segment_id") or "").strip()
     if not sid:
         raise HTTPException(422, "segment_id is required")
+    on_raw = body.get("on", True)
+    on = bool(on_raw) if on_raw is not None else True
     merged = _read_json(view.merged_json) or {}
     known = {str(s.get("id")): s for s in (merged.get("segments") or [])}
     if not known:
@@ -1676,10 +1682,8 @@ def stage_mute(job_id: str, body: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
     if sid not in known:
         raise HTTPException(422, f"no segment {sid!r}")
 
-    op = E.EditOp(op="mute_cue", scope=E.Scope(segments=[sid]),
-                  params={}, note=f"UI: mute {sid}")
-
-    # Merge with existing pending, dedup same-segment mute_cue.
+    # Merge with existing pending. Dedup same-segment mute_cue on both paths:
+    # muting again replaces the prior turn, unmuting removes it entirely.
     prior = _read_json(_pending_path(view.root))
     turns: List[Dict[str, Any]] = []
     prior_ops: List[E.EditOp] = []
@@ -1696,7 +1700,6 @@ def stage_mute(job_id: str, body: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
         return (raw.get("op") == "mute_cue"
                 and ((raw.get("scope") or {}).get("segments") or []) == [sid])
 
-    # Drop prior ops and turns that mute the same cue.
     kept_ops = [o for o in prior_ops if not _same_mute(o.to_dict())]
     pruned_turns: List[Dict[str, Any]] = []
     for t in turns:
@@ -1704,25 +1707,32 @@ def stage_mute(job_id: str, body: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
         if kept_t_ops:
             pruned_turns.append({**t, "ops": kept_t_ops})
 
-    all_ops = kept_ops + [op]
-    prev = _preview(view, all_ops)
-    payload = _payload(view.job_id, [], all_ops, prev)
-    seg = known[sid]
     cue_no = None
-    # Find cue number for the message.
     for idx, s in enumerate(sorted(merged.get("segments") or [],
                                    key=lambda x: float(x.get("start") or 0))):
         if str(s.get("id")) == sid:
             cue_no = idx + 1
             break
     label = f"cue #{cue_no}" if cue_no else sid
-    payload["turns"] = pruned_turns + [{
-        "at": _now(),
-        "message": f"Muted {label}",
-        "source": "script",
-        "ops": [op.to_dict()],
-    }]
+
+    if on:
+        op = E.EditOp(op="mute_cue", scope=E.Scope(segments=[sid]),
+                      params={}, note=f"UI: mute {sid}")
+        all_ops = kept_ops + [op]
+        prev = _preview(view, all_ops)
+        payload = _payload(view.job_id, [], all_ops, prev)
+        payload["turns"] = pruned_turns + [{
+            "at": _now(),
+            "message": f"Muted {label}",
+            "source": "script",
+            "ops": [op.to_dict()],
+        }]
+    else:
+        prev = _preview(view, kept_ops)
+        payload = _payload(view.job_id, [], kept_ops, prev)
+        payload["turns"] = pruned_turns
     _write_atomic(_pending_path(view.root), payload)
-    log.info("mute: staged mute_cue on %s for %s -> %s",
+    log.info("mute: %s on %s for %s -> %s",
+             "staged" if on else "cleared",
              sid, view.job_id, payload["dirty_stages"])
     return payload

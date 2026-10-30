@@ -5,17 +5,7 @@ import { describeLang, langClass } from '../../lib/lang';
 import { ProgressBar } from '../ui/ProgressBar';
 import type { JobRow } from '../../api/types';
 
-/**
- * One card in the rail.
- *
- * The title is the video title. `GET /api/jobs` does not carry one yet
- * (`_list_jobs` never reads `meta.json`), so `jobTitle()` falls back
- * title -> slug -> job_id and flags the fallback. A degraded name is
- * rendered in mono and dimmed so a missing title LOOKS missing instead of
- * passing as the name of the video.
- *
- * A failed job says so, in words, directly under the title.
- */
+/** One job summary. Inputs: job data and selection handlers. Output: a selectable job card. */
 export const JobCard = memo(function JobCard({
   job,
   active,
@@ -95,13 +85,6 @@ export const JobCard = memo(function JobCard({
         )}
       </div>
 
-      {/*
-        When and what. Several jobs can share a title — six runs of the same
-        video is the normal way of working here — so without a timestamp the
-        cards are indistinguishable and clicking one is a guess. `timestamp`
-        comes from the job id, so it is present even for a job with no
-        status file at all.
-      */}
       <div className="mt-1 flex items-center gap-1.5 text-[11px] text-ink4">
         <span className="tabular-nums">
           {job.timestamp ? jobWhen(job.timestamp) : fmtRelative(job.updated)}

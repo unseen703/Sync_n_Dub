@@ -1,28 +1,12 @@
-"""GFPGAN v1.4 (+ Real-ESRGAN) over a finished render.
+"""GFPGAN v1.4 (+ Real-ESRGAN) face restoration over a finished render.
 
-Shells into `scripts/face_enhance.py`, which runs in the `restore` conda
-env. That env exists because `basicsr` imports
-`torchvision.transforms.functional_tensor`, removed in torchvision 0.17,
-while `dubbing` is on 0.23 -- and it cannot simply be pinned back, because
-these are Blackwell sm_120 cards needing torch >= 2.7 / cu128.
-
-**Renamed from `wav2liphd` on 2026-10-28**, env and weights directory both.
-Everything about the old name was a lie after restoration became its own
-stage: `wav2lip_hd` is not a lip-sync model here any more, and the
-interpreter it named restores a *MuseTalk* render as often as a Wav2Lip one.
-The spec was already `envs/restore.yml` and the variable already
-`RESTORE_PYTHON`; only the on-disk names lagged.
-
-`resolve_env_python` is passed `legacy_env_names=("wav2liphd",)`, so a
-checkout where `conda rename` has not been run still resolves -- with a
-warning naming the rename command, rather than silently falling back to the
-`dubbing` interpreter, where `import basicsr` fails after the render has
-already been paid for.
-
-Weights live in `models/weights/restore/`: `GFPGANv1.4.pth`,
-`RealESRGAN_x4plus.pth`, `detection_Resnet50_Final.pth` and
-`parsing_parsenet.pth`, none of which were ever Wav2Lip's.
-`RESTORE_WEIGHTS` overrides the location.
+Shells into `python -m backend.face_enhance` with the current interpreter.
+basicsr / gfpgan / facexlib / realesrgan were folded into the `dubbing` env
+on 2026-10-30, so no separate interpreter resolution is needed; the historical
+`torchvision.transforms.functional_tensor` incompatibility is patched inline
+by `install.sh` and the facexlib/gfpgan weights are placed by
+`./fetch_assets.py` (feature `restore`). Weights live in
+`models/weights/restore/`; `RESTORE_WEIGHTS` overrides the location.
 """
 from __future__ import annotations
 
@@ -31,19 +15,19 @@ import logging
 import os
 import re
 import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Optional
 
-from models.lipsync.base import resolve_env_python
+import cv2
+import numpy as np
 
 from .base import BaseRestore, RestoreRequest, RestoreResult
 
 log = logging.getLogger(__name__)
 
 ROOT = Path(__file__).resolve().parents[2]
-ENHANCER = ROOT / "scripts" / "face_enhance.py"
-DIFF_MASK = ROOT / "scripts" / "lipsync_diff_mask.py"
 DEFAULT_WEIGHTS_DIR = "models/weights/restore"
 WEIGHT_FILES = ("GFPGANv1.4.pth", "RealESRGAN_x4plus.pth")
 
@@ -54,12 +38,11 @@ _SUMMARY_RE = re.compile(
 def _parent_json(tail: str) -> Optional[dict]:
     """The sharding parent's trailing JSON line, when the run sharded.
 
-    `_SUMMARY_RE` matches a WORKER's summary, and a worker's stdout is
-    redirected to its own part log -- so on a sharded run (every multi-GPU
-    run, which is the default) nothing in the captured output matched it and
-    the frame counts came back 0. The parent now prints the totals as JSON;
-    this reads them, and the regex stays for the single-worker shape, where
-    no parent exists to print anything.
+    `_SUMMARY_RE` matches a WORKER's summary, but a worker's stdout goes to its
+    own part log, so on a sharded run (the multi-GPU default) nothing in the
+    captured output matches and the counts read 0. The parent prints totals as
+    JSON instead; the regex stays for the single-worker shape, which has no
+    parent.
     """
     for line in reversed((tail or "").splitlines()):
         line = line.strip()
@@ -74,6 +57,81 @@ def _parent_json(tail: str) -> Optional[dict]:
     return None
 
 
+def _open_video(path: str):
+    cap = cv2.VideoCapture(path)
+    if not cap.isOpened():
+        raise RuntimeError(f"diff: cannot open {path}")
+    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+    return cap, w, h
+
+
+def _build_change_mask(before: Path, after: Path, out: Path, *, log) -> Optional[dict]:
+    b_cap, b_w, b_h = _open_video(str(before))
+    f_cap, f_w, f_h = _open_video(str(after))
+
+    threshold = 16
+    min_pixels = max(16, round(f_w * f_h / 32000))
+    pad = max(4, round(16 * f_h / 1080))
+    log(f"diff: {f_w}x{f_h} -> threshold={threshold} "
+        f"min_pixels={min_pixels} pad={pad}")
+    if b_w != f_w or b_h != f_h:
+        log(f"diff: before is {b_w}x{b_h}, after is {f_w}x{f_h} -- "
+            f"resizing before to the render's size")
+
+    changed: list[int] = []
+    boxes: dict[str, list[int]] = {}
+    counts: list[int] = []
+    idx = 0
+    while True:
+        ok_b, fb = b_cap.read()
+        ok_f, ff = f_cap.read()
+        if not (ok_b and ok_f):
+            break
+        if (fb.shape[1], fb.shape[0]) != (ff.shape[1], ff.shape[0]):
+            fb = cv2.resize(fb, (ff.shape[1], ff.shape[0]),
+                            interpolation=cv2.INTER_AREA)
+        d = cv2.absdiff(cv2.cvtColor(fb, cv2.COLOR_BGR2GRAY),
+                        cv2.cvtColor(ff, cv2.COLOR_BGR2GRAY))
+        mask = (d >= threshold).astype(np.uint8)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+        n = int(mask.sum())
+        counts.append(n)
+        if n >= min_pixels:
+            ys, xs = np.nonzero(mask)
+            x1 = max(0, int(xs.min()) - pad)
+            y1 = max(0, int(ys.min()) - pad)
+            x2 = min(ff.shape[1], int(xs.max()) + pad)
+            y2 = min(ff.shape[0], int(ys.max()) + pad)
+            changed.append(idx)
+            boxes[str(idx)] = [x1, y1, x2, y2]
+        idx += 1
+    b_cap.release()
+    f_cap.release()
+
+    arr = np.asarray(counts) if counts else np.zeros(1)
+    frac = 100.0 * len(changed) / max(1, idx)
+    doc = {
+        "before": str(Path(before).resolve()),
+        "after": str(Path(after).resolve()),
+        "frames": idx,
+        "threshold": threshold,
+        "min_pixels": min_pixels,
+        "pad": pad,
+        "changed_count": len(changed),
+        "changed_fraction_pct": round(frac, 2),
+        "changed": changed,
+        "boxes": boxes,
+        "changed_pixels_p50": int(np.percentile(arr, 50)),
+        "changed_pixels_p95": int(np.percentile(arr, 95)),
+        "changed_pixels_max": int(arr.max()),
+    }
+    out = Path(out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(doc, indent=2))
+    return doc
+
+
 class GFPGANRestore(BaseRestore):
     name = "gfpgan"
 
@@ -84,30 +142,25 @@ class GFPGANRestore(BaseRestore):
             or DEFAULT_WEIGHTS_DIR)
         if not self.weights_dir.is_absolute():
             self.weights_dir = ROOT / self.weights_dir
-        self.python_bin = python_bin
+        # `python_bin` kept for backwards compatibility with old call sites /
+        # request.json payloads; the restore env was merged into `dubbing` on
+        # 2026-10-30, so sys.executable is always correct.
+        self.python_bin = python_bin or sys.executable
 
     # -- preflight -------------------------------------------------------
 
     def blockers(self) -> list[str]:
         """Everything missing, as sentences a person can act on.
 
-        Returned rather than raised so a readiness endpoint can disable a
-        button and say why, instead of the operator finding out after the
-        GPU has been committed.
+        Returned rather than raised, so a readiness endpoint can disable a
+        button and say why before the GPU is committed.
         """
         out = []
-        if not ENHANCER.is_file():
-            out.append(f"enhancer script missing at {ENHANCER}")
         for w in WEIGHT_FILES:
             if not (self.weights_dir / w).is_file():
                 out.append(f"weight missing at {self.weights_dir / w}")
-        try:
-            py = resolve_env_python("restore", "restore", self.python_bin,
-                                legacy_env_names=("wav2liphd",))
-            if not Path(py).is_file():
-                out.append(f"interpreter not found at {py}; set RESTORE_PYTHON")
-        except Exception as e:                            # noqa: BLE001
-            out.append(f"could not resolve an interpreter ({e})")
+        if not Path(self.python_bin).is_file():
+            out.append(f"interpreter not found at {self.python_bin}")
         return out
 
     # -- the mask --------------------------------------------------------
@@ -116,31 +169,31 @@ class GFPGANRestore(BaseRestore):
                    ffprobe: Optional[str] = None) -> Optional[dict]:
         """Which frames the lip-sync model changed, by diffing.
 
-        Model-agnostic on purpose. MuseTalk can report untouched frames via
-        its `(0,0,0,0)` placeholders but only when ASD-gated, and nothing
-        persists them; Wav2Lip has no concept of an untouched frame at all.
-        A diff is the only answer that works for every adapter, and it
-        cannot drift from what the model did because it IS what it did.
-
-        Returns the mask document, or None when the diff fails -- the caller
+        Model-agnostic on purpose: MuseTalk only reports untouched frames when
+        ASD-gated and nothing persists them, and Wav2Lip has no concept of one.
+        Returns the mask document, or None when the diff fails — the caller
         then restores every frame, which is slower and still correct.
-        """
-        from backend.media_io import _ffprobe_bin
 
-        py = resolve_env_python("restore", "restore", self.python_bin,
-                                legacy_env_names=("wav2liphd",))
-        cmd = [py, str(DIFF_MASK), "--before", str(before),
-               "--after", str(after), "--out", str(out)]
-        p = subprocess.run(cmd, cwd=str(ROOT), capture_output=True, text=True)
-        if p.returncode != 0 or not out.is_file():
-            log.warning("restore: mask build failed (rc=%s): %s; "
-                        "restoring every frame instead",
-                        p.returncode, (p.stderr or "").strip()[-500:])
-            return None
+        Inlined from the former `scripts/lipsync_diff_mask.py` on 2026-10-30;
+        the only caller is this adapter, and there is no interpreter boundary
+        left to justify a subprocess.
+
+        The encoder-noise trap: separate H.264 passes make UNTOUCHED frames
+        differ by a thin, low-amplitude speckle; a repainted mouth differs by
+        a tight, high-amplitude patch. So a pixel counts only above
+        `threshold`, and a FRAME only when at least `min_pixels` of them
+        cluster. Both thresholds scale with the render's area.
+        """
         try:
-            doc = json.loads(out.read_text())
+            doc = _build_change_mask(before, after, out,
+                                     log=lambda m: log.info("restore: %s", m))
         except Exception as e:                            # noqa: BLE001
-            log.warning("restore: unreadable mask (%s)", e)
+            log.warning("restore: mask build failed (%s); "
+                        "restoring every frame instead", e)
+            return None
+        if doc is None:
+            log.warning("restore: mask build returned no document; "
+                        "restoring every frame instead")
             return None
         log.info("restore: mask -> %s of %s frame(s) changed (%.1f%%)",
                  doc.get("changed_count"), doc.get("frames"),
@@ -162,8 +215,7 @@ class GFPGANRestore(BaseRestore):
         from backend.media_io import _ffmpeg_bin, _ffprobe_bin
         ffmpeg = _ffmpeg_bin() or "ffmpeg"
         ffprobe = _ffprobe_bin() or "ffprobe"
-        py = resolve_env_python("restore", "restore", self.python_bin,
-                                legacy_env_names=("wav2liphd",))
+        py = self.python_bin
 
         mask_doc = None
         mask_path = out.parent / f"{out.stem}.changed_frames.json"
@@ -172,7 +224,7 @@ class GFPGANRestore(BaseRestore):
                                        after=Path(request.video),
                                        out=mask_path, ffprobe=ffprobe)
 
-        cmd = [py, str(ENHANCER),
+        cmd = [py, "-m", "backend.face_enhance",
                "--input", str(Path(request.video).resolve()),
                "--output", str(out.resolve()),
                "--weights-dir", str(self.weights_dir.resolve()),
@@ -191,8 +243,8 @@ class GFPGANRestore(BaseRestore):
         if request.num_gpus:
             cmd += ["--gpus", ",".join(str(i) for i in range(request.num_gpus))]
         if request.workers_per_gpu:
-            # Omitted, not defaulted: the script's own default is 1, and
-            # passing it explicitly would make every run look like a choice.
+            # Omitted rather than defaulted: the script's own default is 1,
+            # and passing it would make every run look like a choice.
             cmd += ["--workers-per-gpu", str(request.workers_per_gpu)]
         if request.seek_shards:
             cmd.append("--seek-shards")
@@ -212,9 +264,9 @@ class GFPGANRestore(BaseRestore):
             res.frames = int(doc.get("frames") or 0)
             res.restored = int(doc.get("restored") or 0)
             res.passed_through = int(doc.get("passed_through") or 0)
-            # The split that actually ran. The script collapses to fewer
+            # The split that actually ran: the script collapses to fewer
             # workers when a shard would fall below MIN_FRAMES_PER_SHARD, so
-            # the requested number is not evidence of what happened.
+            # the requested number is not evidence.
             res.extra["workers"] = doc.get("workers")
         else:
             m = _SUMMARY_RE.search(tail)
@@ -223,9 +275,8 @@ class GFPGANRestore(BaseRestore):
                     int(m.group(1)), int(m.group(2)), int(m.group(3)))
                 res.extra["workers"] = 1
 
-        # The FILE is the arbiter. rc=0 with no output is the shape CLAUDE.md
-        # records for Wav2Lip, and a 32 MB file that decoded 370 of a claimed
-        # 1500 frames is the shape this repo hit on 2026-10-22.
+        # The file is the arbiter: rc=0 with no output, or a file that decodes
+        # far fewer frames than claimed, are both failures seen here.
         if p.returncode != 0:
             res.error = f"face_enhance rc={p.returncode}: {tail[-2000:]}"
         elif not res.produced:

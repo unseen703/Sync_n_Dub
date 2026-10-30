@@ -9,8 +9,7 @@ Deliberately dependency-free: `ui/presets.py` is imported when the web
 server starts, and routing this through `backend.cli` would drag argparse
 and all seven model registries into that import.
 
-The keyword defaults mirror `backend/cli.py`'s `--speed-*` arguments;
-`tests/test_speed_mode.py` pins the two together.
+The keyword defaults mirror `backend/cli.py`'s `--speed-*` arguments.
 """
 from __future__ import annotations
 

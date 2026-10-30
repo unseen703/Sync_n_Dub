@@ -54,14 +54,15 @@ disabled one.
 ## Layout
 
 ```
-18rem JobRail │ 20rem SpecPanel (collapsible) │ Stage
+19rem JobRail │ Stage
 ```
 
-The rail is permanent at ≥1024 px and an off-canvas drawer below it. The spec
-panel *pushes* at ≥1536 px and is a scrimmed drawer below that. They are two
-panels rather than one stacked sidebar because they have different lifetimes —
-the rail is navigation, the spec is reference — and because two scroll areas
-in one column is how a dashboard starts feeling cheap.
+The rail is permanent at ≥1024 px and an off-canvas drawer below it.
+
+There was a third column on the right — `SpecPanel`, the run's settings —
+until 2026-10-28. It was reference rather than something to act on: read
+once per job, then dead width beside the video. `GET /api/jobs/{id}/spec` is
+still fetched, because `TopBar` takes the dub's real title from it.
 
 Job selection lives in the hash (`#/job/<id>`), so there is no SPA catch-all
 route on the Python side and no react-router in the bundle.
@@ -72,9 +73,9 @@ Two things carry it, both in `index.html`:
 
 1. An inline skeleton inside `#root` at the real layout's dimensions, with
    ~1.5 kB of critical CSS. First paint shows the shape of the app, and React
-   arriving causes no layout shift. The spec panel's open state is read from
-   `localStorage` in the same inline script so the skeleton's column count
-   matches what React will render.
+   arriving causes no layout shift. The skeleton's column order mirrors
+   `AppShell` — rail left, stage centre — because a skeleton that disagrees
+   makes the layout visibly swap sides at first paint.
 2. `window.__BOOT__ = fetch('/api/jobs')` in `<head>`, awaited by
    `api.listJobs()`. The request overlaps bundle download, parse and hydrate
    instead of queueing behind them.
@@ -117,11 +118,11 @@ is what makes the lazy load safe.
 src/
   api/        types.ts (the contract), client.ts (fetch), mock.ts, index.ts (the switch)
   store/      useStore.ts — all state, no fetching cadence
-  hooks/      usePoll, useJobProgress, useHashRoute, useMediaQuery, useNow
+  hooks/      usePoll, useJobProgress, useHashRoute, useShortcuts, useNow
   lib/        lang, format, centre (the reveal order), audio (one shared element), cn
   components/
     ui/       Button, Card, Select, Dialog, Tooltip, StateBadge, ProgressBar, Toasts, Icons
-    layout/   AppShell, JobRail, JobCard, SpecPanel, TopBar, Stage
+    layout/   AppShell, BrandBar, JobRail, JobCard, TopBar, Stage, Landing, StartPanel
     progress/ StageRibbon, StageDetailList, LogTail
     video/    VideoStage, DualVideoPlayer, TrackToggle, AudioBar
     speakers/ SpeakerTable, SpeakerRow, VoicePicker, PendingBar, ApplyDialog
@@ -142,8 +143,13 @@ silently-wrong type here shows up as an empty panel, not as an error.
 - **Voice names, not ids.** Show `voice_options[].display` ("Swara"), never
   `hi-IN-SwaraNeural`.
 - **The tone control is absent, not disabled**, when `supports_tone` is
-  false. The spec panel states the absence in words so it does not read as a
-  bug.
+  false.
+- **There is no user/admin view switch** (removed 2026-10-28). It was
+  presentation only, never a permission — this app has no auth and every
+  route is open to anyone who can reach the port. Tracebacks, run config,
+  face measurements and raw voice overrides are now simply not rendered;
+  they are on disk and in the runner log. If a technical view is wanted
+  again it is a separate surface, not a toggle on the product screen.
 - **The Lip-synced toggle segment never falls back to the original.** When
   the render does not exist it is disabled with its own progress; when the
   job has no lip-sync stage at all the toggle is not rendered.

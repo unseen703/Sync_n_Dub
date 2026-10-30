@@ -1,22 +1,8 @@
-"""The ASD review video: who the pipeline thinks is talking, drawn on screen.
+"""ASD review video: one labelled box per tracked face per frame.
 
-The operator corrects the active speaker by WATCHING, so they need to see
-what the pipeline saw. This draws one box per tracked face per frame, green
-where ASD scored it above the speaking threshold and red where it did
-not, labelled with the track id, the speaker that track belongs to, and the
-score itself.
-
-It is a review artifact, never an input to anything. Nothing downstream reads
-it, so a wrong box here misleads a human rather than mis-rendering a dub --
-which is why it can afford to show ALL faces, including the ones the lip-sync
-stage would ignore. That contrast is the point: a frame with two red boxes
-and no green one is exactly the reaction shot where MuseTalk would otherwise
-animate an arbitrary mouth.
-
-Rendering is a full decode + composite pass over the clip, which is minutes
-at 1080p -- so it runs in a thread and reports through a status file, the
-same shape `ui/progress.py` already polls. A blocking GET would die to a
-browser timeout while the work continued.
+A review artifact only — nothing downstream reads it, so it shows ALL faces,
+including the ones lip-sync would ignore. Rendering is a full decode pass
+(minutes at 1080p), so it runs in a thread and reports through a status file.
 """
 from __future__ import annotations
 
@@ -35,8 +21,7 @@ REVIEW_SUBDIR = "review"
 STATUS_NAME = "bbox.status.json"
 VIDEO_NAME = "bbox.mp4"
 
-#: Matches `asd_on_screen_threshold` and `lipsync_targets`, so "speaking"
-#: means one thing across the review screen and the render it informs.
+#: Matches `asd_on_screen_threshold` and `lipsync_targets`.
 SPEAK_THRESHOLD = 0.5
 
 _LOCKS: Dict[str, threading.Lock] = {}
@@ -63,9 +48,8 @@ def status(job_root: Path) -> Dict[str, Any]:
         doc = json.loads(p["status"].read_text())
     except (OSError, ValueError):
         doc = {}
-    # The FILE is the arbiter, not the status doc: a killed render leaves a
-    # stale "running" behind forever, and CLAUDE.md records what trusting a
-    # status field over the artifact costs.
+    # The file is the arbiter, not the status doc: a killed render leaves a
+    # stale "running" behind forever.
     ready = p["video"].is_file() and p["video"].stat().st_size > 0
     state = doc.get("state") or ("done" if ready else "absent")
     if state == "done" and not ready:
@@ -81,23 +65,12 @@ def source_clip(job_root: Path, source: Optional[Path] = None) -> Optional[Path]
 
 
 def load_overlay(job_root: Path, src: Path):
-    """`(box_at, spk_of, spans, fps)` — everything needed to mark a frame.
+    """Return `(box_at, spk_of, spans, fps)` — everything needed to mark a frame.
 
-    Extracted from `render` so the still-frame export
-    (`scripts/asd_frames.py`) marks frames EXACTLY as the review video does.
-    Two copies of this would be two definitions of "who is speaking here",
-    and the whole point of the export is to check the one the pipeline used.
-
-    Stage 6 persists PER-SEGMENT assignments, not a per-frame score array
-    (`<stem>.<model>.assignments.json`: seg_id, speaker, face_track,
-    asd_score, on_screen, start_s, end_s). An earlier version of this module
-    looked for a `scores.npz` that is never written, so every box came out
-    grey -- the render ran, looked plausible, and showed nothing.
-
-    So a track is drawn as SPEAKING over the frames of a segment that was
-    assigned to it and marked on-screen. Outside any segment nothing is
-    known about who is talking, and those frames stay grey rather than being
-    coloured by assumption.
+    Stage 6 persists per-segment assignments
+    (`asd/*.assignments.json`), not a per-frame score array: a track is drawn
+    as speaking over the frames of a segment assigned to it and marked
+    on-screen, and frames outside any segment stay grey.
     """
     import cv2
     import numpy as np
@@ -143,20 +116,17 @@ def load_overlay(job_root: Path, src: Path):
 
 
 def verdict(spans: list, tid: str, frame_idx: int):
-    """`(colour, label-suffix)` for this track at this frame.
+    """Return `(colour, label-suffix)` for this track at this frame.
 
-    Green = the pipeline believes this face is the one speaking, and it is
-    on screen. Red = somebody else owns this moment (or this track is the
-    owner but off screen). Grey = no segment covers this frame, so nothing
-    is known and nothing is claimed.
+    Green = speaking and on screen, red = someone else owns this moment or
+    this track is off screen, grey = no segment covers this frame.
     """
     for f0, f1, t, sc, on in spans:
         if f0 <= frame_idx <= f1:
             if t == tid:
                 return ((0, 220, 0) if on else (60, 60, 230),
                         f"{sc:.2f}" + ("" if on else " off"))
-            # Another track owns this moment, so this face is not the one
-            # the pipeline believes is talking.
+            # Another track owns this moment.
             return (60, 60, 230), "-"
     return (190, 190, 190), "?"
 
@@ -192,12 +162,10 @@ def render(job_root: Path, *, source: Optional[Path] = None,
            labels: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
     """Draw the boxes. Blocking; `start()` is the background wrapper.
 
-    `max_edge` downscales the OUTPUT only. The boxes are drawn at source
-    resolution first and the marked frame is shrunk after, so the labels
-    scale with the picture instead of being rendered tiny and then
-    enlarged. A 4K source writes a 4K review video otherwise, which through
-    `cv2`'s `mp4v` encoder is hundreds of MB for a minute and tells the
-    viewer nothing a 1280-wide one does not.
+    `max_edge` downscales the output only — boxes are drawn at source
+    resolution and the marked frame is shrunk after, so labels scale with the
+    picture. Left at source size, 4K output runs to hundreds of MB a minute
+    through cv2's mp4v encoder.
     """
     import cv2
 
@@ -205,10 +173,8 @@ def render(job_root: Path, *, source: Optional[Path] = None,
     p = paths(job_root)
     labels = labels or {}
 
-    # Face tracks BEFORE the clip, deliberately. Both are missing on an empty
-    # folder, but the common real case is a job that has its video and never
-    # ran stage 5 — and "no source clip in videos/" sends whoever reads it
-    # looking for a download problem that is not there.
+    # Check face tracks before the clip: the common case is a job that has its
+    # video but never ran stage 5, and the clip error misdirects there.
     if not any(job_root.glob("faces/*.npz")):
         return _write_status(job_root, state="failed",
                              error="no face tracks: stage 5 did not run")
@@ -226,9 +192,8 @@ def render(job_root: Path, *, source: Optional[Path] = None,
     w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
-    # Both sides even: the writer is fine with odd ones but every downstream
-    # H.264 transcode is not (4:2:0 subsamples by two), and this file exists
-    # to be watched.
+    # Both sides even: the writer accepts odd ones but downstream H.264
+    # transcodes do not (4:2:0 subsamples by two).
     scale = min(1.0, max_edge / float(max(w, h))) if max_edge else 1.0
     ow, oh = (w, h) if scale >= 1.0 else (int(w * scale) & ~1, int(h * scale) & ~1)
     p["dir"].mkdir(parents=True, exist_ok=True)
@@ -296,15 +261,9 @@ def main(argv=None) -> int:
 
         $PY -m ui.bbox_video --job <job_id> --max-edge 1280
 
-    The UI reaches this through `POST /api/jobs/{id}/review-video`, which
-    runs it in a thread and polls. That is the wrong shape for a terminal —
-    it returns immediately and the caller has nothing to wait on — so this
-    entry point calls `render` directly and blocks until the file is there.
-
-    Nothing is recomputed: the face tracks (`faces/*.npz`) and the ASD
-    assignments (`asd/*.assignments.json`) are read off disk exactly as the
-    run left them, so this shows what the pipeline decided rather than what
-    a fresh detection pass would decide today.
+    Calls `render` directly and blocks, unlike the UI's threaded route.
+    Nothing is recomputed — face tracks and ASD assignments are read off disk
+    as the run left them.
     """
     import argparse
 
@@ -346,9 +305,8 @@ def main(argv=None) -> int:
     print(f"\n{out}")
     print(f"{st.get('frames_done')} frames · {size / 1e6:.1f} MB · "
           f"{time.time() - t0:.1f}s")
-    # mp4v, not H.264 -- `cv2.VideoWriter` has no H.264 encoder in this
-    # build. VLC and mpv play it; Chrome and Firefox will not, so say so
-    # rather than let it look like a broken render.
+    # mp4v, not H.264: `cv2.VideoWriter` has no H.264 encoder in this build,
+    # so VLC and mpv play the file but browsers will not.
     print("codec: mp4v — plays in VLC/mpv. For a browser:\n"
           f"  ffmpeg -i {out} -c:v libx264 -pix_fmt yuv420p "
           f"{out.with_name('bbox.h264.mp4')}")

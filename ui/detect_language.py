@@ -1,22 +1,10 @@
 """Detect the spoken language of a video source.
 
-Two strategies, in that order, and nothing else:
-
-  1. **Uploader metadata** — ``info["language"]`` or ``info["original_language"]``
-     off the YouTube page. Free, instant, and authoritative when present.
-  2. **The audio itself** — eight seconds of mono 16 kHz WAV handed to Gemini
-     3.1 Flash Lite via OpenRouter. Used when (1) is absent, which is always
-     for uploaded files (no yt-dlp metadata at all) and often for YouTube.
-
-There is deliberately no third strategy reading the title or description.
-Those are untrusted free text (CLAUDE.md section 2) and putting them in the
-prompt is an injection surface that buys a guess, not an answer — an English
-blurb over Hindi speech is the normal case, not the edge case. When there is
-no audio to listen to, this module says ``None`` and the caller falls back to
-``auto`` so the ASR adapter detects per turn.
-
-The LLM call is best-effort throughout: a missing key, a network failure or an
-unparseable reply all come back as ``None``.
+Uses uploader metadata when present, otherwise sends a few seconds of mono
+16 kHz audio to an LLM. Title and description are deliberately never read —
+they are untrusted text and often disagree with the speech. Best-effort
+throughout: anything that fails returns None and the caller falls back to
+`auto`.
 """
 from __future__ import annotations
 
@@ -40,14 +28,13 @@ PROMPT = (
     "Output format: {\"language\": \"<name>\", \"code\": \"<iso-639-1>\"}"
 )
 
-#: Where in the video to listen. Thirty seconds in skips intros, stings and
-#: the "please subscribe" preamble, which are the parts most likely to be in
-#: a different language from the body of the talk.
+#: Where in the video to listen. Thirty seconds in skips intros and preambles,
+#: which are the parts most likely to be in a different language from the talk.
 CLIP_OFFSET_S = 30.0
 CLIP_DURATION_S = 8.0
 
-#: A probe is synchronous from the operator's point of view, so the remote
-#: clip fetch gets the same cap `ui.ytmeta` puts on the metadata probe.
+#: A probe is synchronous for the operator, so the remote clip fetch gets the
+#: same cap `ui.ytmeta` puts on the metadata probe.
 _SOCKET_TIMEOUT = _env_float("DUBBING_UI_PROBE_TIMEOUT_S", 20.0)
 
 
@@ -63,8 +50,8 @@ def _clip_offset(duration_s: Optional[float]) -> float:
 def _wav_b64(src: str | Path, *, offset_s: float, duration_s: float) -> Optional[str]:
     """Transcode a window of `src` to mono 16 kHz WAV, base64-encoded.
 
-    Returns None on any failure — a too-short file, a seek past the end that
-    even the retry at 0 cannot save, a missing codec.
+    Returns None on any failure: a too-short file, a seek past the end that
+    the retry at 0 cannot save, a missing codec.
     """
     from backend.media_io import _ffmpeg_bin
 
@@ -118,10 +105,9 @@ def fetch_remote_audio_clip(
 ) -> Optional[str]:
     """Pull a few seconds of audio off a URL without downloading the video.
 
-    `download_ranges` makes yt-dlp fetch only the requested window of the
-    smallest audio-only format, so this is a couple of hundred kilobytes and
-    a second or two rather than a full download. yt-dlp cuts the range with
-    ffmpeg, so it is pointed at the same binary `backend.media_io` resolves —
+    `download_ranges` fetches only the requested window of the smallest
+    audio-only format — a couple of hundred kilobytes. yt-dlp cuts the range
+    with ffmpeg, so it is pointed at the binary `backend.media_io` resolves;
     the bare `ffmpeg` it would otherwise call is often not on PATH here.
 
     Best-effort: a 429, a private video or a missing yt-dlp all return None.
@@ -168,10 +154,10 @@ def fetch_remote_audio_clip(
 
 
 def detect_language_llm(audio_b64: str) -> Optional[Dict[str, str]]:
-    """Ask Gemini Flash Lite what language the clip is in.
+    """Ask the model what language the clip is in.
 
-    Returns ``{"language": "Hindi", "code": "hi"}`` on success, None on any
-    failure (missing key, network, bad parse).
+    Returns `{"language": "Hindi", "code": "hi"}`, or None on any failure
+    (missing key, network, bad parse).
     """
     from backend.llm import LLMClient
 
@@ -219,10 +205,10 @@ def detect_from_probe(
 ) -> Optional[Dict[str, Any]]:
     """The source language of a video: uploader metadata, else its audio.
 
-    `video_path` is the local file when there is one (an upload). `url` is
-    used only when there is not and metadata came up empty, and costs a short
-    ranged fetch. Returns ``{"code", "language", "method"}`` or None, where
-    `method` is ``yt_metadata`` or ``llm_audio``.
+    `video_path` is the local file when there is one. `url` is used only when
+    there is not and metadata came up empty, costing a short ranged fetch.
+    Returns `{"code", "language", "method"}` or None, where `method` is
+    `yt_metadata` or `llm_audio`.
     """
     meta = meta or {}
 

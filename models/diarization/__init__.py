@@ -1,14 +1,7 @@
 """Diarization model registry — pyannote community-1 only.
 
-Add a new model by adding it to `_REGISTRY_SPEC`. The rest of the codebase
-should only ever call `get_diarizer(name, ...)` — never import an adapter
-directly.
-
-`diarizen` (BUT-FIT DiariZen) and `nemotron` (NVIDIA NeMo) were removed on
-2026-10-28. Both were alternatives nobody ran: the default has been
-`pyannote` at every call site since the CLI was written, and each dragged in
-a conflicting dependency chain that needed its own venv. In git at b823223
-if they are wanted back.
+Add a model by adding it to `_REGISTRY_SPEC`. Callers only ever go through
+`get_diarizer(name, ...)`, never an adapter import.
 """
 from __future__ import annotations
 

@@ -1,17 +1,8 @@
-"""Logical segmentation: refine raw diarization turns into TTS-friendly segments.
+"""Refine raw diarization turns into TTS-friendly segments.
 
-Diarization models detect *speaker changes*, not linguistic boundaries.  A long
-monologue becomes one giant turn; rapid crosstalk produces many tiny turns.
-This module sits between diarization and ASR and applies three passes:
-
-  1. **Split** long same-speaker turns at internal silence gaps detected by a
-     lightweight VAD (silero-vad).
-  2. **Merge** short consecutive same-speaker turns separated by a small gap.
-  3. **Cap** any remaining segment that still exceeds ``max_duration_s`` by
-     splitting it at the deepest energy valley.
-
-The output is a new ``DiarizationResult`` with the same ``Turn`` type so every
-downstream stage is unaware that refinement happened.
+Splits long same-speaker turns at silero-vad silences, merges short
+consecutive ones, then caps anything still over `max_duration_s`. Returns a
+new `DiarizationResult` of the same `Turn` type.
 """
 from __future__ import annotations
 
@@ -110,7 +101,6 @@ def _split_long_turns(
             out.append(turn)
             continue
 
-        # find gaps between consecutive speech regions
         gaps: List[Tuple[float, float]] = []
         for i in range(len(regions_in_turn) - 1):
             gap_start = regions_in_turn[i][1]
@@ -122,7 +112,6 @@ def _split_long_turns(
             out.append(turn)
             continue
 
-        # split at each qualifying gap
         prev_start = turn.start
         for gap_start, gap_end in gaps:
             mid = (gap_start + gap_end) / 2
@@ -164,9 +153,8 @@ def _cap_duration(
 ) -> List[Turn]:
     """Force-split any turn still exceeding *max_duration_s*.
 
-    Strategy: prefer splitting at the deepest VAD gap inside the turn. If no
-    gap is found (pure continuous speech), fall back to the lowest-energy
-    50 ms window.
+    Prefers the deepest VAD gap inside the turn; on continuous speech it falls
+    back to the lowest-energy 50 ms window.
     """
     speech_regions = _vad_speech_timestamps(audio, sr)
     out: List[Turn] = []
@@ -176,7 +164,6 @@ def _cap_duration(
             out.append(turn)
             continue
 
-        # collect all gaps between VAD speech regions inside this turn
         regions_in = [
             (max(r[0], turn.start), min(r[1], turn.end))
             for r in speech_regions
@@ -191,14 +178,14 @@ def _cap_duration(
             if ge > gs + 0.02:
                 gaps.append((gs, ge))
 
-        # greedily split: walk through the turn, and every time the accumulated
-        # duration would exceed max_duration_s, cut at the best available gap
+        # Walk the turn and cut at the best available gap each time the
+        # accumulated duration would exceed max_duration_s.
         result_turns: List[Turn] = []
         seg_start = turn.start
 
         while turn.end - seg_start > max_duration_s:
             target = seg_start + max_duration_s
-            # find the gap whose midpoint is closest to `target`
+            # the gap whose midpoint is closest to `target`
             best_gap = None
             best_dist = float("inf")
             for gs, ge in gaps:
@@ -213,7 +200,7 @@ def _cap_duration(
             if best_gap is not None:
                 cut = (best_gap[0] + best_gap[1]) / 2
             else:
-                # fallback: lowest-energy 50ms window
+                # fallback: lowest-energy 50 ms window
                 s0 = int(round(seg_start * sr))
                 s1 = int(round(min(seg_start + max_duration_s + 2, turn.end) * sr))
                 clip = audio[s0:s1]
@@ -260,29 +247,10 @@ def resegment(
 ) -> DiarizationResult:
     """Refine diarization turns into better segments for downstream TTS.
 
-    Parameters
-    ----------
-    diar_result : DiarizationResult
-        Raw diarization output.
-    audio_path : Path, optional
-        Mono 16 kHz WAV.  Falls back to ``diar_result.audio_path``.
-    split_min_duration_s : float
-        Only split turns longer than this.
-    split_pause_s : float
-        Minimum internal silence gap to split on.
-    merge_max_gap_s : float
-        Merge same-speaker turns closer than this.
-    merge_max_result_s : float
-        Don't merge if the result would be longer than this.
-    max_duration_s : float
-        Hard cap — force-split anything longer.
-    min_duration_s : float
-        Drop turns shorter than this after all passes.
-
-    Returns
-    -------
-    DiarizationResult
-        New result with refined turns. ``extra["resegment"]`` holds stats.
+    `audio_path` is a mono 16 kHz WAV, defaulting to `diar_result.audio_path`.
+    The keyword arguments are the per-pass thresholds documented beside their
+    module-level defaults. Returns a new result whose `extra["resegment"]`
+    holds the per-pass counts.
     """
     ap = Path(audio_path) if audio_path else diar_result.audio_path
     sr = 16_000
@@ -294,7 +262,6 @@ def resegment(
 
     log.info("resegment: input %d turns", len(turns))
 
-    # pass 1: split long turns at internal silences
     turns = _split_long_turns(
         turns, audio, sr,
         min_duration_s=split_min_duration_s,
@@ -303,7 +270,6 @@ def resegment(
     after_split = len(turns)
     log.info("resegment: after split → %d turns", after_split)
 
-    # pass 2: merge short same-speaker turns
     turns = _merge_short_turns(
         turns,
         max_gap_s=merge_max_gap_s,
@@ -312,12 +278,10 @@ def resegment(
     after_merge = len(turns)
     log.info("resegment: after merge → %d turns", after_merge)
 
-    # pass 3: hard cap
     turns = _cap_duration(turns, audio, sr, max_duration_s=max_duration_s)
     after_cap = len(turns)
     log.info("resegment: after cap   → %d turns", after_cap)
 
-    # pass 4: drop tiny
     turns = _drop_tiny(turns, min_s=min_duration_s)
     log.info("resegment: after drop  → %d turns (was %d)", len(turns), orig_count)
 

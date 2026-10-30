@@ -1,11 +1,6 @@
 """Machine-translation adapter registry — Bodhan Indic-Translate only.
 
   - bodhan : Bodhan Indic-Translate via REST (POST /v1/chat/completions)
-
-`nllb` (facebook/nllb-200-* via local transformers) was removed on
-2026-10-28. Its weights are CC-BY-NC, it was never the default at any call
-site, and it was the only reason `--mt-num-beams` existed. In git at
-b823223.
 """
 from __future__ import annotations
 

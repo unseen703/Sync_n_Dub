@@ -1,10 +1,5 @@
-/**
- * Hand-rolled inline SVGs instead of an icon package.
- *
- * lucide-react is ~5 kB gzipped for the dozen glyphs this app uses, plus a
- * dependency that has to be pinned and audited. Twelve 24×24 paths are not
- * worth that.
- */
+
+
 import type { SVGProps } from 'react';
 
 type P = SVGProps<SVGSVGElement>;

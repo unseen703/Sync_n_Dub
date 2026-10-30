@@ -1,5 +1,5 @@
 {
-  "_comment": "Generated 2026-10-24 by hand from the live host: every commit, revision and sha256 below was either read off this host's own git checkouts, cross-checked against huggingface_hub's own download cache metadata (*.cache/huggingface/download/*.metadata next to each file), or computed with sha256sum here and verified to match that metadata. Not guessed. scripts/fetch_assets.py is the only reader; keep both in sync by hand until something regenerates this.",
+  "_comment": "Generated 2026-10-24 by hand from the live host: every commit, revision and sha256 below was either read off this host's own git checkouts, cross-checked against huggingface_hub's own download cache metadata (*.cache/huggingface/download/*.metadata next to each file), or computed with sha256sum here and verified to match that metadata. Not guessed. ./fetch_assets.py is the only reader; keep both in sync by hand until something regenerates this.",
   "vendor_repos": [
     {
       "name": "wav2lip",

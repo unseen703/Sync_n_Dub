@@ -3,13 +3,13 @@ import { usePoll } from './usePoll';
 import { useStore } from '../store/useStore';
 import type { Progress } from '../api/types';
 
+/** Keeps the selected job and job list current. Input is a job id; output is store updates. */
 const FAST_MS = 1500;
 const SLOW_MS = 4000;
 const UNCHANGED_BEFORE_BACKOFF = 10;
 
 const TERMINAL = new Set(['done', 'failed', 'cancelled']);
 
-/** Everything that would make the screen look different. */
 function signature(p: Progress | null): string {
   if (!p) return '';
   const m = p.milestones ?? ({} as Progress['milestones']);
@@ -29,17 +29,6 @@ function signature(p: Progress | null): string {
   ].join('|');
 }
 
-/**
- * The only consumer of the polling mechanism for `/progress`.
- *
- * Swapping this for SSE later is a change to this file and nothing else —
- * which is the reason the cadence lives in a hook rather than in the store.
- *
- * Cadence: 1.5 s, backing off to 4 s after ten unchanged polls, resetting
- * the moment anything changes. On a terminal state it takes ONE more full
- * sweep (media, speakers, spec, job list) and then stops for good: a done
- * job must not keep a request in flight for the rest of the session.
- */
 export function useJobProgress(jobId: string | null): void {
   const unchanged = useRef(0);
   const lastSig = useRef('');
@@ -62,14 +51,14 @@ export function useJobProgress(jobId: string | null): void {
       const s = useStore.getState();
       const state = s.progress?.state ?? 'unknown';
       if (TERMINAL.has(state)) {
-        // One final sweep, once per job, then stop.
+
         if (sweptFor.current !== s.selected) {
           sweptFor.current = s.selected;
           void s.refreshMedia();
           void s.refreshSpeakers();
           void s.refreshSpec();
           void s.refreshJobs();
-          return 1200; // let the sweep land, then the next call stops us
+          return 1200;
         }
         return null;
       }
@@ -80,11 +69,6 @@ export function useJobProgress(jobId: string | null): void {
   );
 }
 
-/**
- * The rail. 10 s while anything is running, 45 s when everything is idle —
- * a list of finished jobs changes only when the user creates one, and that
- * path refreshes explicitly.
- */
 export function useJobsPoll(): void {
   const refreshJobs = useStore((s) => s.refreshJobs);
   usePoll(

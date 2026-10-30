@@ -1,18 +1,13 @@
-"""Meta MMS Forced Aligner (torchaudio bundle).
+"""Meta MMS Forced Aligner, via the torchaudio `MMS_FA` bundle.
 
-Uses `torchaudio.pipelines.MMS_FA` — a wav2vec2-based CTC emission model
-plus a shared 1,100+ language romanized dictionary. Alignment is produced
-by running the emissions through torchaudio.functional.forced_align over
-each segment's text.
+A wav2vec2 CTC emission model plus a shared multilingual romanized
+dictionary, aligned per segment with `torchaudio.functional.forced_align`.
 
-The MMS dictionary is **character-level over romanized text**. For Indic
-scripts (Devanagari, Tamil, …) we must transliterate the text to Latin
-first; otherwise every character maps to the CTC blank. We use the `uroman`
-package when present — it is what the MMS authors use. Non-Latin segments
-without uroman installed are skipped (empty `words`), not crashed, so a
-mixed-script transcript still aligns the Latin parts.
-
-Install: `pip install uroman-python` (optional) for Indic script support.
+The dictionary is CHARACTER-LEVEL OVER ROMANIZED TEXT, so Indic script has to
+be transliterated to Latin first or every character maps to the CTC blank.
+That needs the optional `uroman` package; without it, non-Latin segments are
+skipped with empty `words` rather than crashing, so a mixed-script transcript
+still aligns its Latin parts.
 """
 from __future__ import annotations
 
@@ -171,7 +166,7 @@ class MMSForcedAligner(BaseAligner):
     # ------------------------------------------------------------------
 
     def _align_clip(self, clip: np.ndarray, words_latin: List[str], torch_mod):
-        """Returns (one TokenSpan list per word, number of emission frames)."""
+        """Return (one TokenSpan list per word, number of emission frames)."""
         wav = torch_mod.from_numpy(np.ascontiguousarray(clip)).unsqueeze(0).to(self.device)
         with torch_mod.inference_mode():
             emission, _ = self._model(wav)
@@ -185,14 +180,13 @@ class MMSForcedAligner(BaseAligner):
 # ---------------------------------------------------------------------------
 
 def _split_words(text: str) -> List[str]:
-    """Whitespace-tokenise; keep the original surface forms for display."""
+    """Whitespace-tokenise, keeping the original surface forms for display."""
     return [w for w in text.split() if w.strip()]
 
 
 def _romanize_pairs(words: List[str], uroman_inst) -> List[tuple[str, str]]:
-    """Return (native_token, latin_token) pairs, dropping tokens that
-    collapse to the empty string after romanisation + normalisation.
-    """
+    """Return (native_token, latin_token) pairs, dropping any that collapse to
+    an empty string after romanisation and normalisation."""
     out: List[tuple[str, str]] = []
     for w in words:
         norm = _normalise(w)

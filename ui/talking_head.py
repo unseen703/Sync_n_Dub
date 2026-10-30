@@ -1,21 +1,17 @@
 """Talking Head page: animate a still portrait against a chosen audio clip.
 
-MuseTalk takes a single image natively -- `get_file_type` accepts .jpg/.png
-and the frame cycle reuses the one frame for every audio chunk.
+MuseTalk takes a single image natively, reusing the one frame for every audio
+chunk.
 
-Two constraints are encoded here:
-
-1. A 4K still fails. S3FD returns `[None]` at 3840x2160, and with zero
-   detections a print statement at `preprocessing.py:135` divides by zero,
-   after the model has loaded. `MAX_EDGE` downscales first and the probe
-   reports it.
-2. Only the mouth moves. MuseTalk inpaints the occluded lower face and copies
-   the rest through -- no head motion, no blinking, no gaze. `ANIMATION_NOTE`
-   says so on the page.
+Two constraints are encoded here. A 4K still fails — S3FD returns no
+detections at that size and the vendored preprocessing then divides by zero
+after the model has loaded, so `MAX_EDGE` downscales first. And only the mouth
+moves: MuseTalk inpaints the lower face and copies the rest through, with no
+head motion, blinking or gaze, which `ANIMATION_NOTE` states on the page.
 
 The dialogue catalogue is data (`data/talking_head/dialogues.json`), so lines
-and audio links can be added without a deploy. An entry with no `audio_url`
-is offered and marked unplayable rather than hidden.
+and audio links can be added without a deploy. An entry with no `audio_url` is
+offered and marked unplayable rather than hidden.
 """
 from __future__ import annotations
 
@@ -121,7 +117,7 @@ def _detector(device: str = "cpu"):
     # which only the conda libstdc++ has, and whichever loads first wins --
     # importing insightface alone raises `CXXABI_1.3.15' not found. torch
     # pulls the conda copy in. The LD_PRELOAD that normally covers this is
-    # set by `scripts/ui_run_job.sh`, which launches jobs, not the UI server.
+    # set by `./ui_run_job.sh`, which launches jobs, not the UI server.
     import torch  # noqa: F401
     try:
         from insightface.app import FaceAnalysis
@@ -273,22 +269,18 @@ RENDER_VIDEO_NAME = "out.mp4"
 RENDER_FRAME_NAME = "source.png"
 
 #: Where photos, clips and renders live. A module constant so a test can
-#: point it somewhere disposable; `ui/routes_talkinghead.py` reads this one
-#: rather than keeping a second copy. Goes through the shared `_io.data_dir()`
-#: so a relocated `DUBBING_UI_DATA_DIR` moves this page's files along with
-#: everything else — this used to be a hardcoded `REPO_ROOT / "data"` that
-#: ignored the setting entirely.
+#: point it somewhere disposable, and `ui/routes_talkinghead.py` reads this
+#: one rather than keeping a copy. Goes through `_io.data_dir()`, so a
+#: relocated `DUBBING_UI_DATA_DIR` moves this page's files with everything
+#: else.
 DATA_DIR = _data_dir()
 
 _RENDER_LOCKS: Dict[str, Any] = {}
 
 
-#: A render id is a folder name, and it arrives from the client on the poll.
-#: Built here from a uuid prefix and a catalogue id, both of which match
-#: this — but `GET /api/talking-head/render/{id}` takes whatever is sent, and
-#: `Path / ".."` is not a string operation. Rejecting beats sanitising: a
-#: cleaned-up id would read a DIFFERENT render's status and report it as this
-#: one's.
+#: A render id is a folder name and arrives from the client on the poll, so
+#: it is matched against this rather than sanitised — a cleaned-up id would
+#: read a DIFFERENT render's status and report it as this one's.
 _RENDER_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 
 

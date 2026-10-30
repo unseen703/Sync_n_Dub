@@ -1,20 +1,10 @@
-"""Bodhan Indic-Transcribe adapter.
+"""Bodhan Indic-Transcribe ASR adapter.
 
-OpenAI-compatible endpoint — POST /v1/audio/transcriptions with multipart file
-upload. One endpoint, one key, chosen per service as the plan calls out
-(§5 "Credentials are per service"). Rate limits come back in
-`x-ratelimit-*` headers; the adapter adapts concurrency from them rather than
-pinning a worker count.
+POST /v1/audio/transcriptions, multipart. Detects the language once from the
+longest turn and pins it for the rest, since a 1-5 s turn is too short to
+identify reliably.
 
-Env (loaded from `.env`):
-  BODHAN_ASR_URL    (default: https://api.bodhan.ai/v1)
-  BODHAN_ASR_KEY    (required)
-  BODHAN_ASR_MODEL  (default: indic-transcribe-core; Flex via `--asr-flex`)
-
-Render mode (plan §6 — a knob, not a fixed upstream): native | mixed | roman.
-Pass through `render_mode` kwarg; the adapter sends it as `response_format`
-style parameter named `render_mode` in the multipart form. If a future API
-spec names it differently, change this one line.
+Env: BODHAN_ASR_{URL,KEY,MODEL}.
 """
 from __future__ import annotations
 
@@ -60,8 +50,8 @@ class BodhanASR(BodhanClientMixin, BaseASR):
         )
 
     def _ensure_loaded(self) -> None:
-        # No Content-Type: this is the one Bodhan service that posts
-        # multipart, and `requests` has to set the boundary itself.
+        # No Content-Type: this posts multipart, so `requests` must set the
+        # boundary itself.
         if not self._ensure_bodhan_session(
             missing_key_message=(
                 "BODHAN_ASR_KEY is not set. Add it to .env or pass api_key=…"
@@ -113,29 +103,17 @@ class BodhanASR(BodhanClientMixin, BaseASR):
         out_segments: List[ASRSegment] = []
         detected_lang: Optional[str] = None
 
-        # ONE language for the whole file, detected once.
+        # ONE language for the whole file, detected once and then pinned.
         #
-        # Each diarization turn is its own POST, and with no `language` the
-        # server re-detects per turn. A turn is 1-5 s — far too little for
-        # reliable identification — so a single English lecture came back
-        # on 2026-10-17 transcribed into FOUR scripts across nine turns:
+        # Each turn is its own POST and with no `language` the server
+        # re-detects per turn. A 1-5 s turn is far too little for reliable
+        # identification, so an English lecture comes back written in several
+        # different Indic scripts and MT then translates each as if it really
+        # were that language.
         #
-        #   Telugu     'టిల్ ఇట్ గోస్ టు డి డైమెన్షన్స్'   ("till it goes to the dimensions")
-        #   English    'So typically this would be some sixteen...'
-        #   Gujarati   'આ મલ્ટીલેયર'                      ("aa multilayer")
-        #   Malayalam  'റിസെപ്റ്ററാന്ന് പറഞ്ഞ എം എൽ പി'
-        #
-        # Every one of those is ENGLISH SPEECH written in an Indic script,
-        # and MT then translated each as if it were that language — which
-        # is how one dub ended up part Hindi and part untouched English,
-        # with `language: null` on the result because nothing was ever
-        # pinned. `detected_lang` already existed here and was recorded but
-        # never fed back into the next request.
-        #
-        # The probe turn is the LONGEST one, because identification gets
-        # monotonically better with duration and the first turn is often a
-        # two-word fragment. It costs no extra call: that turn is in the
-        # list anyway and its result is kept.
+        # The probe turn is the LONGEST one — identification improves with
+        # duration and the first turn is often a two-word fragment. It costs no
+        # extra call, since that turn is in the list anyway.
         order = list(range(len(segments)))
         if language is None and len(segments) > 1:
             longest = max(order, key=lambda i: segments[i][2] - segments[i][1])
@@ -153,8 +131,8 @@ class BodhanASR(BodhanClientMixin, BaseASR):
                     speaker=speaker, language=language or detected_lang,
                 )
                 continue
-            # An explicit `language` always wins; otherwise the probe turn's
-            # answer is pinned for every turn after it.
+            # An explicit `language` wins; otherwise the probe turn's answer
+            # is pinned for every turn after it.
             use = language or detected_lang
             with tempfile.NamedTemporaryFile(suffix=".wav", delete=True) as tmp:
                 sf.write(tmp.name, clip, sr)
@@ -188,13 +166,11 @@ class BodhanASR(BodhanClientMixin, BaseASR):
     # ------------------------------------------------------------------
 
     def _post_file(self, path: Path, language: Optional[str]) -> dict:
-        """POST one audio file with pacing + exponential backoff on 429/5xx.
+        """POST one audio file, with pacing and backoff on 429/5xx.
 
-        Enforces a `min_interval_s` floor between consecutive requests
-        (per-adapter instance) so serial per-turn calls don't burst past
-        the server's per-second budget, and backs off exponentially up to
-        `max_backoff_s` when it still sees 429, respecting any
-        `Retry-After` header the server sends.
+        Holds a `min_interval_s` floor between requests so serial per-turn
+        calls do not burst past the server's per-second budget, then backs off
+        up to `max_backoff_s`, respecting any `Retry-After` header.
         """
         url = f"{self.base_url}/audio/transcriptions"
         last_err_sig: Optional[tuple] = None
@@ -223,12 +199,10 @@ class BodhanASR(BodhanClientMixin, BaseASR):
                 time.sleep(wait)
                 continue
             if resp.status_code == 422 and "render_mode" in resp.text:
-                # The one 4xx this adapter can diagnose outright. The field
-                # is this module's own invention (see the header: "if a
-                # future API spec names it differently, change this one
-                # line") and the live endpoint does not accept it, so a
-                # caller passing it fails the whole job at stage 7 with a
-                # litellm wrapper message that never names the cause.
+                # The one 4xx this adapter can diagnose outright: the field
+                # name is this module's own guess and the live endpoint
+                # rejects it, failing the whole job at stage 7 behind a
+                # wrapper message that never names the cause.
                 raise RuntimeError(
                     f"Bodhan ASR rejected `render_mode="
                     f"{self.render_mode!r}` (HTTP 422). The hosted "

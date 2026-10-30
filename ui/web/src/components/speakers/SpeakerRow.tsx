@@ -11,27 +11,7 @@ import { useStore } from '../../store/useStore';
 import type { AgentScriptRow, AgentSpeaker, Speaker, SpeakerTable, VoiceOption } from '../../api/types';
 import type { StagedChange } from '../../store/useStore';
 
-/**
- * One speaker.
- *
- * Four things live on this row, and the difference between them matters:
- *
- *   name     EDITABLE, display only. Renaming dirties no stage — see
- *            `SpeakerNameField`.
- *   gender   STAGED. A picker offers male/female; changing it recasts the
- *            voice from the matching-gender pool (`set_gender`).
- *   voice    STAGED. Applied by an explicit button that prices it first.
- *   tone     STAGED, and ABSENT — not disabled — when the engine would
- *            ignore it. `ui/speakers.py::supports_tone` uses the exact
- *            predicate `backend/edits.py::_h_set_tone` warns on, so the
- *            control disappears precisely when the value would be dropped,
- *            and the spec panel states the absence in words so a missing
- *            feature does not read as a bug.
- *
- * Two staging paths reach this row and both have to show. The pickers write
- * `staged` (local, in the browser, not yet posted); the chat box writes the
- * job's `pending.json`, which arrives as `fromAgent`.
- */
+/** Speaker settings row. Inputs provide speaker data and callbacks; output is editable name, voice, and tone controls. */
 export function SpeakerRow({
   speaker,
   table,
@@ -62,17 +42,10 @@ export function SpeakerRow({
   const playing = useAudioPreview();
   const isPlaying = Boolean(speaker.reference_url && playing === speaker.reference_url);
   const dirty = Boolean(staged);
-  // The post-MT cast gate. While it is up, each speaker is either auto-detected
-  // (gender predicted, voice auto-cast) or chosen by hand; the pickers only
-  // apply in the latter mode.
-  const awaitingCast = useStore((s) => Boolean(s.progress?.milestones?.awaiting_cast));
-  const castMode = useStore((s) => s.castMode[speaker.id] ?? 'autodetect');
-  const setCastMode = useStore((s) => s.setCastMode);
-  const pickersEnabled = editable && (!awaitingCast || castMode === 'select');
 
-  // The picker's own value is what the CONTROL shows, so it keeps following
-  // the local store. The before/after beneath is the separate question of
-  // what this row will BECOME, and a server-staged change counts there too.
+  const awaitingCast = useStore((s) => Boolean(s.progress?.milestones?.awaiting_cast));
+  const pickersEnabled = editable;
+
   const voice = staged?.voice !== undefined ? staged.voice : speaker.voice;
   const tone = staged?.tone !== undefined ? staged.tone : speaker.tone;
 
@@ -84,9 +57,6 @@ export function SpeakerRow({
   const toneLabel = (t: string | null | undefined) =>
     (t ? table.tone_options.find((o) => o.value === t)?.label ?? t : null);
 
-  // `staged` holds `fromVoice`/`fromTone` — what the row read as when the
-  // picker was first touched — so a second change still compares against the
-  // dub rather than against the first change.
   const stagedVoice = staged?.voice !== undefined && staged.voice !== staged.fromVoice
     ? voiceLabel(staged.voice)
     : voiceLabel(fromAgent?.voice.staged);
@@ -105,7 +75,7 @@ export function SpeakerRow({
     : genderWord(fromAgent?.gender.staged ?? null);
   const currentGender = genderWord(
     staged?.fromGender !== undefined ? staged.fromGender : speaker.gender);
-  // Any of the three about to change, from either path.
+
   const willChange = Boolean(
     (stagedVoice && stagedVoice !== currentVoice)
     || (stagedTone && stagedTone !== currentTone)
@@ -171,23 +141,7 @@ export function SpeakerRow({
           <SpeakerNameField speaker={speaker} />
           <div className="mt-0 flex flex-wrap items-center gap-x-1.5 gap-y-1 pl-1 text-[11.5px] text-ink4">
             <span>{fmtClock(speaker.speech_s)} of speech</span>
-            {awaitingCast ? (
-              <Select
-                ariaLabel={`Cast mode for ${speaker.label ?? speaker.id}`}
-                value={castMode}
-                onValueChange={(m) =>
-                  setCastMode(speaker.id, m as 'autodetect' | 'select')}
-                className="h-6 w-[8.5rem] shrink-0 text-[11px]"
-                items={[
-                  { value: 'autodetect', label: 'Auto-detect' },
-                  { value: 'select', label: 'Choose' },
-                ]}
-              />
-            ) : null}
-            {/* Casting is blocked until every row has a voice, so the rows
-                holding it up have to be findable at a glance -- otherwise a
-                disabled button on a twelve-speaker job is a guessing game. */}
-            {awaitingCast && !(castMode === 'select' && voice) ? (
+            {awaitingCast && !voice ? (
               <span className="shrink-0 rounded-md border border-warn/40 bg-warn/[0.08]
                                px-1.5 py-px text-[10.5px] font-medium text-warn">
                 needs a voice
@@ -249,9 +203,9 @@ export function SpeakerRow({
           value={voice}
           onChange={onVoice}
           disabled={!pickersEnabled}
+          target={table.language}
         />
 
-        {/* Absent, not disabled, when the engine would ignore it. */}
         {table.supports_tone ? (
           <Select
             ariaLabel={`Delivery for ${speaker.label ?? speaker.id}`}
@@ -260,8 +214,7 @@ export function SpeakerRow({
             placeholder="Delivery"
             className="h-8 w-[9.5rem]"
             disabled={!editable}
-            // `value` is the wire value and is sent verbatim — "AIR style
-            // news", not "AIR-style news". An unknown value is a 422.
+
             items={table.tone_options.map((t) => ({
               value: t.value,
               label: t.label,
@@ -284,15 +237,6 @@ export function SpeakerRow({
         </button>
       </div>
 
-      {/* What this speaker WILL read as, beneath the controls that set it:
-          the old value struck through, the new one in blue. One row per
-          field that is actually changing, so a voice swap does not print a
-          gender line that says the same thing twice.
-
-          This replaces a lone `was <voice>` note. Gender and tone had no
-          equivalent at all, which mattered most for gender — it has no
-          picker on this row, so the agent is the only way to change it and
-          this is the only place the change can appear. */}
       {willChange ? (
         <dl className="w-full -mt-0.5 flex flex-wrap items-baseline gap-x-4 gap-y-1
                        pl-[3.5rem] text-[11.5px] sm:pl-0 sm:justify-end">

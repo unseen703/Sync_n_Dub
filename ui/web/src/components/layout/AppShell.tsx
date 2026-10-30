@@ -7,38 +7,11 @@ import { Tooltip } from '../ui/Tooltip';
 import { IconMenu } from '../ui/Icons';
 import { useStore } from '../../store/useStore';
 
-/**
- * Brand bar across the top, then three columns:
- *
- *     ┌──────────────── Dubbing Studio ────────────────┐
- *     │    jobs    │        the dub        │  details  │
- *     └────────────┴───────────────────────┴───────────┘
- *
- * **Jobs on the LEFT, this job's details on the RIGHT.** Navigation is the
- * column you scan down to pick something, and it goes where a reader starts.
- * The details panel is reference about whatever is already selected, so it
- * trails the thing it describes rather than preceding it.
- *
- * The two panels are separate, not one stacked sidebar, because they have
- * different lifetimes: the job list is navigation and is wanted constantly,
- * while the details are read once per job and then become dead width next
- * to the video. Both can be closed; the list defaults open, the details
- * remember whatever the user last chose.
- *
- * Responsive behaviour:
- *   < 1024 px   both are off-canvas drawers — the job list flies in from
- *               the LEFT and the details from the RIGHT, each matching the
- *               side it occupies at desktop width.
- *   >= 1024 px  the job list is inline and collapsible.
- *   >= 1536 px  the details PUSH instead of overlaying, where there is room
- *               without squeezing the video below a useful 16:9.
- */
+/** Main responsive layout. It reads the selected job from the store and renders navigation plus the active workspace. */
 export function AppShell() {
   const railOpen = useStore((s) => s.railOpen);
   const setRailOpen = useStore((s) => s.setRailOpen);
-  // The job list is inline from 1024 px up and a drawer below it. `railOpen`
-  // drives both, so the toggle in the brand bar means the same thing at
-  // every width.
+
   const railInline = railOpen;
   const railDrawer = railOpen;
 
@@ -47,7 +20,7 @@ export function AppShell() {
       <BrandBar />
 
       <div className="flex min-h-0 flex-1 overflow-hidden">
-        {/* Job list — inline on the LEFT at >=1024 px, collapsible. */}
+
         <AnimatePresence initial={false}>
           {railInline ? (
             <m.aside
@@ -67,9 +40,6 @@ export function AppShell() {
           ) : null}
         </AnimatePresence>
 
-        {/* With the collapse control now INSIDE the rail, a closed rail
-            would have no way back — so the reopen affordance lives here,
-            as a thin strip on the edge the rail flies out from. */}
         {!railOpen ? (
           <div className="hidden shrink-0 border-r border-line bg-canvas/40 lg:block">
             <Tooltip label="Show the job list" side="right">
@@ -88,7 +58,6 @@ export function AppShell() {
           </div>
         ) : null}
 
-        {/* Job list, off-canvas from the LEFT below 1024 px. */}
         <AnimatePresence>
           {railDrawer ? (
             <>
@@ -118,8 +87,6 @@ export function AppShell() {
         <main className="flex min-w-0 flex-1 flex-col overflow-hidden">
           <Stage />
         </main>
-
-
       </div>
 
       <Toasts />

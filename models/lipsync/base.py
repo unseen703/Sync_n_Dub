@@ -171,6 +171,110 @@ class BaseLipSync(ABC):
         return [self.sync(r) for r in requests]
 
 
+#: Tallest frame handed to a lip-sync model; taller input is downscaled
+#: first, keeping aspect ratio, and that is logged. Every model here rebuilds
+#: a small fixed region -- Wav2Lip 96x96, MuseTalk and LatentSync 256x256 --
+#: so the extra pixels are carried through the whole render and then
+#: discarded. What they are not is free: both upstreams hold frames in RAM,
+#: so cost is linear in pixels and a 4K frame is 4x a 1080p one.
+MAX_RENDER_HEIGHT = 1080
+
+
+def cap_resolution(video, work, max_height: int = MAX_RENDER_HEIGHT, *,
+                   tag: str = "lipsync", why: str = "", log=None):
+    """Downscale `video` to `max_height` if taller, into `work`.
+
+    Returns `(what to render, (sx, sy))`, the factors mapping SOURCE pixel
+    coordinates onto the rendered frame. `(1.0, 1.0)` whenever nothing was
+    rescaled, including every failure path -- a caller holding source-space
+    coordinates must apply them, or its boxes slice past the frame edge and
+    `cv2.resize` raises after the model has loaded.
+
+    Returns the original path on any failure, so a probe or rescale error
+    degrades to a source-resolution render rather than losing the job. Width
+    is forced even (`-2`) because H.264 4:2:0 cannot encode an odd dimension.
+
+    Shared rather than per-adapter: MuseTalk has capped since the 4K S3FD
+    divide-by-zero, LatentSync was capped on 2026-10-29 for the same RAM
+    reason, and a second copy of this would be a second place for the
+    coordinate-space contract to drift.
+    """
+    import logging
+    import subprocess
+    from pathlib import Path as _Path
+
+    log = log or logging.getLogger(__name__)
+    video = _Path(video)
+    unscaled = (1.0, 1.0)
+    if int(max_height or 0) <= 0:
+        return video, unscaled
+    max_height = int(max_height)
+
+    from backend.media_io import _ffmpeg_bin, _ffprobe_bin
+    ffprobe, ffmpeg = _ffprobe_bin(), _ffmpeg_bin()
+    if not ffprobe or not ffmpeg:
+        return video, unscaled
+
+    def _dims(path):
+        r = subprocess.run(
+            [ffprobe, "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=width,height", "-of", "csv=p=0",
+             str(path)], capture_output=True, text=True, timeout=60)
+        return (int(x) for x in r.stdout.strip().splitlines()[0].split(",")[:2])
+
+    try:
+        w, h = _dims(video)
+    except Exception as e:                                   # noqa: BLE001
+        log.warning("%s: could not probe %s (%s); rendering at source "
+                    "resolution", tag, video.name, e)
+        return video, unscaled
+    if h <= max_height:
+        return video, unscaled
+
+    scaled = _Path(work) / f"{video.stem}.{max_height}p.mp4"
+    log.info("%s: downscaling %dx%d -> %dp before render%s -- OUTPUT WILL BE "
+             "%dp, not %dp", tag, w, h, max_height,
+             f" ({why})" if why else "", max_height, h)
+    try:
+        p = subprocess.run(
+            [ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
+             "-i", str(video),
+             "-vf", f"scale=-2:{max_height}:flags=lanczos",
+             "-c:v", "libx264", "-preset", "medium", "-crf", "18",
+             "-pix_fmt", "yuv420p",
+             # FRAME PARITY. Without this the re-encode is free to add or
+             # drop frames to make a CFR stream: measured here, a 33-frame
+             # 4K clip whose audio runs 38 ms past its video came back as 34.
+             # One frame in, one frame out is what the whole segment/join
+             # path downstream assumes. `-vsync 0` rather than `-fps_mode
+             # passthrough` because `media_io._ffmpeg_bin()` can resolve
+             # ffmpeg 4.4, which predates `-fps_mode`.
+             "-vsync", "0",
+             "-c:a", "copy", str(scaled)],
+            capture_output=True, text=True)
+        if p.returncode != 0 or not scaled.is_file() or not scaled.stat().st_size:
+            log.warning("%s: downscale failed (%s); rendering at source "
+                        "resolution", tag, (p.stderr or "").strip()[-200:])
+            return video, unscaled
+    except Exception as e:                                   # noqa: BLE001
+        log.warning("%s: downscale failed (%s); rendering at source "
+                    "resolution", tag, e)
+        return video, unscaled
+
+    # Measure the factors off the ENCODED file, not from `max_height`: `-2`
+    # rounds width to even, so a computed factor drifts the boxes sideways on
+    # an odd-width source.
+    try:
+        nw, nh = _dims(scaled)
+    except Exception as e:                                   # noqa: BLE001
+        # Keep the rendered file, but refuse to guess the factor: a guessed
+        # one puts oversized boxes on a smaller frame.
+        raise RuntimeError(
+            f"{tag}: downscaled {video.name} but could not probe the result "
+            f"to convert target boxes ({e})") from e
+    return scaled, (nw / w, nh / h)
+
+
 def run_streaming(cmd, *, cwd=None, env=None, log=None, tag="",
                   progress_prefixes=("[worker]",), tail_lines=500):
     """Run `cmd`, forward its progress lines to `log` LIVE, return a

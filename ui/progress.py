@@ -18,8 +18,6 @@ The handler is installed by `ui/runner.py` (the process tmux launches), never
 by the pipeline itself. `backend/` does not know this module exists.
 
 The one fragility is that a renamed marker silently stops being matched.
-`tests/test_ui_progress.py` greps `pipeline.py` for every marker literal and
-asserts this module still matches all of them, so that failure is loud.
 
 Reading
 -------
@@ -28,7 +26,7 @@ normalises **all three shapes** found under `data/jobs/`, so nothing above it
 ever branches on which runner produced a job:
 
   1. `progress.json`  — written by `ProgressWriter` (new jobs)
-  2. `STATUS.json`    — `scripts/clip_asd_musetalk_run.py` (34 of 51 folders)
+  2. `STATUS.json`    — legacy clip-runner shape (phases[], no plan)
   3. `manifest.json`  — `backend.jobs.Job` alone (start/finish only)
 """
 from __future__ import annotations
@@ -156,7 +154,7 @@ _GROUP_OF.update({
     "P5_SEGMENT": "prepare",
 })
 
-#: Phase names used by `scripts/clip_asd_musetalk_run.py`'s STATUS.json.
+#: Phase names used by the legacy clip-runner's STATUS.json.
 CLIP_PHASE_LABELS: Dict[str, str] = {
     "P1_CUT":                    "Trimming to the chosen part",
     "P2_FACES":                  "Finding faces",
@@ -301,6 +299,20 @@ def plan_stages(config: Dict[str, Any], *, pre: Optional[List[str]] = None,
     # the pills stay drawn, but never counted as done or skipped.
     if stop_after_mt:
         deferred = deferred | set(keys[gate:])
+        # Every gated job is awaiting cast by construction -- `ui/runner.py`
+        # forces `stop_after_mt=True` on every UI submission, so there is no
+        # such thing as a gated job that will never be cast. If a falsy or
+        # missing `tts`/`mix`/`lipsync` left 9d/9e/9g/9h out of `keys`, the
+        # Dub-audio and Lip-sync groups come out with no substages at all --
+        # `_group_phases` reads an empty group as `skipped`, and
+        # `_finished_phase` counts `skipped` as complete, so the bar reads
+        # Finished over a dub that has not been cast and a render that does
+        # not exist. ("6" is deliberately excluded: see the comment above on
+        # why ASD is never planned here.)
+        for extra in ("9d", "9e", "9g", "9h"):
+            if extra not in keys:
+                keys.append(extra)
+                deferred.add(extra)
     return _plan_rows(keys, deferred)
 
 
@@ -658,7 +670,7 @@ def _backfill_erased(job_root: Path, doc: Dict[str, Any]
 
 
 def _from_status_json(job_root: Path) -> Optional[Dict[str, Any]]:
-    """`scripts/clip_asd_musetalk_run.py`'s shape: phases[], no plan."""
+    """Legacy clip-runner's STATUS.json shape: phases[], no plan."""
     p = job_root / "STATUS.json"
     if not p.is_file():
         return None
@@ -848,9 +860,7 @@ def _insert_at(rows: List[Dict[str, Any]], key: str) -> int:
 
 
 #: The last pill, and the only synthetic one. It is NOT in `PHASE_GROUPS`
-#: because that table maps real `=== stage N ===` markers and
-#: `tests/test_ui_progress.py` greps `pipeline.py` for every key in it; a
-#: group with no marker would fail that grep for doing its job.
+#: because that table maps real `=== stage N ===` markers only.
 FINISHED_ID = "finished"
 FINISHED_LABEL = "Finished"
 
@@ -1037,15 +1047,19 @@ def milestones(job_root: Path, doc: Optional[Dict[str, Any]] = None
         import json as _json
         _mani = job_root / "manifest.json"
         if _mani.is_file():
+            _mani_doc = _json.loads(_mani.read_text())
             awaiting_cast = bool(
-                _json.loads(_mani.read_text()).get("awaiting_cast"))
+                _mani_doc.get("awaiting_cast")
+                or _mani_doc.get("result", {}).get("awaiting_cast"))
     except (OSError, ValueError):
         awaiting_cast = False
+
+    mix_on_disk = has("mix", "*.wav") or has("audio", "*dub*.wav")
 
     return {
         "video_ready":      done("1", "cut", "P1_CUT") or has("videos", "*.mp4"),
         "diarization_done": done("4") or has("diarization", "*.rttm"),
-        "awaiting_cast":    awaiting_cast and not mix_done,
+        "awaiting_cast":    awaiting_cast and not mix_on_disk,
         "speakers_ready":   done("9d") or has("voices", "*"),
         "mix_done":         mix_done,
         "lipsync_ready":    (done("9h", "P6_LIPSYNC", "P7_SPLICE") or final_at_root)

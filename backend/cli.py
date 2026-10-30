@@ -275,13 +275,12 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                     help="Automatic-speech-recognition model. Bare --asr "
                          f"selects {_default_impl('asr')!r}; omit the flag "
                          "entirely to skip the stage.")
-    ap.add_argument("--asr-language", default="en",
+    ap.add_argument("--asr-language", default="auto",
                     help="ISO-639 code of what is SPOKEN in the source "
-                         "(en, hi, ta, …). Default 'en' — the dubbing "
-                         "direction here is English -> Indic. Pass "
-                         "'auto' to let the ASR detect it instead, which "
-                         "it does per diarization turn and therefore "
-                         "unreliably on short ones.")
+                         "(en, hi, ta, …). Default 'auto': the ASR probes "
+                         "the longest diarization turn once and pins that "
+                         "answer to the whole run. Pass a code to skip the "
+                         "probe when you already know the language.")
     ap.add_argument("--asr-full-audio", action="store_true",
                     help="Transcribe the entire 16 kHz mix end-to-end instead "
                          "of re-slicing to diarization turns. Keeps intro/outro "
@@ -321,8 +320,8 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap.add_argument("--mt-target-script", default="codemix",
                     choices=("native", "roman", "codemix"),
                     help="Target script for Indic languages (default: codemix). "
-                         "codemix keeps English terms in Latin inside the "
-                         "target-script sentence, which matches how this "
+                         "codemix keeps Latin-script source terms in Latin "
+                         "inside the target-script sentence, which matches how this "
                          "material is spoken and stays consistent across "
                          "segments; native re-scripts, but Bodhan leaves Latin "
                          "remnants at random when it does.")
@@ -434,15 +433,14 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                     help="Time-stretch cap, as a +/- FRACTION of natural "
                          "pace: 0.20 clamps each clip to 0.8x-1.2x speed "
                          "(backend/stretch.py applies "
-                         "`max(1-cap, min(1+cap, ratio))`). Raised from "
-                         "0.10 on 2026-10-20 by request.")
+                         "`max(1-cap, min(1+cap, ratio))`).")
     ap.add_argument("--stretch-backend", default="auto",
                     choices=("auto", "rubberband", "ffmpeg_atempo",
                              "librosa", "linear"),
                     help="Time-stretch implementation. 'auto' picks the best "
                          "available (rubberband here). 'linear' is a "
                          "pitch-SHIFTING resample kept only as an ablation "
-                         "baseline -- it is what the old silent fallback did.")
+                         "baseline.")
     ap.add_argument("--no-tts-stretch", action="store_true",
                     help="Synthesise raw clips only, skipping the per-segment "
                          "stretch, so a downstream timing plan owns all "
@@ -456,26 +454,24 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap.add_argument("--speed-mode", default=None,
                     choices=("global", "segment", "warp"),
                     help="How the dub is re-paced to fit the source timeline. "
-                         "`segment` (DEFAULT since 2026-10-22): each clip "
+                         "`segment` (the default): each clip "
                          "is fitted to its own slot -- compressed when the "
                          "dub line is longer, STRETCHED OUT when it is "
                          "shorter, so a short line does not leave a pause in "
                          "the middle of its slot. Bounded by --speed-cap; "
                          "whatever the bound could not absorb is reported as "
-                         "unfilled_slot_s in the timing plan. `global` (the "
-                         "previous default): every clip plays at its natural "
+                         "unfilled_slot_s in the timing plan. `global`: "
+                         "every clip plays at its natural "
                          "pace, placed shift-forward, then ONE atempo over "
                          "the whole file so the dub lands on the source "
                          "duration. Passing --timing-method implies `global`, "
                          "since the arm sets these knobs itself.")
     ap.add_argument("--speed-cap", type=float, default=1.8,
                     help="With --speed-mode segment: the SPEED-UP bound, "
-                         "applied as max_tempo=cap. Default 1.8 since "
-                         "2026-10-22 (was 1.5). Hindi TTS runs 1.21-1.65x "
-                         "longer than the English it covers, so 1.5 left no "
-                         "headroom above the top of that range -- measured "
-                         "on job 20261021-114009, 4 of 5 segments overran "
-                         "their slot. The slowdown floor is NOT 1/cap; see "
+                         "applied as max_tempo=cap. Hindi TTS runs "
+                         "1.21-1.65x longer than the English it covers, so a "
+                         "cap of 1.5 leaves no headroom above the top of that "
+                         "range. The slowdown floor is NOT 1/cap; see "
                          "--speed-floor.")
     ap.add_argument("--speed-floor", type=float, default=0.75,
                     help="With --speed-mode segment: the SLOW-DOWN bound, "
@@ -897,6 +893,11 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("--mix requires --tts.")
     if args.lipsync and not args.mix:
         raise SystemExit("--lipsync requires --mix.")
+    # "auto" means detect, which is the absence of a language rather than
+    # a language. Normalise once, here, so the gate below and the pipeline
+    # call further down cannot disagree about what it means.
+    if (args.asr_language or "").lower() in ("auto", "detect", "none", ""):
+        args.asr_language = None
     # Language-gate the ASR choice up-front: argparse's `choices` is built
     # before --asr-language is known, so we re-check here and refuse with a
     # suggestion rather than letting the adapter raise mid-pipeline.
@@ -986,8 +987,7 @@ def main(argv: list[str] | None = None) -> int:
         asr_model=args.asr,
         # 'auto' is the explicit way back to detection; argparse cannot
         # express "a string, or None" on its own.
-        asr_language=(None if (args.asr_language or "").lower()
-                      in ("auto", "detect", "none", "") else args.asr_language),
+        asr_language=args.asr_language,
         asr_full_audio=args.asr_full_audio,
         captions_as_transcript=not args.no_captions_transcript,
         captions_allow_auto=args.captions_allow_auto,

@@ -1,8 +1,7 @@
-"""Shared types + abstract base class for every diarization adapter.
+"""Shared types and abstract base for the diarization adapters.
 
-Every adapter takes a mono 16 kHz WAV path in and returns a `DiarizationResult`.
-Any RTTM writer or downstream stage consumes the same shape regardless of which
-model produced it.
+Every adapter takes a mono 16 kHz WAV and returns a `DiarizationResult`, so
+downstream stages consume one shape whichever model produced it.
 """
 from __future__ import annotations
 
@@ -37,11 +36,11 @@ class DiarizationResult:
         return len({t.speaker for t in self.turns})
 
     def to_rttm(self, uri: Optional[str] = None) -> str:
-        """Render as an RTTM string. NIST RTTM v2 columns.
+        """Render as an RTTM string, NIST RTTM v2 columns.
 
-        Always emits a non-empty file even when no turns were detected: a
-        0-byte artefact is indistinguishable from a writer crash, and the
-        pipeline needs the presence of the file to prove the stage ran.
+        Never empty, even with no turns detected: a 0-byte artefact is
+        indistinguishable from a writer crash, and the file's presence is what
+        proves the stage ran.
         """
         uri = uri or self.audio_path.stem
         if not self.turns:
@@ -66,9 +65,8 @@ class DiarizationResult:
 class BaseDiarizer(ABC):
     """Every diarization adapter subclasses this.
 
-    Implementations must be safe to construct without weights (lazy loading in
-    `_ensure_loaded()`), so the CLI/frontend can enumerate available models
-    without paying the download/init cost until one is actually chosen.
+    Construction must not need weights — load them in `_ensure_loaded()` — so
+    the CLI and UI can enumerate models without paying the download cost.
     """
 
     name: str = "base"
@@ -102,7 +100,7 @@ class BaseDiarizer(ABC):
 # ---------------------------------------------------------------------------
 
 def _resolve_device() -> str:
-    """Pick cuda if torch reports it, else cpu. Honors DUBBING_DEVICE env override."""
+    """Pick cuda if torch reports it, else cpu. `DUBBING_DEVICE` overrides."""
     import os
     override = os.getenv("DUBBING_DEVICE", "").strip().lower()
     if override in {"cpu", "cuda", "mps"}:
@@ -119,8 +117,9 @@ def _resolve_device() -> str:
 
 
 def canonicalize_speaker_labels(turns: List[Turn]) -> List[Turn]:
-    """Rewrite whatever speaker labels an adapter emitted to `SPK_00`, `SPK_01`, ...
-    Order is first-appearance in `turns` so the mapping is deterministic per audio.
+    """Rewrite an adapter's speaker labels to `SPK_00`, `SPK_01`, …
+
+    Ordered by first appearance, so the mapping is deterministic per audio.
     """
     mapping: dict[str, str] = {}
     out: List[Turn] = []

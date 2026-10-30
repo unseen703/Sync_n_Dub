@@ -32,13 +32,11 @@ _RELAUNCH_ENV_VAR = "DUBBING_FFMPEG_SHIM_APPLIED"
 
 
 def _build_ffmpeg_soname_shim() -> Optional[str]:
-    """Materialize unhashed-soname symlinks (`libavutil.so.59` etc.) pointing
-    at the auditwheel-hashed files PyAV ships under `<site-packages>/av.libs/`.
-    Returns the shim directory as a string, or None if PyAV isn't installed.
+    """Symlink unhashed sonames (`libavutil.so.59`) to the auditwheel-hashed
+    files PyAV ships in `<site-packages>/av.libs/`.
 
-    We need this because pyannote.audio 4.x pulls torchcodec, whose native
-    `libtorchcodec_core*.so` DT_NEEDEDs unhashed sonames — the auditwheel
-    hashes on PyAV's bundled libs break that lookup. Symlinks fix it.
+    torchcodec's native lib DT_NEEDEDs the unhashed names, which PyAV's hashed
+    filenames break. Returns the shim directory, or None without PyAV.
     """
     av_libs = _find_av_libs_dir()
     if av_libs is None:
@@ -60,24 +58,23 @@ def _build_ffmpeg_soname_shim() -> Optional[str]:
 
 
 def ensure_ffmpeg_libs_on_ld_path_or_reexec() -> None:
-    """Ensure LD_LIBRARY_PATH points at our ffmpeg soname shim + PyAV's libs.
+    """Point LD_LIBRARY_PATH at the ffmpeg soname shim plus PyAV's libs.
 
-    glibc caches LD_LIBRARY_PATH at process startup — mutating `os.environ`
-    at runtime does NOT affect subsequent dlopen() calls. So if we detect a
-    box without system ffmpeg AND we have PyAV to fall back on, we set the
-    env vars and re-exec Python with the same argv. The sentinel env var
-    stops the re-exec loop after the first hop.
+    glibc caches LD_LIBRARY_PATH at process startup, so mutating `os.environ`
+    does not affect later dlopen() calls — on a box with no system ffmpeg this
+    sets the vars and re-execs with the same argv. A sentinel env var stops
+    the loop after one hop.
     """
     if os.environ.get(_RELAUNCH_ENV_VAR):
         return
-    # No re-exec needed if system ffmpeg libs are present.
+    # No re-exec needed when the system ffmpeg libs are present.
     import ctypes.util
     if ctypes.util.find_library("avutil"):
         os.environ[_RELAUNCH_ENV_VAR] = "1"
         return
     shim = _build_ffmpeg_soname_shim()
     if shim is None:
-        # No PyAV to shim with; torchcodec will fail loudly, and that's fine.
+        # No PyAV to shim with; torchcodec fails loudly, which is fine.
         os.environ[_RELAUNCH_ENV_VAR] = "1"
         return
     av_libs = _find_av_libs_dir()
@@ -86,12 +83,10 @@ def ensure_ffmpeg_libs_on_ld_path_or_reexec() -> None:
     new = f"{prepend}{os.pathsep}{cur}" if cur else prepend
     os.environ["LD_LIBRARY_PATH"] = new
     os.environ[_RELAUNCH_ENV_VAR] = "1"
-    # sys.argv drops the `python -m pkg` prefix. Use sys.orig_argv (3.10+) so
-    # a re-exec of `python -m backend.cli ...` preserves the -m form; without
-    # it, `python backend/cli.py` runs the file directly and loses the
-    # package's implicit sys.path entry. orig_argv[0] is the interpreter
-    # basename as invoked (e.g. "python"), not a resolvable path — pass
-    # sys.executable to execv while keeping orig_argv as the argv list.
+    # sys.argv drops the `python -m pkg` prefix, so use sys.orig_argv to keep
+    # the -m form; running the file directly loses the package's implicit
+    # sys.path entry. orig_argv[0] is the interpreter basename, not a
+    # resolvable path, hence sys.executable for execv.
     argv = list(getattr(sys, "orig_argv", None) or [sys.executable, *sys.argv])
     os.execv(sys.executable, argv)
 
@@ -129,8 +124,7 @@ class PyannoteDiarizer(BaseDiarizer):
                 "pyannote.audio not installed. `pip install pyannote.audio>=3.4`"
             ) from e
 
-        # pyannote.audio 3.x → 4.x renamed `use_auth_token` to `token`; keep a
-        # fallback so we work against either release.
+        # pyannote.audio 4.x renamed `use_auth_token` to `token`; keep both.
         try:
             pipeline = Pipeline.from_pretrained(self.checkpoint, token=self.hf_token)
         except TypeError:
@@ -141,7 +135,6 @@ class PyannoteDiarizer(BaseDiarizer):
                 "Most common cause: the model gate is not accepted for this HF token."
             )
 
-        # Move to GPU if we can.
         try:
             import torch
             if self.device.startswith("cuda") and torch.cuda.is_available():
@@ -173,11 +166,9 @@ class PyannoteDiarizer(BaseDiarizer):
         if max_speakers is not None:
             kwargs["max_speakers"] = max_speakers
 
-        # pyannote.audio 4.x's internal torchcodec file reader occasionally
-        # emits segments with start > end on longer clips (observed on files
-        # ~30+ min). The pipeline accepts `{"waveform": tensor, "sample_rate": sr}`
-        # as a drop-in alternative that uses an in-memory tensor and bypasses
-        # the torchcodec path entirely — load once with soundfile instead.
+        # pyannote 4.x's torchcodec reader emits segments with start > end on
+        # long clips (~30+ min). Passing an in-memory waveform bypasses that
+        # path entirely, so load once with soundfile.
         import numpy as np
         import soundfile as sf
         import torch
@@ -192,8 +183,7 @@ class PyannoteDiarizer(BaseDiarizer):
             **kwargs,
         )
 
-        # pyannote 4.x returns a DiarizeOutput dataclass wrapping an Annotation
-        # on `.speaker_diarization`; 3.x returned the Annotation directly.
+        # 4.x wraps the Annotation in a DiarizeOutput; 3.x returned it directly.
         annotation = getattr(result, "speaker_diarization", result)
 
         turns = [

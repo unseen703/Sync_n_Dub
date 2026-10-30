@@ -10,10 +10,9 @@ Output per segment:
     "asd_score":  0.91,
     "on_screen":  True }
 
-Why Hungarian: for an interval where two diarized turns overlap in time (or
-near-overlap, e.g. interview back-and-forth) and both candidate faces are
-on-screen, an independent per-turn argmax can hand the same face to both.
-Hungarian solves the whole matrix in one shot and keeps assignments unique.
+Hungarian rather than per-turn argmax: when two turns overlap in time and both
+candidate faces are on screen, an independent argmax can hand the same face to
+both. Solving the whole matrix at once keeps assignments unique.
 """
 from __future__ import annotations
 
@@ -55,14 +54,10 @@ def assign_faces_to_turns(
 ) -> List[SegmentAssignment]:
     """Resolve one `SegmentAssignment` per turn.
 
-    `fps` defaults to the FPS carried on `tracks`. `on_screen_threshold` is
-    the ASD score below which we mark the segment off-screen rather than
-    binding a face to it — narration must never be animated.
-
-    `group_window_s` controls how turns are batched into Hungarian problems:
-    turns whose time intervals come within this many seconds of another in
-    the group are solved together. A plain argmax per isolated turn is fine;
-    the Hungarian step only matters when turns time-overlap.
+    `fps` defaults to the FPS on `tracks`. Below `on_screen_threshold` a
+    segment is marked off-screen rather than bound to a face, so narration is
+    never animated. `group_window_s` is how close in time turns must be to be
+    solved in the same Hungarian problem.
     """
     fps = fps or tracks.fps
     if not fps or fps <= 0:
@@ -100,8 +95,8 @@ def assign_faces_to_turns(
 def _group_turns(turns, *, window_s: float) -> List[List[Tuple[int, object]]]:
     """Chain turns whose intervals touch (gap <= window_s) into one group.
 
-    Returned as `[(turn_index, turn), ...]` to preserve the original index
-    for seg_id generation.
+    Returns `[(turn_index, turn), ...]`, keeping the original index for seg_id
+    generation.
     """
     indexed = sorted(enumerate(turns), key=lambda it: it[1].start)
     groups: List[List[Tuple[int, object]]] = []
@@ -124,8 +119,8 @@ def _assign_group(
 ):
     from scipy.optimize import linear_sum_assignment  # defer heavy import
 
-    # Build (|turns| x |tracks|) score matrix. -inf for tracks absent in the
-    # window, so Hungarian's maximisation never selects an impossible pair.
+    # (|turns| x |tracks|) score matrix, -inf for tracks absent in the window
+    # so the solver never selects an impossible pair.
     n_turns, n_tracks = len(group), len(track_ids)
     if n_tracks == 0:
         for i, turn in group:
@@ -149,7 +144,6 @@ def _assign_group(
 
     # scipy minimises; negate the finite scores and keep -inf as +inf cost.
     cost = np.where(np.isfinite(scores), -scores, 1e9)
-    # Hungarian requires a rectangular matrix; scipy handles non-square.
     row_ind, col_ind = linear_sum_assignment(cost)
     assigned_cols = set()
     for r, c in zip(row_ind, col_ind):
@@ -209,11 +203,6 @@ def assignments_to_jsonable(assignments: List[SegmentAssignment]) -> list:
 # ---------------------------------------------------------------------------
 # Reading the assignment back
 # ---------------------------------------------------------------------------
-#
-# Written 2026-10-18. `assignments.json` was produced by stage 6 and consumed
-# by nothing, so the one artifact that says WHICH FACE IS THIS SPEAKER sat
-# unused while `backend/gender.py` had no way to look at a speaker's face.
-# This is the reader that closes that loop.
 
 
 def speaker_face_tracks(
@@ -222,23 +211,16 @@ def speaker_face_tracks(
     *,
     min_on_screen_s: float = 1.0,
 ) -> Dict[str, Tuple[np.ndarray, np.ndarray]]:
-    """`{speaker: (frames, bboxes)}` for the face each speaker owns.
+    """Return `{speaker: (frames, bboxes)}` for the face each speaker owns.
 
-    A speaker's turns can land on more than one track — a cut to a reverse
-    angle starts a new track of the same person — so the winner is the track
-    holding the most ON-SCREEN SECONDS of that speaker, not the most turns.
-    Weighting by turns would let six one-second reaction shots outvote a
-    single forty-second close-up.
+    One speaker can land on several tracks (a cut to a reverse angle starts a
+    new one), so the winner is the track with the most on-screen SECONDS, not
+    the most turns — otherwise reaction shots outvote a long close-up.
+    Off-screen turns are skipped; they are narration or off-camera lines where
+    the face in frame belongs to someone else.
 
-    Off-screen turns are skipped outright: `assign_faces_to_turns` already
-    set `face_track=None` for them, and a turn the ASD scored below the
-    on-screen threshold is narration or an off-camera line, where the face in
-    frame belongs to somebody else entirely.
-
-    A speaker whose on-screen total is under `min_on_screen_s` is LEFT OUT
-    rather than given its best guess: a face seen for half a second is the
-    input `predict_gender_face` abstains on anyway, and omitting the speaker
-    says "no face evidence" where an empty track would say "no faces found".
+    A speaker under `min_on_screen_s` is left out rather than guessed at, which
+    reads as "no face evidence" instead of "no faces found".
     """
     by_id = tracks.by_id() if callable(getattr(tracks, "by_id", None)) \
         else {t.track_id: t for t in tracks.tracks}

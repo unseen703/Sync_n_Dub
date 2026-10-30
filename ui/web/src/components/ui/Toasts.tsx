@@ -10,18 +10,6 @@ const TONE = {
   error: { box: 'border-danger/45 bg-raised', icon: 'text-danger', Glyph: IconAlert },
 } as const;
 
-/**
- * Toasts sit bottom-RIGHT, opposite the job rail.
- *
- * The reasoning is the side the rail is on, not the side itself: a success
- * toast that covers the rail hides the very card whose state just changed.
- * The rail moved to the left on 2026-10-17 and this moved with it — if the
- * rail ever moves again, this follows.
- *
- * `role="status"` + `aria-live="polite"` on the region, so a screen reader
- * hears "The lip-synced render is ready" without the focus being stolen
- * mid-task.
- */
 export function Toasts() {
   const toasts = useStore((s) => s.toasts);
   const dismiss = useStore((s) => s.dismissToast);

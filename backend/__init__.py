@@ -1,4 +1,5 @@
-"""Pipeline backend: download, media I/O, stem separation, diarization, orchestration.
+"""Pipeline backend: download, media I/O, stem separation, diarization and
+orchestration.
 
 Public entry points:
   - backend.pipeline.run_pipeline(input_, diarization_model, ...)

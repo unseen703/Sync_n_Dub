@@ -1,18 +1,9 @@
-"""The job's specification, in the user's words rather than the runner's.
+"""Render a job's config as label/value/hint lines a user can read.
 
-`config.json` says `mt_target_script=codemix`, `stem_model=htdemucs`,
-`asd_on_screen_threshold=0.3`. None of that means anything to the person who
-pasted a YouTube link, and putting it on screen is how a product starts
-looking like a log file.
-
-Each line here is produced server-side, because the mapping from a config key
-to readable English is domain knowledge that belongs next to the pipeline —
-duplicating it in TypeScript guarantees the two drift. The frontend renders
-label/value/hint triples it does not interpret.
-
-The raw config is still returned, for the "Advanced" disclosure. It is the
-view you want at 2 a.m. when a sweep looks wrong, and hiding it one click
-deep costs nothing.
+Done server-side because mapping a config key to readable English is domain
+knowledge that belongs next to the pipeline; duplicating it in TypeScript
+guarantees drift. The frontend renders the triples without interpreting them.
+The raw config comes back too, for the "Advanced" disclosure.
 """
 from __future__ import annotations
 
@@ -71,21 +62,16 @@ SCRIPT_WORDS = {
     "latin":   ("Romanised (Latin script)", ""),
 }
 
+#: Removed engines stay listed: old jobs still carry them in their config and
+#: would otherwise render the raw id.
 TTS_WORDS = {
-    # `edge` is no longer a choice — the adapter was removed on 2026-10-17 —
-    # but jobs recorded before then still carry it in their config, and this
-    # table exists to read what is on disk. A removed engine still needs a
-    # name here or those jobs render the raw id.
-    "edge":        "Microsoft Edge voices (removed)",
+    
     "bodhan":      "Bodhan Indic voices",
     "indic-speak": "Bodhan Indic voices",
-    "indicf5":     "IndicF5 — cloned from each speaker (removed)",
 }
 
-#: How stage 9b1 decided the register, in operator terms. The tier is worth
-#: showing because the confidence differs sharply: `categories` is YouTube's
-#: own label for the video, while `llm` is a small model's read of the
-#: transcript and is the one to distrust.
+#: How stage 9b1 decided the register, in operator terms. The tier matters
+#: because confidence differs sharply between them.
 REGISTER_TIER_WORDS = {
     "categories":  "From the video's own YouTube category.",
     "channel":     "From a channel this install has a rule for.",
@@ -94,11 +80,8 @@ REGISTER_TIER_WORDS = {
                    "four signals, and worth a listen before trusting it.",
 }
 
-#: Derived from `ui/lipsync_models.py`, which is also what fixes the bug this
-#: table used to have: the old prefix loop tested `wav2lip` before
-#: `wav2lip_hd`, and `"wav2lip_hd".startswith("wav2lip")` is True — so an HD
-#: run, which is Wav2Lip PLUS a per-frame restoration pass, reported itself
-#: on the summary page as a plain Wav2Lip run.
+#: Derived from `ui/lipsync_models.py` rather than written out, so a model
+#: cannot be missing or matched by a prefix of a longer name.
 LIPSYNC_WORDS = {k: f"On — {v['label']}"
                  for k, v in _ls_models.FACTS.items()}
 
@@ -112,30 +95,25 @@ def build(job_root: Path, *, manifest: Dict[str, Any],
     meta = meta or {}
     lines: List[Dict[str, Any]] = []
 
-    src = (meta.get("url") or manifest.get("input")
-           or cfg.get("src") or "—")
-    source_label = "YouTube" if "youtu" in str(src) else "File"
-    lines.append(_line("source", "Source", f"{source_label} · {_short_url(src)}"))
-
     dur = meta.get("duration_s")
     win = meta.get("window") or cfg.get("window_abs_s")
     if win and isinstance(win, (list, tuple)) and len(win) == 2:
-        part = f"{_clock(win[0])} – {_clock(win[1])}"
-        if dur:
-            part += f" of {_clock(dur)}"
+        clip_len = max(0.0, float(win[1]) - float(win[0]))
+        part = f"{_clock(win[0])} – {_clock(win[1])} ({_clock(clip_len)})"
     elif dur:
-        part = f"Whole video ({_clock(dur)})"
+        part = _clock(dur)
     else:
-        part = "Whole video"
+        part = "—"
     lines.append(_line("part", "Clip dubbed", part))
 
     lang = cfg.get("target_language") or cfg.get("language")
-    lines.append(_line("language", "Dubbing into", describe_lang(lang)))
-
     script = (cfg.get("target_script") or "").lower()
+    lang_value = describe_lang(lang)
+    script_hint = ""
     if script in SCRIPT_WORDS:
-        value, hint = SCRIPT_WORDS[script]
-        lines.append(_line("script", "Script", value, hint=hint))
+        _, script_hint = SCRIPT_WORDS[script]
+        lang_value = f"{lang_value} ({script})"
+    lines.append(_line("language", "Dubbing into", lang_value, hint=script_hint))
 
     if n_speakers is not None:
         lines.append(_line("speakers", "Speakers found",
@@ -146,8 +124,8 @@ def build(job_root: Path, *, manifest: Dict[str, Any],
         lines.append(_line("voices", "Voices from",
                            TTS_WORDS.get(tts, tts),
                            hint=cfg.get("dub_provenance") or ""))
-        # Stating the absence is load-bearing: the tone control is hidden on
-        # these engines, and an unexplained missing feature reads as a bug.
+        # State the absence: the tone control is hidden on these engines, and
+        # an unexplained missing feature reads as a bug.
         if tts not in ("bodhan", "indic-speak"):
             lines.append(_line(
                 "tone", "Tone control",
@@ -157,26 +135,23 @@ def build(job_root: Path, *, manifest: Dict[str, Any],
         else:
             lines.append(_line("tone", "Tone control", "Available"))
 
-    # Stage 9b1 picks the delivery register from the uploader's metadata, so
-    # it is a decision the operator never made and would otherwise have no
-    # way to see. The tier matters as much as the value: `categories` is
-    # YouTube's own label, `llm` is a guess from the transcript.
+    # Stage 9b1 picks the register from the uploader's metadata, so it is a
+    # decision the operator never made and could not otherwise see.
     register = result.get("content_register")
     if register:
-        lines.append(_line("register", "Reading it as", register,
+        lines.append(_line("register", "Video type", register,
                            hint=REGISTER_TIER_WORDS.get(
                                result.get("content_register_tier") or "", "")))
     elif tts in ("bodhan", "indic-speak") and cfg.get("tts_style") == "auto":
         # Asked for, and nothing was confident enough to answer.
-        lines.append(_line("register", "Reading it as", "Neutral",
+        lines.append(_line("register", "Video type", "Neutral",
                            hint="Nothing in the video's metadata identified "
                                 "the programme type, so the voice uses its "
                                 "default delivery."))
 
     ls = (cfg.get("lipsync") or "").lower()
-    # `normalise` handles the variant the clip runner records (`musetalk-v15`,
-    # not `musetalk`) AND matches the longest key first, so `wav2lip_hd` is
-    # not swallowed by `wav2lip`.
+    # `normalise` resolves the variant the clip runner records and matches the
+    # longest key first.
     ls_word = LIPSYNC_WORDS.get(_ls_models.normalise(ls) or "")
     lines.append(_line("lipsync", "Lip-sync",
                        ls_word or "Off (dubbed audio only)"))
@@ -186,10 +161,6 @@ def build(job_root: Path, *, manifest: Dict[str, Any],
                            hint="Picked automatically from the face size; "
                                 "you can override it on a new job."))
 
-
-    lines.append(_line("stems", "Background audio",
-                       "Removed" if cfg.get("skip_stems")
-                       else "Kept from the original"))
 
     started = manifest.get("started_at") or (progress or {}).get("started_at") \
         or (progress or {}).get("updated_at")

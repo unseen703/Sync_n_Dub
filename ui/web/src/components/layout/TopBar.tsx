@@ -8,14 +8,11 @@ import { useNow } from '../../hooks/useNow';
 import { cancelJob, MOCKED } from '../../api';
 import { cn } from '../../lib/cn';
 
-/**
- * The header for the job on screen — the product header is `BrandBar`,
- * one level up. This one answers "which dub am I looking at and how is it
- * doing", and carries the only destructive control in the app.
- */
+/** Current-job header. It reads job state and renders its title, status, and available actions. */
 export function TopBar() {
   const selected = useStore((s) => s.selected);
   const job = useStore((s) => s.jobs.find((j) => j.job_id === s.selected) ?? null);
+
   const spec = useStore((s) => s.spec);
   const progress = useStore((s) => s.progress);
   const refreshProgress = useStore((s) => s.refreshProgress);
@@ -59,14 +56,7 @@ export function TopBar() {
             </span>
           ) : null}
           <StateBadge state={progress.state} />
-          {/* There is no "Edit via agent" link any more, and no page for it
-              to point at. The agent is on the job page itself, below the
-              video, next to the cast and the script it changes — reviewing
-              a dub used to mean bouncing between two screens with the video
-              on one and the controls that change it on the other. The rule
-              that gated this button (a finished dub only, because the agent
-              replays stages 9b..9h over a merged ASR+MT JSON that does not
-              exist until the run gets that far) now gates the panel. */}
+
           {running ? (
             <Button
               size="sm"

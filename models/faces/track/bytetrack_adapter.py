@@ -1,12 +1,10 @@
-"""ByteTrack tracker — wraps `supervision`'s pure-Python ByteTrack.
+"""ByteTrack tracker, wrapping `supervision`'s pure-Python implementation.
 
-The reference ByteTrack impl ships with YOLOX; `supervision.ByteTrack` is the
-same algorithm (Kalman motion model + IoU association over detections,
-including low-score boxes) without the YOLOX/mmcv dependency chain. Suitable
-for face boxes as long as we treat every detection as class 0 — ByteTrack is
-class-agnostic internally.
+The same algorithm as the reference (Kalman motion model plus IoU association
+including low-score boxes) without the YOLOX/mmcv dependency chain. ByteTrack
+is class-agnostic, so every face detection is fed as class 0.
 
-Install with: `pip install supervision>=0.21`.
+Needs `pip install supervision>=0.21`.
 """
 from __future__ import annotations
 
@@ -64,8 +62,8 @@ class ByteTrackTracker(BaseFaceTracker):
 
         tracker = self._new_tracker(detections.fps)
 
-        # ByteTrack is stateful; feed frames in strict order even if some are
-        # empty, so the Kalman step advances correctly between hits.
+        # ByteTrack is stateful: feed frames in strict order even when empty,
+        # so the Kalman step advances correctly between hits.
         per_frame: Dict[int, List[Tuple[int, np.ndarray, float]]] = {}
         last_frame = max(detections.detections.keys(), default=-1)
         if detections.num_frames:

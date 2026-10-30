@@ -1,16 +1,4 @@
-/**
- * All app state, in one Zustand store.
- *
- * Zustand rather than a query library: there are six endpoints and one hot
- * path, so the cache-invalidation graph a query client exists to manage does
- * not exist here. What we do need — selector subscriptions, so a 1.5 s
- * progress tick does not re-render the speaker table — is exactly what
- * Zustand gives for ~1.2 kB.
- *
- * Fetching cadence is NOT here. `hooks/usePoll.ts` owns it, and calls the
- * `refresh*` actions below. That split is what makes a later swap to SSE a
- * one-hook change.
- */
+/** Application state and actions. Inputs are user or API values; selectors return derived UI state. */
 import { create } from 'zustand';
 import * as api from '../api';
 import type {
@@ -24,6 +12,7 @@ import type {
   Progress,
   Spec,
   SpeakerTable,
+  VideoTrack,
 } from '../api/types';
 import { ensureScriptFont } from '../lib/lang';
 import { normalizeState } from '../lib/format';
@@ -36,7 +25,6 @@ export interface Toast {
   action?: { label: string; run: () => void };
 }
 
-/** One speaker's staged, not-yet-applied changes. */
 export interface StagedChange {
   voice?: string | null;
   tone?: string | null;
@@ -47,110 +35,52 @@ export interface StagedChange {
 }
 
 interface State {
-  // -- job list ------------------------------------------------------------
+
   jobs: JobRow[];
   jobsLoaded: boolean;
   jobsError: string | null;
   search: string;
 
-  // -- selection -----------------------------------------------------------
   selected: string | null;
 
-  // -- the selected job's four payloads ------------------------------------
   progress: Progress | null;
   media: Media | null;
   speakers: SpeakerTable | null;
   spec: Spec | null;
   jobError: string | null;
 
-  // -- chrome --------------------------------------------------------------
-  specOpen: boolean;
   railOpen: boolean;
   theme: 'dark' | 'light';
   toggleTheme: () => void;
-  /**
-   * How much of the machinery the screen admits to.
-   *
-   * `user` is the default and hides the parts that only mean something to
-   * someone who knows the pipeline — raw run config, tracebacks, job ids,
-   * model names. `admin` shows them.
-   *
-   * This is PRESENTATION ONLY. It is not a permission: there is no auth in
-   * this app (removed 2026-10-25), every route is open to anyone who can
-   * reach the port, and a user can flip this switch themselves. Nothing
-   * server-side reads it, and nothing here should start doing so — a check
-   * a client can turn off is not a check.
-   */
-  mode: 'user' | 'admin';
-  toggleMode: () => void;
   shortcutsOpen: boolean;
-  /**
-   * Which video the player shows. `null` means "nobody has chosen" — the
-   * player then FOLLOWS THE DEFAULT, which is the lip-synced version
-   * wherever one exists and the original until it does.
-   *
-   * The three states are not two: an explicit `'original'` has to outrank
-   * the default, or the next poll after a render finishes would yank a
-   * user who deliberately went back to the original onto the lip-synced
-   * track. Null is what distinguishes "not chosen yet" from "chose the
-   * original".
-   */
-  /**
-   * What the edit agent can change, and what is staged over it.
-   *
-   * Lives in the store rather than inside the agent panel because the CAST
-   * TABLE needs it too: a gender/voice/tone change can arrive from the
-   * picker on a row (local, `staged` below) or from a sentence in the chat
-   * box (server-side, `pending.json`), and a row that reads only the first
-   * shows nothing at all for the second. One snapshot, one place, so the
-   * two renderings of a staged edit cannot disagree by a poll — which is
-   * the reason `/agent/params` is a single endpoint in the first place.
-   */
+
   agentParams: AgentParams | null;
   refreshAgentParams: () => Promise<AgentParams | null>;
-  /** `#/talking-head` — the still-portrait page. */
+
   talkingHead: boolean;
   setTalkingHead: (v: boolean) => void;
-  videoTrack: 'original' | 'lipsync' | null;
-  /**
-   * The active player's current time, in seconds. Pushed from the `<video>`'s
-   * `timeupdate` (~4×/sec) so the follow-along cue panel can light up the line
-   * being spoken. Shared through the store because the player and the cue
-   * panel are in different columns of the edit screen.
-   */
+
+  videoTrack: VideoTrack | null;
+
   videoTime: number;
-  /**
-   * A one-shot seek request: a clicked cue asks the player to jump to its
-   * start. The `nonce` is what makes clicking the SAME cue twice fire the
-   * effect again — a bare number would compare equal and be ignored.
-   */
+
+  videoPlayerHeight: number | null;
+  setVideoPlayerHeight: (h: number | null) => void;
+
   videoSeek: { t: number; nonce: number } | null;
-  /**
-   * What the edit workspace aims its actions at. A clicked cue or speaker row
-   * sets one of these; the quick actions then fold the selection into their
-   * phrasing ("cue 5: …", "SPEAKER_00: …") so no timestamp or id is typed.
-   *
-   * Mutually exclusive on purpose — one context at a time keeps "which actions
-   * are relevant" unambiguous. `setSelectedCue` clears the speaker and vice
-   * versa.
-   */
+
   selectedCue: string | null;
   selectedSpeaker: string | null;
   toasts: Toast[];
 
-  // -- edit history --------------------------------------------------------
   editHistory: EditHistory | null;
 
-  // -- staged voice/tone edits --------------------------------------------
   staged: Record<string, StagedChange>;
-  // Per-speaker cast mode for the post-MT gate. `select` pins the chosen
-  // gender/voice; `autodetect` (the default) lets the pipeline predict. Only
-  // read when `progress.milestones.awaiting_cast` is up.
+
   castMode: Record<string, 'autodetect' | 'select'>;
   editPlan: EditPlan | null;
   applying: boolean;
 
-  // -- actions -------------------------------------------------------------
   bootstrap: () => Promise<void>;
   refreshJobs: () => Promise<void>;
   selectJob: (id: string | null) => void;
@@ -159,13 +89,12 @@ interface State {
   refreshSpeakers: () => Promise<void>;
   refreshSpec: () => Promise<void>;
   setSearch: (s: string) => void;
-  toggleSpec: () => void;
   setRailOpen: (v: boolean) => void;
   setNewJobOpen: (v: boolean) => void;
   setShortcutsOpen: (v: boolean) => void;
   renameSpeaker: (speakerId: string, label: string) => Promise<void>;
-  /** A deliberate choice: it pins, and outranks the default from then on. */
-  setVideoTrack: (t: 'original' | 'lipsync') => void;
+
+  setVideoTrack: (t: VideoTrack) => void;
   setVideoTime: (t: number) => void;
   requestSeek: (t: number) => void;
   setSelectedCue: (id: string | null) => void;
@@ -184,26 +113,6 @@ interface State {
   applyStaged: () => Promise<void>;
 }
 
-const LS_SPEC = 'ds.specOpen';
-
-function readSpecOpen(): boolean {
-  try {
-    const v = localStorage.getItem(LS_SPEC);
-    if (v === null) return window.innerWidth >= 1536;
-    return v === '1';
-  } catch {
-    return false;
-  }
-}
-
-/**
- * `staged` -> the wire shape `POST /api/jobs/{id}/edits` takes.
- *
- * ONE entry per speaker carrying the fields that changed — not one entry per
- * field. `ui/routes_edits.py::_build_ops` reads `speaker_id` plus optional
- * `voice` / `tone` / `gender` off each item and builds one `EditOp` per
- * field present.
- */
 export function toPendingEdits(staged: Record<string, StagedChange>): PendingEdit[] {
   const out: PendingEdit[] = [];
   for (const [speaker, c] of Object.entries(staged)) {
@@ -226,20 +135,11 @@ export function toPendingEdits(staged: Record<string, StagedChange>): PendingEdi
   return out;
 }
 
-/**
- * The same changes, shaped for DISPLAY — one row per changed field, with the
- * previous value so the dialog can say "Kavya -> Amit".
- *
- * Deliberately separate from the wire type: the server does not need the
- * old value (it reads that from the job itself), and widening `PendingEdit`
- * to carry it would make the API type a description of this component
- * rather than of the endpoint.
- */
 export interface StagedDiff {
   speaker: string;
   field: 'voice' | 'tone' | 'gender';
   from: string | null;
-  /** null only for a tone reset — a voice is never cleared. */
+
   to: string | null;
 }
 
@@ -261,13 +161,6 @@ export function toStagedDiffs(staged: Record<string, StagedChange>): StagedDiff[
 
 const LS_THEME = 'ds.theme';
 
-/**
- * The saved theme, or the one the operating system asks for.
- *
- * Read in a try/catch because `localStorage` throws outright in a private
- * window and in some embedded webviews — a preference is not worth a blank
- * screen.
- */
 function readTheme(): 'dark' | 'light' {
   try {
     const v = localStorage.getItem(LS_THEME);
@@ -280,29 +173,11 @@ function readTheme(): 'dark' | 'light' {
   }
 }
 
-/** Sets the attribute `index.css` keys the light palette off. */
 export function applyTheme(theme: 'dark' | 'light'): void {
   document.documentElement.setAttribute('data-theme', theme);
   try {
     localStorage.setItem(LS_THEME, theme);
-  } catch {
-    /* preference only */
-  }
-}
-
-const LS_MODE = 'ds.mode';
-
-/**
- * The saved view mode. Defaults to `user`, so a fresh browser gets the
- * uncluttered screen and the technical detail is opted into rather than
- * out of. Same try/catch as `readTheme` and for the same reason.
- */
-function readMode(): 'user' | 'admin' {
-  try {
-    return localStorage.getItem(LS_MODE) === 'admin' ? 'admin' : 'user';
-  } catch {
-    return 'user';
-  }
+  } catch {}
 }
 
 let toastSeq = 1;
@@ -318,17 +193,16 @@ export const useStore = create<State>()((set, get) => ({
   speakers: null,
   spec: null,
   jobError: null,
-  specOpen: readSpecOpen(),
-  // The job list is navigation, so it starts open. The details panel is
-  // reference and remembers whatever the user last chose.
+
   railOpen: true,
   theme: readTheme(),
-  mode: readMode(),
   shortcutsOpen: false,
   agentParams: null,
   talkingHead: false,
   videoTrack: null,
   videoTime: 0,
+  videoPlayerHeight: null,
+  setVideoPlayerHeight: (h) => set({ videoPlayerHeight: h }),
   videoSeek: null,
   selectedCue: null,
   selectedSpeaker: null,
@@ -341,17 +215,10 @@ export const useStore = create<State>()((set, get) => ({
 
   async bootstrap() {
     await get().refreshJobs();
-    // The hash is the router: `#/job/<id>`. No react-router, no SPA
-    // catch-all route on the Python side.
+
     const fromHash = decodeURIComponent((location.hash.match(/^#\/job\/(.+)$/) ?? [])[1] ?? '');
     const jobs = get().jobs;
 
-    // `#/` and `#/new` are DESTINATIONS, not an absent hash. Falling back
-    // to `jobs[0]` on them made the landing page unreachable: the router
-    // cleared the selection on `#/`, then this re-selected the newest job
-    // a moment later when `refreshJobs()` resolved, so clicking the
-    // wordmark changed the hash and nothing else. Only a hash that names
-    // no destination at all gets the convenience pick.
     const atHome = location.hash === '#/' || location.hash === '#/new';
     const pick = (fromHash && jobs.some((j) => j.job_id === fromHash) && fromHash)
       || (atHome ? null : jobs[0]?.job_id)
@@ -382,8 +249,7 @@ export const useStore = create<State>()((set, get) => ({
       staged: {},
       castMode: {},
       editPlan: null,
-      // Back to following the default — the next job gets its own
-      // lip-synced-first treatment rather than inheriting this one's pin.
+
       videoTrack: null,
       videoTime: 0,
       videoSeek: null,
@@ -394,7 +260,7 @@ export const useStore = create<State>()((set, get) => ({
     const target = id ? `#/job/${encodeURIComponent(id)}` : '#/';
     if (location.hash !== target) history.replaceState(null, '', target);
     if (!id) return;
-    // Kick the four payloads off together; the pollers take over after.
+
     void get().refreshProgress();
     void get().refreshMedia();
     void get().refreshSpec();
@@ -410,7 +276,6 @@ export const useStore = create<State>()((set, get) => ({
       const before = get().progress;
       set({ progress: p, jobError: null });
 
-      // Side effects on a milestone FLIP, not on every poll.
       if (p.milestones?.lipsync_ready && !before?.milestones?.lipsync_ready) {
         void get().refreshMedia();
         get().pushToast({
@@ -426,16 +291,13 @@ export const useStore = create<State>()((set, get) => ({
       if (p.milestones?.diarization_done && !before?.milestones?.diarization_done) {
         void get().refreshSpeakers();
       }
-      // The MT gate. `refreshSpeakers` matters as much as the toast: the
-      // table has to re-fetch or it shows the pre-gate rows, without the
-      // gender stage 6b just predicted for them.
+
       if (p.milestones?.awaiting_cast && !before?.milestones?.awaiting_cast) {
         void get().refreshSpeakers();
         get().pushToast({
           kind: 'info',
           title: 'Translation complete — pick the voices to carry on',
-          body: 'Choose a voice for each speaker; nothing is spoken until you do. '
-              + 'Worth checking the translated lines while you are there.',
+          body: 'Choose a voice for each speaker;',
           action: {
             label: 'Go to the cast',
             run: () => document.getElementById('cast-panel')
@@ -474,9 +336,7 @@ export const useStore = create<State>()((set, get) => ({
     try {
       const m = await api.getMedia(id);
       if (get().selected === id) set({ media: m });
-    } catch {
-      /* media is optional; the centre column degrades to 'preparing' */
-    }
+    } catch {}
   },
 
   async refreshSpeakers() {
@@ -487,9 +347,7 @@ export const useStore = create<State>()((set, get) => ({
       if (get().selected !== id) return;
       ensureScriptFont(s.language);
       set({ speakers: s });
-    } catch {
-      /* no speaker table yet — the panel stays hidden */
-    }
+    } catch {}
   },
 
   async refreshSpec() {
@@ -498,20 +356,9 @@ export const useStore = create<State>()((set, get) => ({
     try {
       const s = await api.getSpec(id);
       if (get().selected === id) set({ spec: s });
-    } catch {
-      /* spec is reference, not required to run the page */
-    }
+    } catch {}
   },
 
-  /**
-   * Reload the agent's view of the job.
-   *
-   * Swallows its error on purpose. `/agent/params` 409s on a run that never
-   * reached MT — there is no merged transcript, so there is nothing to edit
-   * — and that is a normal state for a job still in its first stages, not a
-   * failure worth a banner. The panel that needs the data shows its own
-   * message; the cast table simply falls back to local staging.
-   */
   async refreshAgentParams() {
     const id = get().selected;
     if (!id) return null;
@@ -539,41 +386,18 @@ export const useStore = create<State>()((set, get) => ({
 
   setSearch: (s) => set({ search: s }),
 
-  toggleSpec() {
-    const next = !get().specOpen;
-    set({ specOpen: next });
-    try {
-      localStorage.setItem(LS_SPEC, next ? '1' : '0');
-    } catch {
-      /* private mode */
-    }
-    document.documentElement.classList.toggle('spec-open', next);
-  },
-
   setRailOpen: (v) => set({ railOpen: v }),
   toggleTheme: () => {
     const next = get().theme === 'dark' ? 'light' : 'dark';
     applyTheme(next);
     set({ theme: next });
   },
-  toggleMode: () => {
-    const next = get().mode === 'admin' ? 'user' : 'admin';
-    set({ mode: next });
-    try {
-      localStorage.setItem(LS_MODE, next);
-    } catch {
-      /* preference only */
-    }
-  },
-  // The new-dub form lives ON the landing page now, not in a dialog, so
-  // "open the new-job form" means "navigate home". Kept under the old
-  // name so every caller — the brand bar, the job rail, the failure card,
-  // the `N` shortcut — keeps working without each one learning the route.
+
   setNewJobOpen: (v) => {
     if (!v) return;
     if (location.hash !== '#/') location.hash = '#/';
     useStore.getState().selectJob(null);
-    // The link field is the first thing to do, so put the caret in it.
+
     setTimeout(() => {
       const el = document.querySelector<HTMLInputElement>('#start-url');
       el?.focus();
@@ -587,18 +411,6 @@ export const useStore = create<State>()((set, get) => ({
   setSelectedCue: (id) => set({ selectedCue: id, selectedSpeaker: null }),
   setSelectedSpeaker: (id) => set({ selectedSpeaker: id, selectedCue: null }),
 
-  /**
-   * Rename a speaker. Deliberately NOT part of the staged-edit machinery.
-   *
-   * `POST .../speakers/{id}/label` writes a job-local `speaker_labels.json`
-   * that nothing downstream reads, so a rename dirties no pipeline stage and
-   * must never show up in the pending bar or put work on the GPU. It is
-   * therefore written straight through, and the speaker table is patched
-   * optimistically so the row does not flicker back to `SPEAKER_01` while
-   * the request is in flight. On failure the optimistic value is rolled
-   * back and the toast says so — a rename that silently did not stick is
-   * the one outcome worse than an error.
-   */
   async renameSpeaker(speakerId, label) {
     const id = get().selected;
     const table = get().speakers;
@@ -688,31 +500,19 @@ export const useStore = create<State>()((set, get) => ({
     set({ castMode: { ...get().castMode, [speaker]: mode } });
   },
 
-  /**
-   * Submit the cast gate: for a job stopped after MT, run the post-MT stages
-   * with the chosen gender/voice. A speaker on `select` sends its staged (or
-   * current) gender and voice as an override; `autodetect` sends none, so the
-   * pipeline predicts it. Lip-sync stays a separate step.
-   */
   async cast() {
     const id = get().selected;
     const table = get().speakers;
     if (!id || !table) return;
     const staged = get().staged;
-    const modes = get().castMode;
     const payload: Record<string, CastSelection> = {};
     for (const sp of table.speakers) {
-      const mode = modes[sp.id] ?? 'autodetect';
-      if (mode === 'select') {
-        const st = staged[sp.id];
-        payload[sp.id] = {
-          mode,
-          gender: st?.gender !== undefined ? st.gender : sp.gender,
-          voice: st?.voice !== undefined ? st.voice : sp.voice,
-        };
-      } else {
-        payload[sp.id] = { mode: 'autodetect' };
-      }
+      const st = staged[sp.id];
+      payload[sp.id] = {
+        mode: 'select',
+        gender: st?.gender !== undefined ? st.gender : sp.gender,
+        voice: st?.voice !== undefined ? st.voice : sp.voice,
+      };
     }
     set({ applying: true });
     try {
@@ -742,18 +542,10 @@ export const useStore = create<State>()((set, get) => ({
     if (id) {
       try {
         await api.discardEdits(id);
-      } catch {
-        /* nothing was persisted server-side yet */
-      }
+      } catch {}
     }
   },
 
-  /**
-   * Stage the edits server-side and get the cost back. The quoted cost
-   * equals the applied cost only because this never asks for a retranslate:
-   * `set_voice` is deterministic and `set_tone` runs with
-   * `rewrite_text=False`, so no LLM is in the loop.
-   */
   async previewPlan() {
     const id = get().selected;
     if (!id) return null;
@@ -803,17 +595,6 @@ export const useStore = create<State>()((set, get) => ({
   },
 }));
 
-// --- helpers used in more than one place ------------------------------------
-
-/**
- * NOT a store selector, deliberately.
- *
- * `useStore(fn)` compares by reference, and a filter that builds a new array
- * on every call makes `useSyncExternalStore` re-render on every unrelated
- * store write — which, with a 1.5 s progress tick, means the rail re-renders
- * forever. Callers select `jobs` and `search` separately and wrap this in
- * `useMemo`.
- */
 export function filterJobs(jobs: JobRow[], search: string): JobRow[] {
   const q = search.trim().toLowerCase();
   if (!q) return jobs;
@@ -826,7 +607,6 @@ export function filterJobs(jobs: JobRow[], search: string): JobRow[] {
   );
 }
 
-/** Safe as a selector: returns a primitive. */
 export const selectStagedCount = (s: State): number => toStagedDiffs(s.staged).length;
 
 export const selectIsTerminal = (s: State): boolean => {

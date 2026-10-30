@@ -1,32 +1,18 @@
 """Bodhan Indic-Translate adapter.
 
 OpenAI-chat-shaped endpoint — POST /v1/chat/completions with
-`model=indic-translate`, `target_language_code`, `target_script`. One call
-per segment: the API is single-utterance, and segment-level translation is
-what the manifest contract wants (plan §3).
+`model=indic-translate`, `target_language_code` and `target_script`. One call
+per segment, since the API is single-utterance.
 
 Env (loaded from `.env`):
   BODHAN_MT_URL    (default: https://api.bodhan.ai/v1)
   BODHAN_MT_KEY    (required)
   BODHAN_MT_MODEL  (default: indic-translate)
 
-Target script is a knob the duration-adjustment and code-mix stages
-(§6, §7) read: "native" (Deva/Taml/…), "roman" (Latin), "codemix" (English
-technical terms kept in Latin inside the target-script sentence), or server
-default when `None`.
-
-`codemix` is the DEFAULT here. Two reasons, both measured on this corpus:
-
-  * `native` re-scripts inconsistently. On one 30 s Hindi clip of the NAG
-    lecture, "WT" came back as `डब्ल्यूटी` in one cue, `WT` in another and
-    `W` in a third -- the same term, three renderings, inside half a minute.
-    Downstream TTS does not reliably pronounce a bare Latin remnant, so that
-    inconsistency reaches the listener.
-  * Technical lecture material in Indian classrooms is genuinely spoken
-    code-mixed ("weight सही है", "derivative की गणना करें"). `codemix` is
-    closer to the source register than a fully re-scripted translation.
-
-Pass `target_script="native"` explicitly to get the old behaviour.
+`target_script` is "native", "roman", "codemix", or None for the server
+default. `codemix` is the default here: `native` re-scripts a technical term
+inconsistently across cues, and TTS does not reliably pronounce a bare Latin
+remnant. Pass `target_script="native"` for a fully re-scripted translation.
 """
 from __future__ import annotations
 
@@ -43,9 +29,9 @@ log = logging.getLogger(__name__)
 
 
 DEFAULT_MODEL = "indic-translate"
-# Applied when neither the request nor the call names a script. See the module
-# docstring for why this is `codemix` rather than the server default.
-DEFAULT_TARGET_SCRIPT = "codemix"
+# None means "let the server decide". A caller that wants a specific script
+# (UI toggle, CLI flag) passes it through; nothing is substituted here.
+DEFAULT_TARGET_SCRIPT: Optional[str] = None
 
 
 class BodhanMT(BodhanClientMixin, BaseMT):
@@ -104,8 +90,7 @@ class BodhanMT(BodhanClientMixin, BaseMT):
                 ))
                 continue
 
-            script = (req.target_script or target_script
-                      or DEFAULT_TARGET_SCRIPT)
+            script = req.target_script or target_script or DEFAULT_TARGET_SCRIPT
             translated = self._post_one(
                 text,
                 target_language=target_language,
@@ -124,7 +109,7 @@ class BodhanMT(BodhanClientMixin, BaseMT):
             model_name=self.model,
             source_language=source_language,
             target_language=target_language,
-            target_script=target_script or DEFAULT_TARGET_SCRIPT,
+            target_script=target_script or DEFAULT_TARGET_SCRIPT,  # may be None
             segments=segments,
             extra={"endpoint": self.base_url},
         )

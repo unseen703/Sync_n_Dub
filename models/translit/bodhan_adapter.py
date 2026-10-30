@@ -1,10 +1,8 @@
 """Bodhan Indic-Transliterate adapter.
 
-Same chat-shaped endpoint as MT, with `model=indic-transliterate`. Input and
-output are the same language — only `target_script` changes (plan §5; the
-`reference.py` snippet this used to cite was deleted on 2026-10-23, the live
-shape is in `_post_one` below). Falls back to the MT endpoint when a
-dedicated translit endpoint is not configured.
+The same chat-shaped endpoint as MT with `model=indic-transliterate`. Input
+and output are the same language; only `target_script` changes. Falls back to
+the MT endpoint when no dedicated one is configured.
 
 Env (loaded from `.env`):
   BODHAN_TRANSLIT_URL   (default: BODHAN_MT_URL or https://api.bodhan.ai/v1)
@@ -41,9 +39,8 @@ class BodhanTransliterate(BodhanClientMixin, BaseTransliterator):
         max_backoff_s: float = 60.0,
     ):
         super().__init__(device=device)
-        # Transliteration shares MT's host, and most installs only ever set
-        # the MT pair — so `BODHAN_MT_URL` / `BODHAN_MT_KEY` are accepted as
-        # the fallback for this service's own variables.
+        # Shares MT's host, and most installs only set the MT pair, so those
+        # variables are the fallback here.
         self._init_bodhan(
             env_prefix="TRANSLIT", default_model=DEFAULT_MODEL,
             base_url=base_url, api_key=api_key, model=model,

@@ -1,4 +1,4 @@
-"""Face-tracker registry — currently ByteTrack only (plan.md default)."""
+"""Face-tracker registry — ByteTrack only."""
 from __future__ import annotations
 
 from ..._registry import make_registry
@@ -9,7 +9,7 @@ _REGISTRY_SPEC: dict[str, tuple[str, str]] = {
 }
 
 # `pass_device=False`: a tracker is pure geometry over boxes the detector
-# already produced, so `get_tracker` has no `device` parameter at all.
+# already produced, so `get_tracker` takes no `device` at all.
 _registry = make_registry(
     package=__name__,
     spec=_REGISTRY_SPEC,

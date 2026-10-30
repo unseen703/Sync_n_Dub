@@ -1,28 +1,16 @@
 """System-wide memory checks for the lip-sync stages.
 
-Both vendored models load every frame of their input into RAM --
-MuseTalk's `read_imgs()`, Wav2Lip's `full_frames.append(frame)` -- so
-resident memory is `frames x width x height x 3` and grows without bound
-in clip length. Measured on this host: MuseTalk is 5.87 GiB + 6.14
-MiB/frame at 1080p, putting a 7-minute clip at ~70 GiB against 62 GiB of
-system RAM.
+The vendored models load every frame into RAM, so resident memory is
+`frames x width x height x 3` and grows without bound in clip length — a
+few minutes of 1080p exceeds this host's 62 GiB. Segmenting bounds that
+normally; these checks are the backstop for what it does not cover.
 
-Segmenting bounds that in the normal case. These checks are the backstop
-for what it does not cover: a source that slipped past the resolution cap,
-a neighbour's job growing underneath ours, a wrong duration probe.
+Reads `MemAvailable`, not `MemFree`: these renders generate gigabytes of
+reclaimable page cache, so `MemFree` would read a healthy host as full.
 
-**`MemAvailable`, not `MemFree`.** Page cache is reclaimable, and these
-renders generate a lot of it -- MuseTalk writes every frame to disk as PNG
-before reading it back, ~10 GB for a 2-minute 1080p segment. Measuring
-with `MemFree` would read a healthy host as nearly full and refuse good
-runs. `MemAvailable` is the kernel's own estimate of what a new allocation
-could actually get, which is the question being asked.
-
-The in-render, per-batch check is NOT here: MuseTalk runs in its own conda
-env with its own `sys.path`, so it cannot import this module. That check
-is a self-contained patch in `third_party/MuseTalk/scripts/inference.py`
-and reads `/proc/meminfo` the same way. The two must agree on
-`DUBBING_MEM_GUARD_PCT`, which is why both read the same variable.
+The in-render per-batch check lives in the vendored inference script, which
+runs in its own env and cannot import this. Both read
+`DUBBING_MEM_GUARD_PCT` so the two agree.
 """
 from __future__ import annotations
 
@@ -33,9 +21,9 @@ from typing import Optional
 
 log = logging.getLogger(__name__)
 
-#: Treat the host as out of memory at this share in use. 95 by request
-#: (2026-10-20). Override with `DUBBING_MEM_GUARD_PCT`; 0 disables.
-#: `third_party/MuseTalk/scripts/inference.py` reads the same variable.
+#: Treat the host as out of memory at this share in use. Override with
+#: `DUBBING_MEM_GUARD_PCT`; 0 disables. The vendored inference script reads
+#: the same variable.
 DEFAULT_LIMIT_PCT = float(os.getenv("DUBBING_MEM_GUARD_PCT", "95") or 95)
 
 _MEMINFO = Path("/proc/meminfo")
@@ -44,8 +32,8 @@ _MEMINFO = Path("/proc/meminfo")
 def memory_snapshot() -> dict:
     """`{total_gib, available_gib, used_pct}`, or an empty dict.
 
-    Returns {} rather than raising on a host without /proc/meminfo: a
-    memory check must never itself be the reason a render fails.
+    Returns {} rather than raising without /proc/meminfo — a memory check must
+    never itself be why a render fails.
     """
     try:
         fields = {}

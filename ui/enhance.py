@@ -1,27 +1,8 @@
 """Stage 9i from the UI — "Enhance resolution" on a finished render.
 
-The same shape as `POST .../lipsync` on a draft job: a thing the pipeline
-genuinely has a step for, which is not part of a submission because it
-cannot run until a render exists. The progress ribbon draws it as a
-`deferred` pill so a job that has not been enhanced reads as "has not had
-its turn" rather than "will never have it".
-
-Three things here are deliberate:
-
-1. **A background THREAD plus a poll endpoint**, matching
-   `ui/talking_head.py` and `ui/bbox_video.py`. Measured 2026-10-22: the
-   ungated pass was 1156 s on 1500 frames. Even gated and split over two
-   GPUs that is minutes, which is long enough that an inline request dies to
-   a browser timeout while the GPU work carries on.
-
-2. **`readiness()` returns the blockers, not a boolean.** The button's
-   disabled state and its tooltip both come from the server, so they cannot
-   drift from what the POST actually enforces -- the lesson
-   `lipsync_readiness` already encodes.
-
-3. **The FILE is the arbiter in `status()`**, not the stored state. A killed
-   worker leaves a stale `running` that would otherwise be polled forever,
-   and `done` with no mp4 is the failure CLAUDE.md S4 records twice over.
+Runs the restoration pass in a background thread with a poll endpoint, since
+it takes minutes. `readiness()` returns the blockers the POST enforces, and
+`status()` treats the output file as the arbiter rather than the stored state.
 """
 from __future__ import annotations
 
@@ -37,13 +18,71 @@ log = logging.getLogger(__name__)
 
 STATUS_NAME = "STATUS.json"
 
-#: Measured on this host 2026-10-22, 1080p, GFPGAN face-enhance only:
-#: 1156 s / 1500 frames ungated. A gated pass restores roughly 15-30% of
-#: frames on dialogue footage and passes the rest through at decode cost.
-SEC_PER_RESTORED_FRAME = 0.77
+#: Per-WORKER cost of one restored frame at 1080p, GFPGAN face-enhance only.
+#:
+#: Measured 2026-10-28 on job 20261026-120224, two shards of the same video:
+#: 0.356 s/frame and ~0.43. The SLOWER one is the number to use, because a
+#: run ends when its last shard does — a mean under-estimates every run, and
+#: the gap here is content rather than noise (the fast shard had 669 frames
+#: with no face detected, and those skip the expensive half).
+#:
+#: The old 0.77 was a whole-run wall divided by frames, which folded the
+#: serial work below into a term that then got divided by the worker count.
+SEC_PER_RESTORED_FRAME = 0.43
 SEC_PER_PASSED_FRAME = 0.02
+
+#: Per-frame cost of the work that does NOT parallelise: the diff that
+#: builds the mask (gated runs only), then the concat, the audio remux and
+#: the decode-check. Same job: 2093 s wall against ~1620 s of worker time,
+#: so roughly 470 s of serial work over 7497 frames.
+SEC_PER_SERIAL_FRAME = 0.063
+
 #: Three networks per worker (RetinaFace resnet50, GFPGAN v1.4, ParseNet).
 STARTUP_S = 40.0
+
+#: What a SECOND worker on an already-busy card is worth. One per GPU held
+#: both cards at ~84% utilisation, so the next one fills gaps rather than
+#: doubling throughput. Not measured directly yet — which is part of why
+#: this function returns a band and not a number.
+EXTRA_WORKER_EFFICIENCY = 0.6
+
+#: Mirrors `routes_enhance.start_enhance`'s default. Two copies because the
+#: UI never sends `workers_per_gpu`, and an estimate computed for a
+#: different split than the one that will run is worse than no estimate.
+DEFAULT_WORKERS_PER_GPU = 2
+
+
+def _n_gpus() -> int:
+    """GPUs a run will spread over.
+
+    `backend/face_enhance.py` counts them with torch inside the same
+    `dubbing` env (basicsr / gfpgan / facexlib / realesrgan were folded in
+    on 2026-10-30); `visible_cuda_devices` is the canonical count on this
+    side and honours `CUDA_VISIBLE_DEVICES` the same way, so the two agree.
+    """
+    try:
+        from backend.gpu import visible_cuda_devices
+        return len(visible_cuda_devices()) or 1
+    except Exception:                                     # noqa: BLE001
+        return 1
+
+
+def default_workers() -> int:
+    """How many workers a UI submission will actually start."""
+    return max(1, _n_gpus()) * DEFAULT_WORKERS_PER_GPU
+
+
+def effective_workers(workers: int) -> float:
+    """`workers`, discounted for the ones sharing a card.
+
+    One per GPU scales; each one beyond that is worth
+    `EXTRA_WORKER_EFFICIENCY`. A float because it is a divisor, not a count.
+    """
+    workers = max(1, int(workers))
+    gpus = max(1, _n_gpus())
+    on_own_card = min(workers, gpus)
+    return on_own_card + (workers - on_own_card) * EXTRA_WORKER_EFFICIENCY
+
 
 _LOCKS: Dict[str, threading.Lock] = {}
 
@@ -83,9 +122,9 @@ def status(job_root: Path) -> Dict[str, Any]:
         doc["state"] = "failed"
         doc.setdefault("error", "reported done but no video on disk")
     if doc.get("state") == "running":
-        # A worker killed mid-run never writes a terminal state. Nothing here
-        # can distinguish that from a slow render except time, so this is a
-        # ceiling rather than a liveness check.
+        # A worker killed mid-run never writes a terminal state, and nothing
+        # here can tell that from a slow render except time. A ceiling, not a
+        # liveness check.
         stale_after = float(doc.get("expected_s") or 1800) * 4 + 600
         if time.time() - float(doc.get("started_at") or 0) > stale_after:
             doc["state"] = "failed"
@@ -96,15 +135,11 @@ def status(job_root: Path) -> Dict[str, Any]:
 def resolve_render(job_root: Path, render: Optional[str]) -> Optional[Path]:
     """The render to enhance: the one asked for, else the newest.
 
-    An id is matched against the job's own list rather than joined onto a
-    path -- `Path / ".."` is not a string operation, and a request naming a
-    file outside the job must not read it.
-
-    Ids are DIRECTORY-QUALIFIED (`lipsync_asd/x.mp4`), not bare names. A
-    job that has been A/B'd holds the same stem in both `lipsync/` and
-    `lipsync_asd/` -- job 20261022-070010 has exactly that -- so a bare
-    name picks one of the two arbitrarily, and the arm you get back is the
-    one thing an A/B cannot be vague about.
+    The id is matched against the job's own list rather than joined onto a
+    path, so a request naming a file outside the job cannot read it. Ids are
+    directory-qualified (`lipsync_asd/x.mp4`): an A/B'd job holds the same stem
+    in both `lipsync/` and `lipsync_asd/`, and a bare name would pick an arm
+    arbitrarily.
     """
     from backend.restore import find_render, list_renders
 
@@ -146,42 +181,55 @@ def _render_facts(job_root: Path, render: Optional[str] = None) -> Dict[str, Any
             "frames": _decoded_frames(render)}
 
 
-def estimate_seconds(frames: int, *, gated: bool, workers: int = 2,
+def estimate_seconds(frames: int, *, gated: bool, workers: Optional[int] = None,
                      scale: str = "same") -> Optional[list]:
     """`[low, high]` seconds, or None when the frame count is unknown.
 
-    A band, not a number: the gated share depends on how much of the clip
-    has a confirmed speaking face, which is 15.7% on one measured job and
-    29% on another window of the same job.
+    A band, not a number, because the two biggest terms are both unknown
+    before the run:
+
+    * **How much the gate actually skips depends on the lip-sync model.**
+      MuseTalk leaves whole frames untouched and gates down to 15-30%.
+      LatentSync re-encodes every frame, so the diff finds ~99% changed and
+      the gate saves nothing — measured 7422 of 7497 on job 20261026-120224.
+      The low end is the MuseTalk case, the high end is LatentSync.
+    * **Workers beyond one per card share it.** See `effective_workers`.
     """
     if not frames or frames <= 0:
         return None
-    w = max(1, workers)
+    w = effective_workers(workers if workers else default_workers())
     if gated:
-        shares = (0.10, 0.35)
+        shares = (0.15, 1.0)
     else:
         shares = (1.0, 1.0)
     out = []
     for s in shares:
         restored = frames * s
         passed = frames - restored
-        secs = (restored * SEC_PER_RESTORED_FRAME
-                + passed * SEC_PER_PASSED_FRAME) / w + STARTUP_S
+        # The serial term is OUTSIDE the division on purpose: the mask diff,
+        # the concat and the remux run once however many workers there are,
+        # and folding them into the per-frame cost is what made the old
+        # estimate scale the wrong way with the worker count.
+        gpu_work = (restored * SEC_PER_RESTORED_FRAME
+                    + passed * SEC_PER_PASSED_FRAME)
         if scale not in ("same", "1x"):
-            # bg_upsample turns on, and Real-ESRGAN over a whole frame
-            # measured 10.9 s/frame at 1080p. Order of magnitude, not a
-            # promise.
-            secs *= 12
-        out.append(int(round(secs)))
+            # bg_upsample turns on, and Real-ESRGAN over a whole frame runs
+            # ~10.9 s/frame at 1080p. Order of magnitude, not a promise.
+            # It multiplies the GPU work only — the mask diff and the remux
+            # cost the same whatever size the frames come out.
+            gpu_work *= 12
+        out.append(int(round(gpu_work / w
+                             + frames * SEC_PER_SERIAL_FRAME
+                             + STARTUP_S)))
     return out
 
 
 def readiness(job_root: Path, render: Optional[str] = None) -> Dict[str, Any]:
     """Everything the Enhance resolution control needs, in one read.
 
-    `renders` lists every lip-sync output in the job so the operator can
-    choose. Restoration is model-agnostic -- it never reads which adapter
-    drew the mouths -- so which render to clean is a choice, not a lookup.
+    `renders` lists every lip-sync output in the job: restoration never reads
+    which adapter drew the mouths, so which render to clean is a choice rather
+    than a lookup.
     """
     job_root = Path(job_root)
     facts = _render_facts(job_root, render)
@@ -192,8 +240,8 @@ def readiness(job_root: Path, render: Optional[str] = None) -> Dict[str, Any]:
     elif not facts.get("frames") or facts["frames"] <= 0:
         blockers.append("The lip-sync render does not decode.")
 
-    # Staged edits would mean enhancing audio-and-video from before the
-    # review. `routes_edits.run_lipsync_now` refuses for the same reason.
+    # Staged edits would mean enhancing video from before the review;
+    # `routes_edits.run_lipsync_now` refuses for the same reason.
     pending = job_root / "edits" / "pending.json"
     if pending.is_file():
         try:
@@ -241,7 +289,11 @@ def start(job_root: Path, *, strength: float = 1.0, gated: bool = True,
 
     facts = _render_facts(job_root, render)
     frames = facts.get("frames") or 0
-    est = estimate_seconds(frames, gated=gated, scale=scale)
+    # The split this run will actually use, not the default. `expected_s`
+    # feeds the stale-worker ceiling in `status()`, so an estimate for a
+    # narrower split than the one running would call a healthy pass dead.
+    workers = (max(1, _n_gpus()) * workers_per_gpu) if workers_per_gpu else None
+    est = estimate_seconds(frames, gated=gated, scale=scale, workers=workers)
 
     def _run():
         try:

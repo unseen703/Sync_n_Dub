@@ -1,15 +1,13 @@
-"""MediaPipe face detector.
+"""MediaPipe face detector: fast, CPU-only, bbox-oriented.
 
-Fast, CPU-friendly, bbox-only. The default model_selection=1 ("full range")
-handles faces up to a few metres from the camera, which matches lecture and
-interview footage better than the short-range default.
+`model_selection=1` ("full range") handles faces a few metres from the camera,
+which suits lecture and interview footage.
 
-MediaPipe landmarks are *6*-point (two eyes, nose tip, mouth centre, two ear
-tragions). We project them onto the 5-point convention the rest of the stack
-expects (right eye, left eye, nose, right mouth, left mouth), with the mouth
-corners duplicated from the mouth-centre point — not a real localisation, but
-good enough for IoU-based tracking; use RetinaFace when landmarks matter
-(e.g. alignment for TalkNet).
+MediaPipe emits SIX landmarks (two eyes, nose, mouth centre, two ear tragions)
+and they are projected onto the 5-point convention the rest of the stack
+expects, with both mouth corners duplicated from the mouth centre. That is
+fine for IoU tracking but is not a real localisation — use RetinaFace where
+landmarks matter.
 """
 from __future__ import annotations
 
@@ -137,8 +135,8 @@ class MediaPipeDetector(BaseFaceDetector):
             if score < min_score:
                 continue
             rel = det.location_data.relative_bounding_box
-            # Clip to frame; MediaPipe sometimes returns boxes extending past
-            # the frame edge on partial faces.
+            # Clip to frame: MediaPipe returns boxes past the edge on partial
+            # faces.
             x1 = max(0.0, rel.xmin) * width
             y1 = max(0.0, rel.ymin) * height
             x2 = min(1.0, rel.xmin + rel.width) * width

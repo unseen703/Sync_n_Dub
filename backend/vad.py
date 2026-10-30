@@ -1,19 +1,8 @@
-"""Speech / internal-pause segmentation of a wav, clip-relative.
+"""Speech and internal-pause segmentation of a wav, clip-relative.
 
-Lifted out of `backend/eval/reference.py` on 2026-10-28, when the eval
-package was deleted with WhisperX. Nothing here was ever part of the
-evaluation harness — `backend.pause_absorb` calls `vad()` on every warp-plan
-run to find the gaps a dub is allowed to absorb — it just happened to live
-next to the scoring code because the golden-reference builder wrote the same
-segmentation to disk.
-
-Two backends, and which one answered is always in the result. pyannote and
-the energy VAD have different operating points, so a silent fallback would
-make one clip incomparable to the rest.
-
-pyannote ships no standalone VAD checkpoint: its segmentation model is a
-file inside the cached diarization bundle, resolved through the HF cache and
-never the network, so this works offline.
+`backend.pause_absorb` calls `vad()` on every warp-plan run to find the gaps a
+dub may absorb. Two backends, and which one answered is always in the result,
+since they have different operating points.
 """
 from __future__ import annotations
 
@@ -39,9 +28,8 @@ class VadResult:
     speech: List[Tuple[float, float]]
     pauses: List[Tuple[float, float]]
     min_pause_s: float
-    # `backend` is load-bearing: pyannote and the energy VAD have different
-    # operating points, so a silent fallback makes that clip incomparable to
-    # the rest of the sweep.
+    # Load-bearing: the two backends have different operating points, so a
+    # silent fallback would make this clip incomparable to the rest.
     backend: str = "unknown"
     min_speech_s: float = 0.0
     duration_s: float = 0.0
@@ -60,9 +48,8 @@ class VadResult:
             "n_pauses": len(self.pauses),
             "speech_s": round(total_speech, 4),
             "speech_frac": round(total_speech / self.duration_s, 4) if self.duration_s else None,
-            # Pauses are INTERNAL gaps only. Leading/trailing silence is
-            # reported separately -- a clip boundary is not a pause the dub
-            # has to reproduce.
+            # Pauses are INTERNAL gaps only; a clip boundary is not a pause
+            # the dub has to reproduce, so edge silence is reported separately.
             "lead_silence_s": round(self.speech[0][0], 4) if self.speech else None,
             "tail_silence_s": (round(self.duration_s - self.speech[-1][1], 4)
                                if self.speech and self.duration_s else None),
@@ -86,8 +73,7 @@ def _pyannote_vad_pipeline(min_speech_s: float, min_pause_s: float):
     """Build the pyannote VAD pipeline from the cached diarization bundle.
 
     Raises on failure; `vad()` turns that into the energy fallback and records
-    the reason. Cached -- the checkpoint costs ~2 s to load and a sweep calls
-    this once per track per clip.
+    why. Cached, since the checkpoint costs ~2 s to load.
     """
     from huggingface_hub import try_to_load_from_cache
 
@@ -102,8 +88,8 @@ def _pyannote_vad_pipeline(min_speech_s: float, min_pause_s: float):
 
     model = Model.from_pretrained(ckpt)
     pipe = VoiceActivityDetection(segmentation=model)
-    # pyannote's knobs map 1:1: `min_duration_off` fills shorter gaps,
-    # `min_duration_on` drops shorter speech.
+    # `min_duration_off` fills shorter gaps, `min_duration_on` drops shorter
+    # speech.
     pipe.instantiate({"min_duration_on": min_speech_s, "min_duration_off": min_pause_s})
     try:
         import torch
@@ -125,11 +111,8 @@ def _vad_pyannote(wav: Path, *, min_pause_s: float, min_speech_s: float
 
 def _vad_energy(wav: Path, *, min_pause_s: float, min_speech_s: float,
                 thresh_db: float = -38.0) -> List[Tuple[float, float]]:
-    """10 ms frame-energy VAD.
-
-    The same operating point `scripts/select_clips.py` used to pick the clips,
-    so a fallback stays consistent with selection.
-    """
+    """10 ms frame-energy VAD, at the same operating point
+    is used downstream to pick clips."""
     np = _require("numpy")
     librosa = _require("librosa")
     hop = 160                                   # 10 ms at 16 kHz
@@ -161,10 +144,10 @@ def _vad_energy(wav: Path, *, min_pause_s: float, min_speech_s: float,
 
 def vad(wav: Path, *, min_pause_s: float = 0.25, min_speech_s: float = 0.20,
         backend: str = "auto") -> VadResult:
-    """Speech / internal-pause segmentation of `wav`, clip-relative.
+    """Speech and internal-pause segmentation of `wav`, clip-relative.
 
-    `backend`: "auto" (pyannote, else energy), "pyannote", or "energy".
-    The backend that actually produced the answer is always in the result.
+    `backend` is "auto" (pyannote, else energy), "pyannote" or "energy"; the
+    one that actually answered is always in the result.
     """
     wav = Path(wav)
     try:

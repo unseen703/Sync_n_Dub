@@ -1,19 +1,4 @@
-/**
- * Stand-ins for the endpoints that do not exist on the server yet.
- *
- * `POST /api/youtube/probe`, `POST /api/jobs`, `POST /api/jobs/{id}/cancel`
- * and the four `/edits` routes are being written in parallel. Without these
- * every button in the new-job flow and the speaker table would 404, so the
- * app could not be built or reviewed until track A landed.
- *
- * The important rule: a mocked mutation must never *look* like a real one.
- * `isMocked()` drives a visible amber "demo" chip on every control that
- * routes here, because an Apply button that reports success while nothing
- * re-rendered is worse than a disabled one.
- *
- * Full-mock mode (`VITE_MOCK=all`) also fakes the read path, so the UI can
- * be worked on with no Python server running at all.
- */
+/** In-browser API substitute for development. Inputs mirror the live client; outputs are deterministic sample data. */
 import type {
   ApplyResult,
   CreateJobRequest,
@@ -33,10 +18,6 @@ import type {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-// ---------------------------------------------------------------------------
-// mutations
-// ---------------------------------------------------------------------------
-
 const YT_ID = /(?:v=|youtu\.be\/|\/shorts\/|\/embed\/)([A-Za-z0-9_-]{11})/;
 
 export async function probeYouTube(url: string): Promise<ProbeResult> {
@@ -53,12 +34,12 @@ export async function probeYouTube(url: string): Promise<ProbeResult> {
     thumbnail_url: null,
     live_status: null,
     webpage_url: `https://www.youtube.com/watch?v=${m[1]}`,
-    // One preset since 2026-10-20, and it does not lip-sync.
+
     estimates: {
       dub: { low_s: 90, high_s: 150, text: 'about 2 minutes',
              basis: 'Mocked.', label: 'Dub the audio', note: 'Audio only' },
     },
-    // Quoted separately, because lip-sync is a second submission.
+
     lipsync_estimates: {
       wav2lip: { low_s: 2900, high_s: 5800, text: 'about 48 to 97 minutes',
                  basis: 'Mocked.', label: 'wav2lip', note: '3-5x' },
@@ -69,7 +50,6 @@ export async function probeYouTube(url: string): Promise<ProbeResult> {
   };
 }
 
-/** Jobs created in mock mode are remembered so the rail can show them. */
 const invented: CreateJobResult[] = [];
 
 export async function uploadVideo(file: File): Promise<UploadResult> {
@@ -123,17 +103,8 @@ export async function cancelJob(id: string) {
   return { job_id: id, state: 'cancelled' };
 }
 
-// ---------------------------------------------------------------------------
-// edits — staged in memory, costed with the plan's stage list
-// ---------------------------------------------------------------------------
-
 const staged = new Map<string, PendingEdit[]>();
 
-/**
- * `set_voice` dirties from "voices" onward and stage 9e has no per-speaker
- * incremental mode, so a one-speaker change still re-synthesises the whole
- * track. The dialog says so rather than quoting a cheaper number.
- */
 function plan(id: string): EditPlan {
   const pending = staged.get(id) ?? [];
   const n = pending.length;
@@ -199,10 +170,6 @@ export async function applyEdits(id: string): Promise<ApplyResult> {
     rerun: { launched: true, pid: 12345 },
   };
 }
-
-// ---------------------------------------------------------------------------
-// read path — only used when VITE_MOCK=all
-// ---------------------------------------------------------------------------
 
 const MOCK_JOBS: JobList = {
   jobs: [
@@ -277,7 +244,7 @@ for (const j of MOCK_JOBS.jobs) {
     updated_at: new Date().toISOString(),
     current: running ? '9e' : null,
     error: failed ? 'ASR failed: no speech detected in the first 90 s of the clip.' : null,
-    // The UI renders `failure`, never `error`. `ui/errors.py` produces it.
+
     failure: failed
       ? {
           title: 'The job failed',
@@ -302,7 +269,7 @@ for (const j of MOCK_JOBS.jobs) {
     pct: j.state === 'done' ? 100 : failed ? 44 : 62,
     source: 'progress.json',
   };
-  // Fold into the same coarse pills `ui/progress.py::PHASE_GROUPS` uses.
+
   const groups: Array<[string, string, string[]]> = [
     ['prepare', 'Prepare', ['1', '2']],
     ['translate', 'Translate', ['4', '7', '9']],
@@ -329,9 +296,7 @@ for (const j of MOCK_JOBS.jobs) {
       substages: subs,
     };
   });
-  // The server appends a synthetic `Finished` pill on every read, so the mock
-  // has to as well -- without it the dev bar is four pills where the real one
-  // is five, and the ribbon's own end-state logic goes untested.
+
   const complete = phases.every((ph) => ph.state === 'done' || ph.state === 'skipped')
     && !phases.some((ph) => ph.substages.some((s) => s.state === 'pending' && s.deferred));
   phases.push({
@@ -375,8 +340,14 @@ export async function getMedia(id: string): Promise<Media> {
     video: {
       original: mk('Original', 'clip.mp4', 41_200_000),
       lipsync: done ? mk('Lip-synced', 'clip.musetalk.lipsync.mp4', 46_800_000) : null,
+      // Stage 9i is never part of a submission, so the mock's "finished"
+      // job does not have one either — `done` means the pipeline ran, not
+      // that someone chose to enhance afterwards. Flip this to `mk(...)` to
+      // exercise the third track.
+      enhanced: null,
       dubbed_no_lipsync: done ? mk('Dubbed (no lip-sync)', 'clip.dubbed.mp4', 44_100_000) : null,
       lipsync_warning: null,
+      enhanced_warning: null,
     },
     audio: {
       original: mk('Original audio', 'clip.16k.mono.wav', 8_400_000, {
@@ -437,7 +408,7 @@ export async function getSpeakers(id: string): Promise<SpeakerTable> {
       {
         id: 'SPEAKER_00', label: 'Prof. Mitra', speech_s: 252.4, n_segments: 38,
         gender: 'female', voice: 'Kavya', voice_source: 'assigned', voice_score: 0.81,
-        // The server really does send a dict here, not a sentence.
+
         voice_rationale: { gender_match: 1.0, embed_cos: 0.81 },
         tone: 'educational lecture', reference_url: null, color: '#6366f1',
       },
@@ -448,7 +419,7 @@ export async function getSpeakers(id: string): Promise<SpeakerTable> {
       },
       {
         id: 'SPEAKER_02', label: null, speech_s: 18.5, n_segments: 5,
-        // No gender recorded — the picker must still offer every voice.
+
         gender: null, voice: null, voice_source: null, voice_score: null,
         voice_rationale: null, tone: null, reference_url: null, color: '#f59e0b',
       },
@@ -475,13 +446,11 @@ export async function getSpec(id: string): Promise<Spec> {
     title: MOCK_JOBS.jobs.find((j) => j.job_id === id)?.title ?? null,
     thumbnail_url: null,
     lines: [
-      { key: 'source', label: 'Source', value: 'YouTube · youtube.com/watch?v=svwrTOm55y4', hint: null, tone: 'default' },
       { key: 'part', label: 'Part dubbed', value: '3:42 – 7:24 of 12:05', hint: null, tone: 'default' },
       { key: 'language', label: 'Dubbing into', value: 'Hindi (हिन्दी)', hint: null, tone: 'default' },
-      { key: 'script', label: 'Script', value: 'Target language, English terms kept in English', hint: 'Technical terms and acronyms stay in Latin script, the way they are actually spoken', tone: 'default' },
       { key: 'speakers', label: 'Speakers found', value: '2', hint: null, tone: 'default' },
-      { key: 'voices', label: 'Voices from', value: 'Microsoft Edge voices', hint: null, tone: 'default' },
-      { key: 'tone', label: 'Tone control', value: 'Not available with Microsoft Edge voices', hint: 'Only the Bodhan voices accept a delivery style.', tone: 'warn' },
+      { key: 'voices', label: 'Voices from', value: 'Bodhan indic speak', hint: null, tone: 'default' },
+      { key: 'tone', label: 'Tone control', value: 'educational lecture ', hint: 'Only the Bodhan voices accept a delivery style.', tone: 'warn' },
       { key: 'lipsync', label: 'Lip-sync', value: 'On — MuseTalk', hint: null, tone: 'default' },
       { key: 'started', label: 'Started', value: '12 minutes ago', hint: null, tone: 'default' },
     ],
@@ -498,8 +467,7 @@ export async function getOptions(_tts?: string): Promise<Options> {
       { code: 'bn', english: 'Bengali', native: 'বাংলা', script: 'beng', font: 'Noto Sans Bengali' },
       { code: 'te', english: 'Telugu', native: 'తెలుగు', script: 'telu', font: 'Noto Sans Telugu' },
     ],
-    // One row, matching the real `/api/options`: the form states the engine
-    // rather than offering a choice of engine.
+
     default_source_language: 'en',
     styles: [
       { value: 'TV style news', label: 'TV-style news' },
@@ -511,16 +479,14 @@ export async function getOptions(_tts?: string): Promise<Options> {
       { id: 'bodhan', label: 'Bodhan Indic voices', supports_tone: true,
         note: '22 Indian languages · a distinct voice per speaker' },
     ],
-    // No `auto` row. The model is named by the operator at the lip-sync
-    // step, against the face size that run measured — "Choose for me" is
-    // exactly the automatic selection that was removed.
+
     lipsync_models: [
       { id: 'wav2lip', label: 'Wav2Lip', speed: '3–5× clip length' },
-      { id: 'musetalk', label: 'MuseTalk', speed: '8–21× clip length' },
+      { id: 'musetalk', label: 'MuseTalk', speed: '5-8× clip length' },
     ],
     limits: {
       max_lipsync_s: 1200,
-      note: 'Lip-sync is capped at 20 minutes of video. It runs at 3–21× the clip length on this machine’s GPUs, so a longer clip means hours.',
+      note: 'Lip-sync is capped at 20 minutes of video. It runs at 3–8× the clip length on this machine’s GPUs, so a longer clip means hours.',
     },
   };
 }

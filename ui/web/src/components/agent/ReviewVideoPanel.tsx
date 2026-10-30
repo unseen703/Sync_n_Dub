@@ -5,23 +5,9 @@ import { IconAlert, IconSpinner } from '../ui/Icons';
 import * as api from '../../api';
 import type { ReviewVideoStatus } from '../../api';
 
-/**
- * The ASD review ("bbox") video: who the pipeline thought was speaking, drawn
- * on the clip — one box per tracked face per frame, green for the speaker the
- * render used, red for the rest, grey where nothing is known.
- *
- * It is read off disk (`faces/*.npz` + `asd/*.assignments.json`), never a
- * fresh detection pass, so it shows what the run decided rather than what
- * today would decide. The render is a full decode + composite — minutes at
- * 1080p — so the POST returns at once and this polls the GET, the same shape
- * EnhancePanel uses.
- *
- * Download, not inline playback: the renderer writes mp4v (`cv2.VideoWriter`
- * has no H.264 in this build), which VLC/mpv play but browsers will not. So we
- * hand the operator the file rather than a `<video>` that stays blank.
- */
 const POLL_MS = 3000;
 
+/** Speaker-detection review video controls. Input: job id. Output: render status and download link. */
 export function ReviewVideoPanel({ jobId }: { jobId: string }) {
   const [status, setStatus] = useState<ReviewVideoStatus | null>(null);
   const [busy, setBusy] = useState(false);
@@ -38,8 +24,6 @@ export function ReviewVideoPanel({ jobId }: { jobId: string }) {
 
   useEffect(() => { void load(); }, [load]);
 
-  // Poll only while a render is running — the job page stays open for a long
-  // time and a finished render should not keep a timer alive.
   useEffect(() => {
     if (status?.state !== 'running') {
       if (timer.current) { window.clearInterval(timer.current); timer.current = null; }

@@ -5,24 +5,6 @@ import { Tooltip } from '../ui/Tooltip';
 import { useStore } from '../../store/useStore';
 import type { Speaker } from '../../api/types';
 
-/**
- * The speaker's name, editable in place.
- *
- * `SPEAKER_01` is what diarization calls someone; "Prof. Mitra" is what the
- * person watching calls them. The display rule is `label ?? id`, and the
- * fallback is rendered in mono so an unnamed speaker LOOKS unnamed.
- *
- * This is display-only and must stay that way. `POST .../speakers/{id}/label`
- * writes a job-local `speaker_labels.json` that nothing downstream reads, so
- * a rename dirties NO pipeline stage. It therefore does not go through the
- * staged-edit machinery, does not appear in the pending bar, and does not
- * put a re-render on the GPU. The store action writes straight through and
- * patches the table optimistically.
- *
- * Enter saves, Escape cancels, blur saves — the three things a person will
- * try. An empty value clears the name and falls back to the id, which is
- * exactly what the endpoint does with `{"label": ""}`.
- */
 export function SpeakerNameField({ speaker }: { speaker: Speaker }) {
   const rename = useStore((s) => s.renameSpeaker);
   const [editing, setEditing] = useState(false);

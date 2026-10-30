@@ -4,42 +4,23 @@ import { cn } from '../../lib/cn';
 import { IconChevron, IconCheck } from '../ui/Icons';
 import { Eyebrow } from '../ui/Card';
 import { genderWord } from '../../lib/format';
+import { langPriority } from '../../lib/langGroups';
 import type { Speaker, VoiceOption } from '../../api/types';
 
-/**
- * The voice picker.
- *
- * It opens on the voices the engine recommends FOR THIS SPEAKER —
- * `voice_options[].recommended_for` carries the speaker ids each voice
- * suits, matched on the gender `ui/speakers.py` recorded — and keeps every
- * other voice one click away behind "Show all N voices".
- *
- * That distinction is the whole design. A prediction is a prediction: ECAPA
- * calling a speaker female is a reason to SUGGEST a female voice, never a
- * reason to make a male one unreachable. So this is a default view, not a
- * filter, and the header says which it is.
- *
- * Two other rules, easy to get wrong and expensive to get wrong:
- *
- *  1. Every row shows `display` ("Swara"), never the raw id
- *     ("hi-IN-SwaraNeural"). The id is a routing key, not a name.
- *  2. There is no per-voice preview, because the server serves no per-voice
- *     sample. The speaker's own reference clip plays from the row instead,
- *     and is labelled as the ORIGINAL speaker rather than as the voice.
- *     A play button that silently plays the wrong thing is worse than none.
- */
 export function VoicePicker({
   speaker,
   options,
   value,
   onChange,
   disabled,
+  target,
 }: {
   speaker: Speaker;
   options: VoiceOption[];
   value: string | null;
   onChange: (voice: string) => void;
   disabled?: boolean;
+  target: string | null;
 }) {
   const [open, setOpen] = useState(false);
   const [showAll, setShowAll] = useState(false);
@@ -49,8 +30,6 @@ export function VoicePicker({
     [options, speaker.id],
   );
 
-  // No gender was recorded for this speaker, so nothing can be recommended
-  // and there is nothing to collapse — open straight onto the full list.
   const hasRecommendation = recommended.length > 0;
 
   useEffect(() => {
@@ -58,7 +37,14 @@ export function VoicePicker({
   }, [open, hasRecommendation]);
 
   const shown = showAll || !hasRecommendation ? options : recommended;
-  const grouped = useMemo(() => groupByGender(shown), [shown]);
+  const ordered = useMemo(
+    () =>
+      [...shown].sort(
+        (a, b) => langPriority(a.language, target) - langPriority(b.language, target),
+      ),
+    [shown, target],
+  );
+  const grouped = useMemo(() => groupByGender(ordered), [ordered]);
 
   const selected = options.find((o) => o.voice === value);
   const label = selected?.display ?? (value ? value.split('-').pop() : 'Not assigned');

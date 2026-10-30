@@ -52,23 +52,17 @@ def score_asd(
 
 
 #: Per-frame scores, beside the per-segment `assignments.json`.
-#:
-#: Stage 6 has always computed these and then thrown them away, persisting
-#: only the per-SEGMENT summary. That cost twice over: `ui/bbox_video.py`
-#: went looking for a `scores.npz` that was never written (so every box in
-#: the review video came out grey), and `backend/lipsync_targets.py` needs
-#: per-frame scores to decide which face stage 9h should animate — with
-#: nothing on disk, the only way to get them was to re-run TalkNet, which
-#: no caller was ever going to do mid-pipeline.
+#: `backend/lipsync_targets.py` needs these to choose which face stage 9h
+#: animates, and re-running ASD to get them is not an option mid-pipeline.
 SCORES_SUFFIX = ".scores.npz"
 
 
 def save_scores_npz(result: ASDResult, path: Path) -> Path:
     """Write one npz holding every track's frame indices and scores.
 
-    Flat arrays plus an index, not one array per track: `np.savez` with a
-    key per track makes the file's schema depend on the video, and a reader
-    then has to guess which keys are tracks and which are metadata.
+    Flat arrays plus an index, not one array per track — a key per track makes
+    the file's schema depend on the video, leaving a reader to guess which
+    keys are tracks and which are metadata.
     """
     import numpy as np
 
@@ -120,24 +114,19 @@ def load_scores_npz(path: Path) -> ASDResult:
                          per_track=per_track)
 
 
-#: Which model's scores win when a job holds several `*.scores.npz`. loconet
-#: first (the default scorer, and the only joint multi-speaker one, so it is
-#: the one the lip-sync face-selection should be built from), then the rest
-#: best-to-worst. `find_scores_npz` consults this so "the default is loconet"
-#: actually selects loconet, instead of whatever a bare glob sorts first --
-#: `light_asd` sorts before `loconet`, so the glob alone picks the wrong file.
+#: Which model's scores win when a job holds several `*.scores.npz`, best
+#: first. Consulted by `find_scores_npz`, because a bare glob sorts
+#: alphabetically and would pick the wrong file.
 ASD_MODEL_PREFERENCE = ("loconet", "lr_asd", "light_asd", "talknet")
 
 
 def find_scores_npz(asd_dir, stem=None, *, prefer: Optional[str] = None):
     """The per-frame scores file to feed the lip-sync target builder.
 
-    Picks by MODEL, not by filename sort: `prefer` first (the configured ASD
-    model when the caller knows it), then `ASD_MODEL_PREFERENCE`, then any
-    remaining candidate. Returns a `Path` or None. This is the one place that
-    decides which model's ASD drives who-is-speaking, so both the pipeline's
-    `_asd_coord_list` (MuseTalk's coord list) and `build_lipsync_targets.py`
-    (LatentSync's targets) go through it and agree.
+    Picks by MODEL, not by filename sort: `prefer` first, then
+    `ASD_MODEL_PREFERENCE`, then any remaining candidate. The one place that
+    decides which model's ASD drives who-is-speaking, so every caller goes
+    through it and they agree.
     """
     asd_dir = Path(asd_dir)
     if not asd_dir.is_dir():

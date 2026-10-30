@@ -1,9 +1,6 @@
 """Forced-alignment adapter registry — MMS only.
 
   - mms_fa : torchaudio MMS forced aligner (multilingual, char-level CTC)
-
-`whisperx` (WhisperX's wav2vec2 CTC aligner) was removed on 2026-10-28 with
-the WhisperX ASR adapter.In git at b823223.
 """
 from __future__ import annotations
 

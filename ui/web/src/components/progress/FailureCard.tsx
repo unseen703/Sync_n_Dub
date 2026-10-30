@@ -1,29 +1,10 @@
-import * as Collapsible from '@radix-ui/react-collapsible';
 import { m } from 'framer-motion';
 import { Button } from '../ui/Button';
-import { IconAlert, IconChevron } from '../ui/Icons';
+import { IconAlert } from '../ui/Icons';
 import { useStore } from '../../store/useStore';
 import type { Failure } from '../../api/types';
 
-/**
- * What went wrong, said in a sentence the person who pasted the link can
- * act on.
- *
- * This renders `progress.failure`, never `progress.error`. `ui/errors.py`
- * matches the traceback against the failures this pipeline actually
- * produces and answers with what happened, whose problem it is and what to
- * do next; `error` is the raw last line of a traceback and belongs nowhere
- * near a user-facing screen.
- *
- * `raw` is the one concession, and it is deliberately bounded: a single
- * line, behind a closed disclosure, never a log stream. The runner log view
- * this app used to carry was deleted outright — operators read the file on
- * disk, and everyone else gets a sentence.
- *
- * `recognised: false` is stated rather than hidden. "We do not recognise
- * this one" is more useful than a confident-sounding paraphrase of a line
- * we did not understand.
- */
+/** Failure message. Input: normalized failure data. Output: an actionable error card or nothing. */
 export function FailureCard({
   failure,
   cancelled,
@@ -32,7 +13,6 @@ export function FailureCard({
   cancelled: boolean;
 }) {
   const setNewJobOpen = useStore((s) => s.setNewJobOpen);
-  const admin = useStore((s) => s.mode === 'admin');
 
   if (cancelled) {
     return (
@@ -71,29 +51,6 @@ export function FailureCard({
         </Button>
       </div>
 
-      {/* The sentence above is for everyone; the traceback line is for
-          whoever is going to read the log file, so it rides with admin
-          mode. `ui/errors.py` already made the recognised case readable. */}
-      {failure.raw && admin ? (
-        <Collapsible.Root className="mt-3 border-t border-danger/25 pt-2.5">
-          <Collapsible.Trigger
-            className="group flex items-center gap-1.5 text-[12px] text-ink3
-                       transition-colors hover:text-ink"
-          >
-            <IconChevron
-              width={12}
-              height={12}
-              className="transition-transform group-data-[state=open]:rotate-180"
-            />
-            Technical details
-          </Collapsible.Trigger>
-          <Collapsible.Content className="overflow-hidden">
-            <p className="mono mt-2 break-words rounded-lg border border-line bg-canvas/70 px-2.5 py-2 text-ink3">
-              {failure.raw}
-            </p>
-          </Collapsible.Content>
-        </Collapsible.Root>
-      ) : null}
     </Banner>
   );
 }

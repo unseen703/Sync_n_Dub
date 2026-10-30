@@ -8,12 +8,7 @@ export interface SelectItem {
   label: ReactNode;
   hint?: string;
   disabled?: boolean;
-  /**
-   * Optional heading this item sits under. Items are rendered in the order
-   * given and a heading is emitted whenever the group changes, so the CALLER
-   * decides grouping by sorting — this component never reorders, because the
-   * tone list's server order is itself meaningful.
-   */
+
   group?: string;
 }
 

@@ -262,11 +262,9 @@ def source_speech_and_pauses(
         return [Span(start, end)], []
 
     # `words[]` must be absolute and inside this segment's own slot. A segment
-    # can carry its predecessor's word stream (a WhisperX aligner bug, fixed
-    # in that adapter before it was removed on 2026-10-28; it affected 17 of
-    # the 142 merged JSONs on disk, which are still readable and still carry
-    # the damage) -- monotonic and plausible, but seconds out of place. Refuse
-    # the stream and degrade to the slot rather than anchor to it.
+    # can carry its predecessor's word stream -- monotonic and plausible, but
+    # seconds out of place -- and merged JSONs on disk still carry that damage.
+    # Refuse such a stream and degrade to the slot rather than anchor to it.
     off = [w for w in words
            if not (start - WORD_SLOT_TOLERANCE_S <= float(w["start"])
                    <= end + WORD_SLOT_TOLERANCE_S)]

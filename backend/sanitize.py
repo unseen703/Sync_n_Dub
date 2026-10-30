@@ -1,13 +1,8 @@
-"""Text sanitization for the ASR → MT → TTS pipeline.
+"""Text sanitization at the ASR -> MT -> TTS stage boundaries.
 
-Three functions, one per stage boundary:
-
-  sanitize_for_mt(text)   – NFC-normalize ASR output before translation,
-                            reducing OOV → <unk> in the MT model.
-  sanitize_mt_output(text) – strip literal <unk> and whitespace artifacts
-                             from MT output before codemix/duration.
-  sanitize_for_tts(text)  – defense-in-depth cleanup before synthesis:
-                            special tokens, NFC, zero-width chars, whitespace.
+  sanitize_for_mt     NFC-normalize ASR output before translation
+  sanitize_mt_output  strip literal <unk> and whitespace artifacts after MT
+  sanitize_for_tts    final cleanup before synthesis
 """
 from __future__ import annotations
 
@@ -26,9 +21,8 @@ _MULTI_WS = re.compile(r"\s+")
 def sanitize_for_mt(text: str) -> str:
     """NFC-normalize ASR output before it enters translation.
 
-    SentencePiece MT vocabularies are trained on NFC text. Feeding NFD
-    (decomposed) forms causes the same character to be OOV, producing
-    <unk> tokens in the translation.
+    SentencePiece MT vocabularies are trained on NFC, so a decomposed form of
+    the same character is OOV and translates to <unk>.
     """
     text = unicodedata.normalize("NFC", text)
     text = _MULTI_WS.sub(" ", text).strip()
@@ -38,10 +32,8 @@ def sanitize_for_mt(text: str) -> str:
 def sanitize_mt_output(text: str, seg_id: str = "") -> str:
     """Strip literal <unk> and collapse whitespace after MT decoding.
 
-    `skip_special_tokens=True` only removes tokens by ID.  When a model
-    generates the literal characters '<unk>' as regular text (seen on
-    rare conjuncts), they survive decoding.
-    Catching them here prevents junk from reaching codemix and duration.
+    `skip_special_tokens=True` removes tokens by ID only, so a model that
+    emits the literal characters `<unk>` as text survives decoding.
     """
     cleaned = _JUNK_TOKENS.sub("", text)
     cleaned = cleaned.replace(_SP_UNDERSCORE, " ")
@@ -53,12 +45,11 @@ def sanitize_mt_output(text: str, seg_id: str = "") -> str:
 
 
 def sanitize_for_tts(text: str, seg_id: str = "") -> str:
-    """Defense-in-depth cleanup before TTS synthesis.
+    """Final cleanup before TTS synthesis.
 
-    Catches anything that leaked through earlier stages: special tokens,
-    non-NFC Unicode, zero-width characters, SentencePiece artifacts,
-    and excess whitespace.  Keeps ZWJ (U+200D) which is needed for
-    correct Indic conjunct rendering.
+    Catches whatever leaked through earlier stages: special tokens, non-NFC
+    Unicode, zero-width characters, SentencePiece artifacts and excess
+    whitespace. Keeps ZWJ (U+200D), which Indic conjuncts need.
     """
     original = text
     text = _JUNK_TOKENS.sub("", text)

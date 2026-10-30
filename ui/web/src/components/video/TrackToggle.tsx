@@ -1,44 +1,22 @@
 import { cn } from '../../lib/cn';
 import { Tooltip } from '../ui/Tooltip';
 import { fmtDuration } from '../../lib/format';
+import type { VideoTrack } from '../../api/types';
 
-/**
- * The Lip-synced ⇄ Original toggle above the video.
- *
- * **Lip-synced comes first, and it is the default** wherever one has been
- * rendered — it is the thing the run was for, and the original is the
- * comparison. Until the render exists the first segment is disabled and
- * the player shows the original; see `VideoStage` for how the selection
- * resolves, and `useStore.videoTrack` for why an explicit choice outranks
- * the default.
- *
- * Three states, and the distinction between the last two is the whole
- * design:
- *
- *  - not configured  -> this component is not rendered at all. A control
- *                       that can never become live is noise.
- *  - configured, not rendered yet -> the segment is DISABLED and carries
- *                       its own progress bar and an estimate. It never
- *                       falls back to playing the original under a
- *                       "Lip-synced" label; that would defeat the point of
- *                       having a toggle.
- *  - ready           -> a normal segment.
- *
- * The percentage is the job's overall `pct`, not the render's. Stage 9h
- * shells into another conda env and reports nothing finer — the tooltip
- * says so rather than implying a precision we do not have.
- */
+/** Video-track picker. Inputs describe available tracks and progress; output is the selected track control. */
 export function TrackToggle({
   value,
   onChange,
   lipsyncReady,
+  enhancedReady,
   pct,
   running,
   etaS,
 }: {
-  value: 'original' | 'lipsync';
-  onChange: (v: 'original' | 'lipsync') => void;
+  value: VideoTrack;
+  onChange: (v: VideoTrack) => void;
   lipsyncReady: boolean;
+  enhancedReady: boolean;
   pct: number;
   running: boolean;
   etaS?: number | null;
@@ -62,6 +40,23 @@ export function TrackToggle({
       aria-label="Which video to play"
       className="inline-flex items-center gap-1 rounded-xl border border-line bg-surface/70 p-1"
     >
+      {enhancedReady ? (
+        <button
+          type="button"
+          role="radio"
+          aria-checked={value === 'enhanced'}
+          onClick={() => onChange('enhanced')}
+          className={cn(
+            seg,
+            value === 'enhanced'
+              ? 'bg-brand-fill text-white shadow-sm'
+              : 'text-ink3 hover:text-ink',
+          )}
+        >
+          Enhanced
+        </button>
+      ) : null}
+
       {lipsyncReady ? (
         <button
           type="button"
@@ -71,7 +66,11 @@ export function TrackToggle({
           className={cn(
             seg,
             value === 'lipsync'
-              ? 'bg-brand-fill text-white shadow-sm'
+              ?
+
+                enhancedReady
+                ? 'bg-ink/[0.12] text-ink shadow-sm'
+                : 'bg-brand-fill text-white shadow-sm'
               : 'text-ink3 hover:text-ink',
           )}
         >

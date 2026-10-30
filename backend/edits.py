@@ -324,6 +324,57 @@ class EditOp:
         return f"{self.op}({_fmt_params(self.params)}) on {self.scope.describe()}"
 
 
+def classify_op(op: "EditOp", source_language: Optional[str] = None) -> str:
+    """Return "rule", "script" or "llm" for a parsed op.
+
+    Three buckets, decided by what the op's handler and its post-MT replay
+    actually touch:
+
+    - **rule**   — the handler mutates text or metadata deterministically,
+                   with no outside call. The replay still runs the dirty
+                   stages, but nothing in the op itself needs the LLM or
+                   another hosted model to speak for it.
+    - **script** — the handler stays local, but the replay re-runs a
+                   pipeline stage via an external MODEL that is not an LLM
+                   (today: the Bodhan transliterator for `code_mix mode=stage`,
+                   Bodhan MT for `set_target_language`, and `retranslate` on
+                   the fast path where target language equals the dub's
+                   source language — a verbatim copy from the ASR cue).
+    - **llm**    — the handler itself reaches `ctx.rewriter` to rewrite text
+                   at apply time (retranslate across languages, set_tone with
+                   rewrite_text, code_mix mode=llm, replace_term with no
+                   replacement given).
+
+    The kind is a property of the PARSED op, not of its `OpSpec`, because
+    `code_mix`, `set_tone`, `replace_term` and `retranslate` flip bucket on
+    their params and — for retranslate — on the dub's own source language.
+
+    `source_language` is `data["language"]` for the plan (also carried on
+    `EditContext.source_language`). Pass it so `retranslate` with
+    `target_language == source_language` is classified as `script` at plan
+    time; without it the function returns the conservative default `"llm"`
+    for retranslate so the preview never understates the cost. The
+    comparison is `.strip().lower()` on both sides — no ISO alias table.
+    """
+    name = op.op
+    if name == "retranslate":
+        tgt = str(op.params.get("target_language") or "").strip().lower()
+        src = str(source_language or "").strip().lower()
+        if tgt and src and tgt == src:
+            return "script"
+        return "llm"
+    if name == "set_tone":
+        return "llm" if bool(op.params.get("rewrite_text", True)) else "rule"
+    if name == "code_mix":
+        mode = str(op.params.get("mode") or "stage").strip().lower()
+        return "llm" if mode == "llm" else "script"
+    if name == "replace_term":
+        return "llm" if op.params.get("replace") is None else "rule"
+    if name == "set_target_language":
+        return "script"
+    return "rule"
+
+
 #: Sentence-final punctuation in the languages this pipeline dubs into.
 #: `।`/`॥` are the Devanagari danda and double danda; the ASCII set covers a
 #: code-mixed line that ends on a Latin clause.
@@ -409,8 +460,8 @@ OP_SPECS: List[OpSpec] = [
                 "target_language": "ISO code, only if it changes"},
         summary="Re-translate the scoped segment(s) from the source transcript, "
                 "following a free-text instruction.",
-        examples=["retranslate 0:30–0:45, it is too literal",
-                  "make the translation simpler between 2:00 and 2:30"],
+        examples=[
+    "make the translation simpler between 2:00 and 2:30"],
         needs_llm=True,
     ),
     OpSpec(
@@ -428,13 +479,14 @@ OP_SPECS: List[OpSpec] = [
     ),
     OpSpec(
         name="code_mix", dirty_from="codemix",
-        params={"terms": "English terms to keep in Latin script",
+        params={"terms": "source-language terms to keep unchanged",
                 "mode": "stage (re-run the transliterator) | llm (rewrite)",
                 "termbase": "path to a termbase TSV"},
-        summary="Code-mix the translation — keep English technical terms in "
-                "English inside the target-language sentence.",
+        summary="Code-mix the translation — keep technical terms in the "
+                "source language inside the target-language sentence.",
         examples=["code-mix the translation",
-                  "keep gradient and weight in English throughout"],
+                  "keep gradient and weight in English throughout",
+                  "keep the technical terms in the original language"],
     ),
     OpSpec(
         name="set_gender", dirty_from="voices",
@@ -443,6 +495,38 @@ OP_SPECS: List[OpSpec] = [
                 "voice from the matching-gender pool.",
         examples=["the speaker at 1:20 should sound female",
                   "SPEAKER_01 is male, not female"],
+    ),
+    OpSpec(
+        name="create_speaker", dirty_from="voices",
+        # The one op that MINTS a speaker id. Every other op refuses an
+        # unknown speaker; this one carves out a hole for the case diarization
+        # failed on -- two people merged into one SPK, or a wholly missed
+        # voice -- and the user corrects it by naming the voice directly.
+        #
+        # Voice is required (not optional, not a warning): a brand-new speaker
+        # has no reference clip, no ASD vote and no catalog pick, so without a
+        # voice TTS would fall back to the engine default -- the silent-
+        # wrong-output trap `_h_set_speaker` already cites. Gender follows the
+        # voice from the catalog; tone defaults to `neutral` and is read from
+        # the request if named.
+        params={"voice": "engine voice id for the new speaker, "
+                         "e.g. Deepika, Chinmay, Adarsh",
+                "gender": "male | female (optional; follows the voice "
+                          "when omitted)",
+                "tone": f"optional delivery style ({_tone_style_ids()}); "
+                         "defaults to neutral",
+                "engine": "tts engine, only if it changes"},
+        summary="Mint a new speaker id for the scoped cues and assign it the "
+                "named voice. Use when diarization merged two people onto one "
+                "SPK, or when a stretch has no speaker who fits.",
+        examples=[
+            "create a new speaker for the voice from 0:20 to 0:25 and "
+            "assign the Deepika voice",
+            "the speaker from 0:00 to 0:09 is wrong -- create a new speaker "
+            "with the Chinmay voice",
+            "create a new speaker and assign the Adarsh voice to cue 4 "
+            "and cue 5",
+        ],
     ),
     OpSpec(
         name="set_speaker", dirty_from="voices",
@@ -465,17 +549,30 @@ OP_SPECS: List[OpSpec] = [
         # Edge was registered — and kept reading it for six days after Edge
         # was deleted on 2026-10-17, so both the LLM and the regex fallback
         # were being shown a pattern no voice in the catalogue matches.
-        params={"voice": "engine voice id, e.g. Amit or Kavya",
+        #
+        # This is also how a gender change is expressed through NLQ: pick a
+        # voice of the desired gender from the catalog. The handler reads the
+        # catalog entry's gender and writes it to `gender_overrides` so the
+        # speaker's apparent gender follows the voice. A bare "make this
+        # female" with no voice named is deliberately refused by the LLM
+        # prompt and the regex, because set_gender's pool-pick path is
+        # reserved for the cast-table dropdown — see `ui/routes_edits.py`.
+        params={"voice": "engine voice id, e.g. Amit, Deepika, Chinmay",
                 "engine": "tts engine, only if it changes"},
-        summary="Pin a specific TTS voice for the scoped segments or speaker.",
-        examples=["use Amit for SPEAKER_00"],
+        summary="Pin a specific TTS voice for the named speaker. Requires "
+                "the speaker to be named; a per-cue voice edit is a "
+                "create_speaker, not a set_voice. The voice's gender becomes "
+                "the speaker's apparent gender.",
+        examples=["use the Deepika voice for SPEAKER_00",
+                  "give SPK_01 the Chinmay voice",
+                  "SPK_01 should sound female, assign the Deepika voice"],
     ),
     OpSpec(
         name="set_speed", dirty_from="tts",
-        params={"factor": "1.25 = 25% faster, 0.9 = 10% slower"},
+        params={"factor": "1.1 = 10% faster, 0.9 = 10% slower"},
         summary="Speed the dubbed speech up or down over a window, by "
                 "re-fitting each clip into a shorter/longer slot.",
-        examples=["speed up the audio between 0:30 and 0:45 by 1.2x",
+        examples=["speed up the audio between 0:30 and 0:45 by 1.1x",
                   "slow down the intro a bit"],
     ),
     OpSpec(
@@ -569,9 +666,8 @@ STAGE_PLAIN: Dict[str, str] = {
 #: wording, and a reader told only "re-speaks the lines" would not know the
 #: translation itself moves.
 #:
-#: `tests/test_edit_agent.py` fails if an op has no entry, which is what
-#: stops a newly added op from surfacing in the UI as a bare identifier.
-#: Four extra keys drive the UI "edit workspace":
+#: Every op must have an entry here, else it surfaces in the UI as a bare
+#: identifier. Four extra keys drive the UI "edit workspace":
 #:
 #:   category  the intent group it belongs under — one of six, in the order
 #:             `OP_SPECS` already lists them, so the group order is derived
@@ -603,9 +699,9 @@ USER_ACTIONS: Dict[str, Dict[str, Any]] = {
     "set_text": {
         "title": "Rewrite a line",
         "takes": "a moment in the video, and the exact wording you want",
-        "changes": "that line is spoken with your wording, word for word",
+        "changes": "that line is spoken with your wording",
         "category": "Translation", "scopes": ["segment"], "quick": True,
-        "fill": 'change the wording to "<new wording>"',
+        "fill": 'change this line to "<new wording>"',
         "needs": "text",
     },
     "replace_term": {
@@ -620,39 +716,39 @@ USER_ACTIONS: Dict[str, Dict[str, Any]] = {
     },
     "retranslate": {
         "title": "Translate a passage again",
-        "takes": "a time range, and what to change about it "
-                 "(\"too literal\", \"simpler\")",
+        "takes": "a time range, and how you would like the translation revised",
         "changes": "the translation of those lines is rewritten, then spoken",
         "category": "Translation", "scopes": ["segment"], "quick": True,
-        "fill": "translate this again — it is too literal",
+        "fill": "please rewrite this passage in a more formal tone",
     },
     "set_tone": {
         "title": "Change how a line is delivered",
-        # Named the real styles. This read "formal, warm or urgent" — three
-        # registers the engine has never accepted — so the card described an
-        # edit that could not be made.
         "takes": "a time range or a speaker, and one of two delivery "
                  "styles: TV style news or educational lecture",
         "changes": "the same words are spoken in a different manner",
         "category": "Voice", "scopes": ["segment", "speaker"], "quick": False,
-        "fill": "deliver this as <style>",
+        "fill": "deliver this in an educational lecture style",
         "needs": "tone",
         "options": list(TONE_CHOICES),
     },
     "code_mix": {
-        "title": "Keep English words in English",
+        "title": "Keep source words untranslated",
         "takes": "optionally the terms to protect, e.g. gradient, weight",
-        "changes": "technical terms stay English inside the translated "
-                   "sentence instead of being translated",
+        "changes": "technical terms stay in the source language inside the "
+                   "translated sentence instead of being translated",
         "category": "Translation", "scopes": ["segment", "all"], "quick": False,
-        "fill": "keep the English technical terms in English",
+        "fill": "keep technical terms such as gradient and weight in English",
     },
-    "set_gender": {
-        "title": "Change a voice's gender",
-        "takes": "a speaker or a moment, and male or female",
-        "changes": "that speaker is re-cast from the other gender's voices",
-        "category": "Voice", "scopes": ["speaker", "segment"], "quick": True,
-        "fill": "make this sound female",
+    "create_speaker": {
+        "title": "Create a new speaker",
+        "takes": "a time range or cue(s), and the voice to assign",
+        "changes": "a new speaker id is minted, those cues move onto it, "
+                   "and it is read in the voice you named; the speaker's "
+                   "gender follows the voice",
+        "category": "Speakers", "scopes": ["segment"], "quick": True,
+        "fill": "create a new speaker for these cues and "
+                "assign the <voice> voice",
+        "needs": "voice",
     },
     "set_speaker": {
         "title": "Reassign who is talking",
@@ -660,15 +756,20 @@ USER_ACTIONS: Dict[str, Dict[str, Any]] = {
         "changes": "those lines move to that speaker and are read in THEIR "
                    "voice; who speaks when is not recomputed",
         "category": "Speakers", "scopes": ["segment"], "quick": False,
-        "fill": "this is actually <speaker>",
+        "fill": "assign these lines to <speaker>",
         "needs": "speaker",
     },
     "set_voice": {
-        "title": "Pick a specific voice",
-        "takes": "a speaker, and a voice from the catalogue",
-        "changes": "that speaker is read by the voice you named",
+        "title": "Set the voice / gender of a speaker",
+        "takes": "a speaker, and a voice from the catalogue "
+                 "(gender follows the voice)",
+        "changes": "that speaker is read by the voice you named, and their "
+                   "apparent gender follows the voice's catalog entry",
+        # Speaker-only: a cue-scoped voice edit is almost always what
+        # create_speaker was added for. The prompt and the handler both say
+        # so; the UI chip hides the segment scope to match.
         "category": "Voice", "scopes": ["speaker"], "quick": True,
-        "fill": "use <voice> here",
+        "fill": "use the <voice> voice for this speaker",
         "needs": "voice",
     },
     "set_speed": {
@@ -677,7 +778,7 @@ USER_ACTIONS: Dict[str, Dict[str, Any]] = {
         "changes": "the dubbed speech is re-fitted into a shorter or "
                    "longer slot; the picture is untouched",
         "category": "Timing & audio", "scopes": ["segment"], "quick": True,
-        "fill": "speed this up by 1.2x",
+        "fill": "make this line 1.1 times faster",
     },
     "lipsync_window": {
         "title": "Lip-sync only part of the video",
@@ -685,7 +786,7 @@ USER_ACTIONS: Dict[str, Dict[str, Any]] = {
         "changes": "only that stretch has its mouth re-animated and is "
                    "spliced back into the full timeline",
         "category": "Lip-sync & video", "scopes": ["segment"], "quick": False,
-        "fill": "lip-sync just this part",
+        "fill": "apply lip-sync from <start time> to <end time>",
     },
     "mute_cue": {
         "title": "Mute a cue",
@@ -695,7 +796,7 @@ USER_ACTIONS: Dict[str, Dict[str, Any]] = {
                    "a pause the lines either side may borrow instead of "
                    "speeding up",
         "category": "Cleanup", "scopes": ["segment"], "quick": True,
-        "fill": "mute this",
+        "fill": "mute this line but keep the background audio",
     },
     "set_target_language": {
         "title": "Change the target language",
@@ -1154,18 +1255,62 @@ def _h_replace_term(data, seg_ids, op, applied, ctx, res):
 
 
 def _h_retranslate(data, seg_ids, op, applied, ctx, res):
-    if ctx.rewriter is None:
-        raise EditError(
-            "retranslate needs the LLM (OPENROUTER_API_KEY unset). Use "
-            "set_text with the exact wording instead.")
+    """Re-translate scoped cues, with two fast paths that skip the LLM.
+
+    Two cue-level shortcuts come first:
+
+    1. **Source cue is empty.** The ASR captured nothing to translate from —
+       no model can invent one. The cue is left as it stands, and the
+       history records `"SEG_XXXX: source cue is empty, no change applied"`.
+    2. **Target language equals the dub's source language** (case-agnostic,
+       strip+lower, compared against `data["language"]`). "keep this cue in
+       english" on an English-source dub is a verbatim copy from the ASR
+       transcript into `mt_text`. No LLM call, deterministic. This path is
+       what `classify_op` tags `"script"` at plan time.
+
+    Everything else goes through the LLM path below, which is `"llm"`-kind
+    classification and matches the historical retranslate behaviour.
+    """
     instruction = str(op.params.get("instruction")
                       or op.params.get("how") or "").strip()
-    lang = op.params.get("target_language") or ctx.target_language or "the target language"
+    tgt_raw = op.params.get("target_language") or ctx.target_language or ""
+    tgt_norm = str(tgt_raw).strip().lower()
+    src_norm = str(data.get("language") or "").strip().lower()
+    lang = tgt_raw or "the target language"
     by_id = {str(s.get("id")): s for s in data.get("segments", [])}
+
+    same_language = bool(tgt_norm and src_norm and tgt_norm == src_norm)
+
     for sid in seg_ids:
         seg = by_id[sid]
         src = seg.get("text") or ""
         cur = _seg_text(seg)
+
+        # 1. Empty source — nothing to translate from. Warn and move on, so
+        #    the edit journal names the cue as deliberately skipped rather
+        #    than silently dropped.
+        if not src.strip():
+            applied.warnings.append(
+                f"{sid}: source cue is empty, no change applied")
+            continue
+
+        # 2. Target language is the source language — copy ASR verbatim.
+        #    Deterministic, no LLM, classifies as script.
+        if same_language:
+            if cur == src:
+                applied.warnings.append(
+                    f"{sid}: already matches the source line, no change")
+                continue
+            _set_segment_text(seg, src)
+            applied.changes.append(
+                f"{sid}: {cur!r} → {src!r} (source verbatim, same language)")
+            continue
+
+        # 3. Different language — go through the LLM.
+        if ctx.rewriter is None:
+            raise EditError(
+                "retranslate needs the LLM (OPENROUTER_API_KEY unset). Use "
+                "set_text with the exact wording instead.")
         # The instruction describes a CHANGE to a line that is already
         # translated, and saying so matters. Told only "reply with the
         # replacement line", gemma-3-12b answered a word-level instruction
@@ -1267,7 +1412,17 @@ def _h_set_tone(data, seg_ids, op, applied, ctx, res):
             applied.changes.append(f"{sid}: {cur!r} → {new!r}")
 
 
+def _language_name(code, default="the source language"):
+    """ISO code -> English language name, or the code itself if unknown."""
+    try:
+        from ui.langs import english_name
+    except Exception:                                   # noqa: BLE001
+        return code or default
+    return english_name(code, default)
+
+
 def _h_code_mix(data, seg_ids, op, applied, ctx, res):
+    src_name = _language_name(ctx.source_language)
     terms = op.params.get("terms") or []
     if isinstance(terms, str):
         terms = [t.strip() for t in terms.replace(",", " ").split() if t.strip()]
@@ -1286,15 +1441,15 @@ def _h_code_mix(data, seg_ids, op, applied, ctx, res):
         # The transliterator's termbase is the documented way to force a term
         # to survive translation, so write one rather than inventing a second
         # mechanism: `backend.codemix.load_termbase` reads `source<TAB>repl`,
-        # and a row mapping a term to itself is what keeps it in English.
+        # and a row mapping a term to itself is what keeps it untranslated.
         res.termbase_path = _write_termbase(
             terms, base=res.termbase_path, work_dir=ctx.work_dir,
             dry_run=ctx.dry_run)
         applied.changes.append(
-            f"terms kept in English: {', '.join(terms)} "
+            f"terms kept in {src_name}: {', '.join(terms)} "
             f"(termbase {res.termbase_path})")
     elif terms:
-        applied.changes.append(f"terms kept in English: {', '.join(terms)}")
+        applied.changes.append(f"terms kept in {src_name}: {', '.join(terms)}")
 
     if mode == "stage":
         model = ctx.translit_model
@@ -1342,14 +1497,14 @@ def _h_code_mix(data, seg_ids, op, applied, ctx, res):
             system = (
                 "You code-mix dubbing lines the way Indian lecturers actually "
                 "speak: the sentence stays in the target language, but "
-                "technical terms, proper nouns, acronyms and units stay in "
-                "English, in Latin script. Keep the meaning and the length. "
-                "Reply with the rewritten line ONLY.")
+                f"technical terms, proper nouns, acronyms and units stay in "
+                f"their original {src_name} form and script. Keep the meaning "
+                "and the length. Reply with the rewritten line ONLY.")
             user = (f"Target language: {lang}\n"
-                    f"English source: {src}\n"
+                    f"Source line ({src_name}): {src}\n"
                     f"Current translation: {cur}\n"
-                    + (f"Always keep these in English: {', '.join(terms)}\n"
-                       if terms else ""))
+                    + (f"Always keep these in {src_name}: "
+                       f"{', '.join(terms)}\n" if terms else ""))
             new = _clean_rewrite(ctx.rewriter(system, user))
             if not new or new == cur:
                 continue
@@ -1508,11 +1663,29 @@ def _h_set_voice(data, seg_ids, op, applied, ctx, res):
     voice = str(op.params.get("voice") or "").strip()
     if not voice:
         raise EditError("set_voice needs a `voice`")
+    # set_voice is now a speaker-scoped operation: the LLM prompt says
+    # "Requires Speaker id explicitly" and the handler enforces the same.
+    # A per-cue voice swap that does not change the speaker is almost
+    # always what create_speaker was added for -- the cue stays on its
+    # existing speaker and that speaker gets re-voiced, which is a
+    # cast-table change dressed as a cue edit. The explicit refusal here
+    # makes the misuse visible rather than silently wholesale-re-voicing
+    # that speaker from one cue's intent.
+    if op.scope.all:
+        raise EditError(
+            "set_voice needs a speaker scope. A whole-dub re-voice would "
+            "pin the same voice onto every speaker. Name the speaker, or "
+            "use create_speaker for a stretch of cues.")
+    if not op.scope.speaker:
+        raise EditError(
+            "set_voice needs a speaker scope, not a cue or time window. "
+            "If you want a cue stretch to be read in a different voice, "
+            "use create_speaker instead.")
     engine = op.params.get("engine") or ctx.tts_engine or ctx.voice_engine
     by_id = {str(s.get("id")): s for s in data.get("segments", [])}
-    canonical, why = _known_voice(voice, engine=engine,
-                                  language=ctx.target_language,
-                                  catalog_json=ctx.voice_catalog_json)
+    canonical, cat_gender, why = _voice_catalog_lookup(
+        voice, engine=engine, language=ctx.target_language,
+        catalog_json=ctx.voice_catalog_json)
     if canonical is None:
         applied.warnings.append(
             f"{voice!r} is not in the {engine!r} catalog ({why}); passing it "
@@ -1520,21 +1693,173 @@ def _h_set_voice(data, seg_ids, op, applied, ctx, res):
     else:
         voice = canonical
 
-    if op.scope.speaker or op.scope.all:
-        speakers = {by_id[s].get("speaker") for s in seg_ids if by_id.get(s)}
-        speakers.discard(None)
-        for spk in speakers:
-            res.speaker_voice_overrides[str(spk)] = {
-                "engine": engine, "voice": voice, "source": "edit:set_voice"}
+    # The voice carries the gender: writing `gender_overrides` here is how
+    # the merged NLQ flow collapses what used to be a separate `set_gender`.
+    speakers = {by_id[s].get("speaker") for s in seg_ids if by_id.get(s)}
+    speakers.discard(None)
+    for spk in speakers:
+        res.speaker_voice_overrides[str(spk)] = {
+            "engine": engine, "voice": voice, "source": "edit:set_voice"}
+        if cat_gender:
+            res.gender_overrides[str(spk)] = cat_gender
+            applied.changes.append(
+                f"{spk}: voice={voice}, gender={cat_gender}")
+        else:
             applied.changes.append(f"{spk}: voice={voice}")
-        applied.dirty_from = "voices"
-    else:
-        for sid in seg_ids:
-            seg = by_id[sid]
+    applied.dirty_from = "voices"
+
+
+def _voice_catalog_lookup(
+    voice: str, *, engine: Optional[str],
+    language: Optional[str], catalog_json: Optional[Path],
+) -> Tuple[Optional[str], Optional[str], str]:
+    """Case-insensitive catalog lookup that also returns the voice's gender.
+
+    `_known_voice` returns only the canonical name; `_h_set_voice` and
+    `_h_create_speaker` both need the gender too, so the lookup is factored
+    out rather than done twice. Returns `(canonical, gender, why)` with
+    `canonical` None when the voice is not in the catalog.
+    """
+    eng = (engine or "").lower()
+    try:
+        from .voices import load_voice_catalog
+        cat = load_voice_catalog(
+            "indic-speak" if eng in ("", "bodhan", "indic-speak") else eng,
+            language=language, catalog_json=catalog_json)
+        match = next((v for v in cat if v.voice.lower() == voice.lower()),
+                     None)
+        if match is None:
+            return None, None, f"{len(cat)} voices known"
+        return (match.voice, (match.gender or None),
+                f"{len(cat)} voices known")
+    except Exception as e:                       # catalog is advisory only
+        return voice, None, f"catalog unreadable: {e}"
+
+
+def _h_create_speaker(data, seg_ids, op, applied, ctx, res):
+    """Mint a new speaker id, move the scoped cues onto it, assign the voice.
+
+    Required: `voice` and a scope that resolves to at least one cue, that is
+    NOT the whole dub and NOT a bare speaker. Optional: `gender` (follows the
+    voice when omitted) and `tone` (defaults to neutral).
+
+    `dirty_from="voices"`: 9d reads `speaker_voice_overrides` and the newly
+    minted id surfaces in the cast. No reference clip is written -- the voice
+    override is read ahead of the reference-based pick, so TTS does not need
+    one. Any source speaker left with no cues is reported, same as
+    `_h_set_speaker`, because the operator's cast list is about to change.
+    """
+    voice = str(op.params.get("voice") or "").strip()
+    if not voice:
+        raise EditError(
+            "create_speaker needs a `voice` -- a new speaker with no voice "
+            "has no way to be read, and the pipeline would fall back to the "
+            "engine default silently. Name the voice: "
+            "Deepika, Chinmay, Adarsh, etc.")
+
+    # Scope: refuse `all` and a bare speaker. Both would mean "mint a speaker
+    # for every cue there is" or "rename an existing speaker", neither of
+    # which is what this op is for. A time window or cue list is the only
+    # valid shape -- the LLM prompt says the same, this is the defense.
+    if op.scope.all:
+        raise EditError(
+            "create_speaker needs a time range or cue list; `all` would "
+            "mint a speaker that owns the whole dub")
+    if op.scope.speaker and not (op.scope.start_s is not None
+                                  or op.scope.end_s is not None
+                                  or op.scope.segments):
+        raise EditError(
+            "create_speaker needs a time range or cue list; a bare speaker "
+            "scope is a rename, not a creation -- use set_speaker instead")
+    if not seg_ids:
+        raise EditError(
+            "create_speaker: the scope resolved to no cues; name a time "
+            "range or cue id the new speaker will own")
+
+    engine = op.params.get("engine") or ctx.tts_engine or ctx.voice_engine
+    canonical, cat_gender, why = _voice_catalog_lookup(
+        voice, engine=engine, language=ctx.target_language,
+        catalog_json=ctx.voice_catalog_json)
+    if canonical is None:
+        # Hard refuse rather than warn: the whole point of the op is to pin
+        # a known voice to a new speaker. A pass-through here is the silent-
+        # wrong-output trap this op was added to AVOID.
+        raise EditError(
+            f"create_speaker: {voice!r} is not in the {engine!r} catalog "
+            f"({why})")
+    voice = canonical
+
+    gender_param = str(op.params.get("gender") or "").strip().lower() or None
+    if gender_param and gender_param not in ("male", "female"):
+        raise EditError(
+            f"create_speaker: gender must be 'male' or 'female', "
+            f"got {gender_param!r}")
+    gender = gender_param or cat_gender
+
+    tone = str(op.params.get("tone") or "").strip() or None
+    if tone:
+        known_tones = {t.lower(): t for t in tone_styles()}
+        canon = known_tones.get(tone.lower())
+        if canon is None:
+            raise EditError(
+                f"create_speaker: tone {tone!r} is not an engine style. "
+                f"Pick one of: {', '.join(tone_styles())}")
+        tone = canon
+
+    # Mint the new id. Scan the DIARIZATION label space (SPK_NN / SPEAKER_NN)
+    # for the biggest number seen, pick next, two-digit zero-pad. Width is
+    # fixed at SPK_0N so the editor's own ids stay distinguishable from the
+    # upstream labels when both widths are read later.
+    known = {str(s.get("speaker")) for s in data.get("segments", [])
+             if s.get("speaker")}
+    used_nums: List[int] = []
+    for name in known:
+        m = re.match(r"(?:SPK|SPEAKER)[_ ]?(\d+)$", name, re.I)
+        if m:
+            used_nums.append(int(m.group(1)))
+    next_num = (max(used_nums) + 1) if used_nums else 0
+    new_id = f"SPK_{next_num:02d}"
+
+    by_id = {str(s.get("id")): s for s in data.get("segments", [])}
+    moved = 0
+    for sid in seg_ids:
+        seg = by_id.get(sid)
+        if seg is None:
+            continue
+        _backup(seg, "speaker")
+        # The previous speaker's per-cue voice override would silently defeat
+        # the new assignment -- same reasoning as _h_set_speaker.
+        if seg.get("tts_voice"):
             _backup(seg, "tts_voice")
-            seg["tts_voice"] = voice
-            applied.changes.append(f"{sid}: voice={voice}")
-        applied.dirty_from = "tts"
+            seg["tts_voice"] = None
+        seg["speaker"] = new_id
+        if tone and tone.lower() != "neutral":
+            _backup(seg, "tts_style")
+            seg["tts_style"] = tone
+        moved += 1
+
+    res.speaker_voice_overrides[new_id] = {
+        "engine": engine, "voice": voice, "source": "edit:create_speaker"}
+    if gender:
+        res.gender_overrides[new_id] = gender
+
+    applied.changes.append(
+        f"{new_id}: minted, voice={voice}"
+        + (f", gender={gender}" if gender else "")
+        + (f", tone={tone}" if tone and tone.lower() != "neutral" else "")
+        + f", moved {moved} cue(s)")
+    if not gender:
+        applied.warnings.append(
+            f"{new_id}: no gender override written -- catalog has no "
+            f"gender for {voice!r} and the request named none")
+
+    left = {str(s.get("speaker")) for s in data.get("segments", [])
+            if s.get("speaker")}
+    for gone in sorted(known - left):
+        applied.warnings.append(
+            f"{gone} now has no cues and will disappear from the cast")
+
+    applied.dirty_from = "voices"
 
 
 def _known_voice(voice: str, *, engine: Optional[str],
@@ -1834,6 +2159,7 @@ _HANDLERS: Dict[str, Callable] = {
     "set_tone": _h_set_tone,
     "code_mix": _h_code_mix,
     "set_gender": _h_set_gender,
+    "create_speaker": _h_create_speaker,
     "set_speaker": _h_set_speaker,
     "set_voice": _h_set_voice,
     "replace_term": _h_replace_term,

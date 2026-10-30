@@ -522,7 +522,6 @@ def load_targets_payload(path: Path) -> Optional[Dict[str, "np.ndarray"]]:
 
     The vendored reader (`latentsync/utils/targets.py`) is in another conda
     env and cannot be imported here, so the schema lives in two places.
-    `tests/test_latentsync_targets.py` pins them together.
     """
     import numpy as np
 

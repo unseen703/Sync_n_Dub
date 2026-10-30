@@ -1,23 +1,12 @@
-"""What YouTube knows about a URL, before the pipeline touches it.
+"""Probe what YouTube knows about a URL before the pipeline touches it.
 
-The title is the reason this module exists. `backend.downloader.download_youtube`
-sets `filename_template="%(id)s.%(ext)s"` and throws yt-dlp's `info` away, and
-with a pre-cut window the pipeline never calls `download_youtube` at all — it
-is handed a local clip. So nothing downstream has ever seen the title, and
-nothing downstream can. It is probed here, UI-side, before the job starts, and
-written to `<job>/meta.json` (which `ui/server.py::_job_meta` already reads).
+Returns the title (for the job card), the duration (which bounds the range
+picker and the lip-sync cap), and the live status, written to
+`<job>/meta.json`. Nothing downstream sees this — the downloader throws
+yt-dlp's `info` away and a pre-cut window never calls it at all.
 
-The probe does triple duty:
-
-  * the **title**, for the job card;
-  * **validation** — live/upcoming streams are refused, and the post-probe
-    `webpage_url` is re-checked against the host allowlist so a shortener
-    cannot bounce past the pre-probe check;
-  * the **duration**, which bounds the range picker and the lip-sync cap.
-
-`fetch_thumbnail` caches the poster frame into the job folder so the browser
-never reaches googleusercontent — a page served from loopback should not make
-the operator's browser talk to a CDN to render a job list.
+`fetch_thumbnail` caches the poster frame into the job folder so a loopback
+page never makes the browser talk to a CDN.
 """
 from __future__ import annotations
 
@@ -37,9 +26,7 @@ THUMB_NAME = "meta.thumb.jpg"
 META_NAME = "meta.json"
 
 #: Hosts a thumbnail may be fetched from. The URL comes out of yt-dlp's JSON,
-#: which is attacker-influenced in exactly the same way the submitted URL is,
-#: so it gets the same treatment rather than being trusted because it arrived
-#: in a "safe" field.
+#: which is attacker-influenced exactly as the submitted URL is.
 _THUMB_HOSTS = (
     "ytimg.com", "ggpht.com", "googleusercontent.com",
     "youtube.com", "yt3.ggpht.com",
@@ -53,9 +40,9 @@ _SOCKET_TIMEOUT = _env_float("DUBBING_UI_PROBE_TIMEOUT_S", 20.0)
 def probe(url: str) -> Dict[str, Any]:
     """Metadata for `url` without downloading a byte.
 
-    Raises `RuntimeError` when yt-dlp is missing or the extraction fails —
-    the caller turns that into a 4xx with the message, because "this video is
-    private" is something the operator needs to read, not a 500.
+    Raises `RuntimeError` when yt-dlp is missing or extraction fails; the
+    caller turns that into a 4xx carrying the message, since "this video is
+    private" is for the operator to read.
     """
     try:
         import yt_dlp
@@ -78,8 +65,7 @@ def probe(url: str) -> Dict[str, Any]:
     if info is None:
         raise RuntimeError("Could not read that video: yt-dlp returned nothing.")
     # `noplaylist` is honoured by the watch-URL extractor, but a bare playlist
-    # URL still comes back as a playlist. Take its first entry rather than
-    # failing on a missing duration three lines later.
+    # URL still comes back as one. Take its first entry.
     if info.get("_type") == "playlist":
         entries = [e for e in (info.get("entries") or []) if e]
         if not entries:
@@ -107,11 +93,9 @@ _YT_ID_RE = re.compile(r"(?:v=|youtu\.be/|/shorts/|/embed/)([A-Za-z0-9_-]{11})")
 def name_from_url(url: str) -> str:
     """A usable name the instant a URL is pasted, before anything is fetched.
 
-    The probe takes a second or two and can fail outright; a job created in
-    that window still has to be called something, and "20261017-032044__
-    L3oOldViIgY__pyannote.whisperx.mms_fa.bodhan.hi" is not a name. The video
-    id is short, stable and recognisable, so it is what stands in until the
-    real title arrives.
+    The probe can fail or take seconds, and a job created meanwhile still needs
+    a name that is not its id. The video id stands in until the real title
+    arrives.
     """
     u = str(url or "").strip()
     m = _YT_ID_RE.search(u)
@@ -122,11 +106,8 @@ def name_from_url(url: str) -> str:
 
 
 def display_name(meta: Dict[str, Any], *, url: str = "") -> str:
-    """The name shown on the card: the real title once we have it.
-
-    Order matters and is the whole point — a fetched title replaces the
-    URL-derived placeholder, and neither is ever the job id.
-    """
+    """The name shown on the card: the fetched title, else the URL-derived
+    placeholder. Never the job id."""
     title = str(meta.get("title") or "").strip()
     if title:
         return title
@@ -141,8 +122,8 @@ def is_live(meta: Dict[str, Any]) -> bool:
 def fetch_thumbnail(meta: Dict[str, Any], job_root: Path) -> Optional[Path]:
     """Cache the poster frame as `<job>/meta.thumb.jpg`.
 
-    Best-effort: a missing thumbnail degrades the card, it does not fail the
-    job, so every failure here is a warning and a `None`.
+    Best-effort: every failure is a warning and a None, since a missing
+    thumbnail only degrades the card.
     """
     url = (meta or {}).get("thumbnail_url")
     if not url:

@@ -2,13 +2,9 @@
 
   - bodhan : Bodhan Indic-Transliterate via REST (POST /v1/chat/completions)
 
-Script-only conversion (same language in, same language out); the code-mix
-stage calls it to render retained English spans in the target script, plus
-to normalise mixed-script segments to a single script.
-
-`indicxlit` (AI4Bharat IndicXlit, local transformers) was removed on
-2026-10-28 — a second local model for a stage the hosted endpoint already
-covers for all 22 languages. In git at b823223.
+Script-only conversion, same language in and out. The code-mix stage uses it
+to render retained English spans in the target script and to normalise
+mixed-script segments to one script.
 """
 from __future__ import annotations
 

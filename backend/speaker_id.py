@@ -1,39 +1,18 @@
 """Speaker-label refinement (stage 4c).
 
-Diarization gives globally-consistent labels -- pyannote clusters the whole
-file at once, so `SPK_00` at 0:10 is the same cluster as `SPK_00` at 4:30 --
-and `backend.voices` assigns one voice per label, so one speaker keeps one
-voice for the whole video by construction.
+pyannote's labels are globally consistent, but a label is not guaranteed to
+hold exactly one person: on noisy material it under-clusters, several
+characters collapse into one label, and the dub reads them all in one voice
+without erroring.
 
-What is NOT guaranteed is that a label holds exactly one person. On noisy
-material (film dialogue over score, crowd scenes) pyannote under-clusters:
-several characters collapse into one label, that label gets one voice, and the
-dub reads them all in it. Nothing errors, and the per-speaker voice map looks
-correct, which is why this went unnoticed.
+This splits impure labels by ECAPA cosine, then merges labels that turn out to
+be one person. Every threshold here is set against SHORT-WINDOW cosine, which
+tops out around 0.45-0.55 for a single speaker — not the ~0.9 a full-clip
+comparison gives. Splitting is the pass that matters; merging guards the rarer
+opposite failure.
 
-Measured on a 279 s Dark Knight mob scene (6+ speaking characters, 4 labels),
-ECAPA cosine between turns of the same label:
-
-    control (one known speaker, clean lecture, 1.5 s windows)
-                                     mean 0.45-0.55   min 0.35
-    SPK_01   mean 0.485  min  0.243    <- inside the band: one person
-    SPK_02   mean 0.281  min  0.004    <- below
-    SPK_03   mean 0.253  min -0.012    <- below
-    SPK_00   mean 0.222  min -0.178    <- far below: several people
-
-The control is what makes those numbers readable. Short-window ECAPA cosine
-does NOT reach the ~0.9 a full-clip comparison gives; 0.45-0.55 *is* the
-single-speaker ceiling at this window length, so thresholds here are set
-against that, never against intuition about what "same speaker" should score.
-
-Between-label centroids on the same clip were 0.007-0.141 -- no person had been
-split in two -- so the split pass is the one that matters and the merge pass is
-a cheap guard for the opposite failure.
-
-This runs on audio alone, after resegmentation and *before* face detection, so
-the stage order stays acyclic. ASD's face tracks are a second identity signal
-but only exist at stage 6, after this; binding them in would mean diarization
-depending on face tracking.
+Runs on audio alone, after resegmentation and before face detection, so the
+stage order stays acyclic — ASD's face tracks only exist at stage 6.
 """
 from __future__ import annotations
 
@@ -50,47 +29,43 @@ log = logging.getLogger(__name__)
 #: by their nearest embedded neighbour instead of voting.
 MIN_TURN_S = 1.0
 
-#: A label whose mean within-cosine falls below this is judged impure. Set
-#: under the measured single-speaker floor (min 0.35 in the control) so an
-#: ordinary noisy-but-single speaker is left alone.
+#: A label whose mean within-cosine falls below this is judged impure. Set at
+#: the measured single-speaker floor so a noisy-but-single speaker is left
+#: alone.
 PURITY_FLOOR = 0.35
 
 #: Average-linkage cosine DISTANCE at which a label is cut. 1 - 0.3 = 0.7:
 #: same-speaker pairs sit near distance 0.5, different-speaker pairs near 0.9.
 SPLIT_DISTANCE = 0.70
 
-#: Two final labels whose centroids exceed this are the same person split in
-#: two. Deliberately above the single-speaker mean, so merging is rare.
+#: Two final labels whose centroids exceed this are one person split in two.
+#: Above the single-speaker mean, so merging is rare.
 MERGE_CEILING = 0.55
 
 #: A label needs this many embeddable turns before its purity is judged. Below
 #: it the mean is too noisy to act on.
 MIN_TURNS_TO_JUDGE = 4
 
-#: A split only pays for itself if each piece can carry a voice. Below this
-#: much speech a sub-cluster is folded back into its nearest sibling: stage 9d
-#: needs a reference clip long enough to predict gender and rank timbre, and a
-#: distinct catalog voice on 2 s of dialogue sounds worse than sharing one.
-#: Without this floor the Dark Knight clip split 4 labels into 15, nine of them
-#: singletons of 1.4-3.4 s.
+#: Below this much speech a sub-cluster is folded back into its nearest
+#: sibling: stage 9d needs a reference clip long enough to predict gender and
+#: rank timbre. Without the floor a split run produces singletons of a couple
+#: of seconds each.
 MIN_SPEAKER_S = 4.0
 
-#: ...but a fragment is only folded back when it plausibly belongs to the host.
-#: "Nearest sibling" always finds someone, so an unconditional absorb undoes the
-#: split it just made: on the same clip it put SPK_00 back to 0.331 and SPK_02
-#: to 0.274, below the floor they had just been cleaned past. A bit-part with a
-#: single line is a real speaker with thin evidence, and leaving it standalone
-#: is the honest answer -- it costs one catalog voice, not a wrong one.
+#: A fragment is only folded back when it plausibly belongs to the host.
+#: "Nearest sibling" always finds someone, so an unconditional absorb undoes
+#: the split it just made, pushing labels back below the purity floor. A
+#: bit-part left standalone costs one catalog voice, not a wrong one.
 ABSORB_MIN_COSINE = 0.35
 
 
 def _embed_turns(audio_path: Path, turns: Sequence[Turn], *,
                  device: Optional[str] = None,
                  min_turn_s: float = MIN_TURN_S):
-    """ECAPA embedding per turn. Returns (index -> vector), or None.
+    """ECAPA embedding per turn, as (index -> vector), or None.
 
-    Optional in exactly the way `backend.voices._ecapa_embed` is: without
-    speechbrain the caller must leave the labels untouched rather than guess.
+    Optional like `backend.voices._ecapa_embed`: without speechbrain the caller
+    leaves the labels untouched rather than guessing.
     """
     try:
         import numpy as np
@@ -169,9 +144,9 @@ def refine_speakers(
 ) -> DiarizationResult:
     """Split impure labels, merge duplicated ones, relabel by speech time.
 
-    Returns a NEW result; the input is not mutated. `extra["speaker_id"]`
-    records what happened, including the per-label purity that drove it, so a
-    finished run can be audited without re-running the embeddings.
+    Returns a new result; the input is not mutated. `extra["speaker_id"]`
+    records per-label purity and every split/merge, so a finished run can be
+    audited without re-running the embeddings.
     """
     turns = list(result.turns)
     audio_path = Path(audio_path or result.audio_path)
@@ -204,9 +179,8 @@ def refine_speakers(
         splits[label] = len(set(sub))
         for i, s in zip(scored, sub):
             new_label[i] = f"{label}#{s}"
-        # Short turns never voted; give each one the sub-label of the nearest
-        # scored turn of its own original label, which is the best available
-        # evidence and keeps every turn attached to a speaker.
+        # Short turns never voted; give each the sub-label of the nearest
+        # scored turn of its own original label so no turn is left unattached.
         for i in idxs:
             if i in embs:
                 continue
@@ -215,9 +189,8 @@ def refine_speakers(
         log.info("speaker_id: %s purity %.3f < %.2f -> split into %d",
                  label, p, purity_floor, len(set(sub)))
 
-    # Absorb sub-clusters too small to cast. Nearest sibling by centroid
-    # cosine, so a fragment rejoins the voice it most resembles rather than
-    # the one it happens to sit beside in time.
+    # Absorb sub-clusters too small to cast, by centroid cosine — a fragment
+    # rejoins the voice it resembles, not the one nearest in time.
     absorbed: List[Tuple[str, str]] = []
     stranded: set = set()
     if splits and min_speaker_s > 0:
@@ -315,18 +288,16 @@ def _canonicalise(turns: Sequence[Turn], new_label: Dict[int, str], *,
                   max_speakers: Optional[int] = None) -> Dict[int, str]:
     """Rename to SPK_00.. by descending speech time, stable and gap-free.
 
-    Ordering by speech time rather than first appearance matches how
-    `backend.voices.assign_voices` already ranks speakers, so the lead gets
-    SPK_00 in both places.
+    Ordering by speech time matches `backend.voices.assign_voices`, so the lead
+    gets SPK_00 in both places.
     """
     total: Dict[str, float] = {}
     for i, t in enumerate(turns):
         total[new_label[i]] = total.get(new_label[i], 0.0) + t.duration
     order = sorted(total, key=lambda k: (-total[k], k))
     if max_speakers and len(order) > max_speakers:
-        # Fold the smallest labels into the nearest surviving one by speech
-        # time. A hard cap is an operator instruction, so honour it rather
-        # than quietly returning more speakers than were asked for.
+        # Fold the smallest labels into the nearest survivor by speech time.
+        # The cap is an operator instruction, so honour it exactly.
         keep, drop = order[:max_speakers], order[max_speakers:]
         log.info("speaker_id: capping %d labels at max_speakers=%d",
                  len(order), max_speakers)

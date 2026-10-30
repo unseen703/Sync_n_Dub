@@ -1,20 +1,6 @@
 import { useEffect, useRef } from 'react';
 
-/**
- * A self-scheduling poll with the four properties this app needs and a
- * generic fetch cache does not give:
- *
- *  - the next delay is decided AFTER each tick, so a caller can back off
- *    on no-change and speed up on change;
- *  - returning `null` from `getDelay` stops the poll permanently, which is
- *    how a terminal job stops costing requests;
- *  - nothing is scheduled while `document.hidden`, and returning to the tab
- *    fires an immediate refresh rather than waiting out the interval;
- *  - a tick never overlaps the previous one. A 1.5 s interval against a
- *    server busy with a GPU render would otherwise pile up.
- *
- * `setTimeout` chaining, not `setInterval`, for exactly that last reason.
- */
+/** Runs an async poller. Inputs supply work and the next delay; it returns nothing and cleans up on unmount. */
 export function usePoll(
   key: string | null,
   tick: () => Promise<unknown> | unknown,
@@ -49,8 +35,7 @@ export function usePoll(
 
     const run = async () => {
       if (cancelled || stopped) return;
-      // Paused while hidden: nothing is scheduled, and `visibilitychange`
-      // is what wakes it. A background tab costs zero requests.
+
       if (document.hidden) return;
       if (inFlight) {
         schedule(200);
@@ -59,9 +44,7 @@ export function usePoll(
       inFlight = true;
       try {
         await tickRef.current();
-      } catch {
-        /* the tick owns its own error reporting */
-      } finally {
+      } catch {} finally {
         inFlight = false;
       }
       if (cancelled) return;

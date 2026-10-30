@@ -504,7 +504,7 @@ Stages and adapters (registered names in bold)
 | `faces/` | `detect/` (**retinaface**, **mediapipe**), `track/` (**bytetrack**) | Per-frame detection, then ByteTrack identities; `base.py` holds `FaceBox`, `FaceDetections`, `FaceTracks` |
 | `lipsync/` | `base.py`, `wav2lip_adapter.py` (**wav2lip**), `musetalk_adapter.py` (**musetalk**), `latentsync_adapter.py` (**latentsync**, **latentsync15**) | Each shells into its own conda env and returns a rendered video; LatentSync 1.6 is 512 px (~18 GB), 1.5 is 256 px (~8 GB) |
 | `mt/` | `bodhan_adapter.py` (**bodhan**) | Hosted Indic-Translate, one call per segment; target script native, roman or codemix |
-| `restore/` | `gfpgan_adapter.py` (**gfpgan**) | GFPGAN v1.4 plus Real-ESRGAN over a finished render via `scripts/face_enhance.py`; stage 9i |
+| `restore/` | `gfpgan_adapter.py` (**gfpgan**) | GFPGAN v1.4 plus Real-ESRGAN over a finished render via `backend/face_enhance.py`; stage 9i |
 | `translit/` | `bodhan_adapter.py` (**bodhan**) | Hosted Indic-Transliterate; falls back to the MT endpoint |
 | `tts/` | `bodhan_adapter.py` (**bodhan**) | Hosted Indic-Speak, returns WAV bytes; re-speaks at a different rate; the only stock-voice engine |
 Removed registry entries, so the README block is out of date on them: `wav2lip_hd` and `lipgan` (2026-10-23; restoration is now `--restore gfpgan`), `openvoice` and `vevo`, and `ts_talknet`. The whole `vc/` package went on 2026-10-28, along with `backend/voice_convert.py`, stage 9f and `--vc`. Adapter files for `asd/`, `faces/` and the `bodhan` base classes were not opened; their rows come from the registry docstrings.

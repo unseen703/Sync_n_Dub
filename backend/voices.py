@@ -153,7 +153,7 @@ def load_voice_catalog(
     return voices
 
 
-#: Where `scripts/build_voice_refs.py` writes one sample clip per voice.
+#: One reference sample clip per voice, under `<engine>/<voice>.wav`.
 VOICE_REF_DIR = Path(__file__).resolve().parent.parent / "data" / "voice_refs"
 
 
@@ -165,8 +165,7 @@ def attach_voice_references(
     The built-in catalog ships names only, so without this the ECAPA
     similarity term in `assign_voices` scores nothing and the assignment
     falls back to gender + language. Clips are found at
-    `<ref_dir>/<engine>/<voice>.wav`; render them with
-    `scripts/build_voice_refs.py`.
+    `<ref_dir>/<engine>/<voice>.wav`.
     """
     base = Path(ref_dir) if ref_dir is not None else VOICE_REF_DIR
     found = 0
@@ -188,8 +187,7 @@ def attach_voice_references(
         if have == 0:
             log.info("voices: no voice reference clips found; the ECAPA "
                      "similarity term is INACTIVE and assignment will fall "
-                     "back to target language + gender. Render them with "
-                     "scripts/build_voice_refs.py to enable it.")
+                     "back to target language + gender.")
     return found
 
 
@@ -472,8 +470,7 @@ def assign_voices(
             missing.append("speaker clips could not be embedded "
                            "(is speechbrain installed?)")
         if not voice_embs:
-            missing.append(f"no catalog reference clips in {VOICE_REF_DIR} "
-                           f"(render them with scripts/build_voice_refs.py)")
+            missing.append(f"no catalog reference clips in {VOICE_REF_DIR}")
         log.warning(
             "voices: assigned by target language (%s) + gender instead of "
             "timbre for at least one speaker: %s",

@@ -30,17 +30,18 @@ from typing import Optional, Tuple
 
 from backend.media_io import probe_video as _probe_video
 from . import coords
-from .base import (BaseLipSync, LipSyncRequest, LipSyncResult,
-                   resolve_env_python, resolve_vendor_repo, run_streaming)
+from .base import (MAX_RENDER_HEIGHT, BaseLipSync, LipSyncRequest,
+                   LipSyncResult, cap_resolution, resolve_env_python,
+                   resolve_vendor_repo, run_streaming)
 
 log = logging.getLogger(__name__)
 
 
 DEFAULT_REPO = "third_party/MuseTalk"
 
-#: Tallest frame handed to MuseTalk; taller input is downscaled first,
-#: keeping aspect ratio. A larger source is rendered at 1080p, and that is
-#: logged. Three reasons, all measured on this host:
+#: The cap itself is `base.MAX_RENDER_HEIGHT`, imported above and shared with
+#: LatentSync since 2026-10-29. MuseTalk's own three reasons for it, all
+#: measured on this host:
 #:
 #: 1. RAM. `read_imgs()` holds every extracted frame in a Python list, so RSS
 #:    is linear in pixels -- ~6.1 MiB/frame at 1080p, 4x that at 4K. A 60 s
@@ -50,7 +51,8 @@ DEFAULT_REPO = "third_party/MuseTalk"
 #:    has loaded.
 #: 3. No visible cost: the mouth is rebuilt at 256x256 whatever the frame
 #:    size, so the extra pixels are carried through and then discarded.
-MAX_RENDER_HEIGHT = 1080
+_CAP_WHY = ("MuseTalk holds every frame in RAM and rebuilds the mouth at "
+            "256x256 regardless, so the extra pixels only cost memory")
 
 
 def _rescale_boxes(boxes, scale):
@@ -92,12 +94,13 @@ class MuseTalkSync(BaseLipSync):
         checkpoint: Optional[str] = None,
         python_bin: Optional[str] = None,
         version: Optional[str] = None,
-        # 8, not upstream's 20. On this 16311 MiB card batch 20 peaks at
-        # 15058 MiB and batch 15 at 14654, leaving too little for a second
-        # tenant; an OOM here surfaces only as "produced no mp4".
+        # None = scale from VRAM via backend.scaling.musetalk_batch_default()
+        # (baseline 8 on 16 GiB -- upstream's 20 peaks at 15058 MiB and leaves
+        # too little for a second tenant; an OOM here surfaces only as
+        # "produced no mp4"). An explicit int wins and is passed through.
         # Batch size is pure throughput/VRAM and costs no quality -- `datagen`
         # is a chunker and each frame pairs with its own latent by index.
-        batch_size: int = 8,
+        batch_size: Optional[int] = None,
         fps: int = 25,
         bbox_shift: int = 0,
         use_float16: bool = False,
@@ -122,7 +125,10 @@ class MuseTalkSync(BaseLipSync):
         self.checkpoint = checkpoint or os.getenv("MUSETALK_CHECKPOINT")
         self.python_bin = resolve_env_python("musetalk", "musetalk", python_bin)
         self.version = (version or os.getenv("MUSETALK_VERSION") or "v15").lower()
-        self.batch_size = batch_size
+        if batch_size is None:
+            from backend.scaling import musetalk_batch_default
+            batch_size = musetalk_batch_default()
+        self.batch_size = int(batch_size)
         self.fps = fps
         self.bbox_shift = bbox_shift
         self.max_height = int(max_height or 0)
@@ -154,79 +160,14 @@ class MuseTalkSync(BaseLipSync):
 
     def _cap_resolution(self, video: Path, work: Path
                         ) -> Tuple[Path, Tuple[float, float]]:
-        """Downscale to `self.max_height` if taller.
+        """Downscale to `self.max_height` if taller. See `base.cap_resolution`.
 
-        Returns `(what to render, (sx, sy))`, the factors mapping source
-        pixel coordinates onto the rendered frame. `(1.0, 1.0)` whenever
-        nothing was rescaled, including every failure path; callers holding
-        source-space coordinates must apply them (see `_rescale_boxes`).
-
-        Returns the original path on any failure, so a probe or rescale
-        error degrades to a source-resolution render rather than losing the
-        job. Width is forced even (`-2`) because H.264 4:2:0 cannot encode
-        an odd dimension.
+        Kept as a method because the returned `(sx, sy)` is what
+        `_rescale_boxes` consumes a few lines later, and that pairing is the
+        contract worth keeping visible in this file.
         """
-        unscaled = (1.0, 1.0)
-        if self.max_height <= 0:
-            return video, unscaled
-        from backend.media_io import _ffmpeg_bin, _ffprobe_bin
-        ffprobe, ffmpeg = _ffprobe_bin(), _ffmpeg_bin()
-        if not ffprobe or not ffmpeg:
-            return video, unscaled
-        try:
-            r = subprocess.run(
-                [ffprobe, "-v", "error", "-select_streams", "v:0",
-                 "-show_entries", "stream=width,height", "-of", "csv=p=0",
-                 str(video)], capture_output=True, text=True, timeout=60)
-            w, h = (int(x) for x in r.stdout.strip().splitlines()[0].split(",")[:2])
-        except Exception as e:                           # noqa: BLE001
-            log.warning("musetalk: could not probe %s (%s); rendering at "
-                        "source resolution", video.name, e)
-            return video, unscaled
-        if h <= self.max_height:
-            return video, unscaled
-
-        scaled = work / f"{video.stem}.{self.max_height}p.mp4"
-        log.info("musetalk: downscaling %dx%d -> %dp before render "
-                 "(MuseTalk holds every frame in RAM and rebuilds the mouth "
-                 "at 256x256 regardless, so the extra pixels only cost "
-                 "memory) -- OUTPUT WILL BE %dp, not %dp",
-                 w, h, self.max_height, self.max_height, h)
-        try:
-            p = subprocess.run(
-                [ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
-                 "-i", str(video),
-                 "-vf", f"scale=-2:{self.max_height}:flags=lanczos",
-                 "-c:v", "libx264", "-preset", "medium", "-crf", "18",
-                 "-pix_fmt", "yuv420p", "-c:a", "copy", str(scaled)],
-                capture_output=True, text=True)
-            if p.returncode != 0 or not scaled.is_file() or not scaled.stat().st_size:
-                log.warning("musetalk: downscale failed (%s); rendering at "
-                            "source resolution",
-                            (p.stderr or "").strip()[-200:])
-                return video, unscaled
-        except Exception as e:                           # noqa: BLE001
-            log.warning("musetalk: downscale failed (%s); rendering at "
-                        "source resolution", e)
-            return video, unscaled
-
-        # Measure the factors off the ENCODED file, not from `max_height`:
-        # `-2` rounds width to even, so a computed factor drifts the boxes
-        # sideways on an odd-width source.
-        try:
-            r = subprocess.run(
-                [ffprobe, "-v", "error", "-select_streams", "v:0",
-                 "-show_entries", "stream=width,height", "-of", "csv=p=0",
-                 str(scaled)], capture_output=True, text=True, timeout=60)
-            nw, nh = (int(x) for x in r.stdout.strip().splitlines()[0].split(",")[:2])
-        except Exception as e:                           # noqa: BLE001
-            # Keep the rendered file, but refuse a supplied coord list: it
-            # cannot be converted without the factor, and a guessed one puts
-            # oversized boxes on a smaller frame.
-            raise RuntimeError(
-                f"musetalk: downscaled {video.name} but could not probe the "
-                f"result to convert target boxes ({e})") from e
-        return scaled, (nw / w, nh / h)
+        return cap_resolution(video, work, self.max_height,
+                              tag="musetalk", why=_CAP_WHY, log=log)
 
     def sync(self, request: LipSyncRequest) -> LipSyncResult:
         return self.sync_many([request])[0]

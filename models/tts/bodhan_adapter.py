@@ -1,39 +1,9 @@
-"""Bodhan Indic-Speak adapter.
+"""Bodhan Indic-Speak TTS adapter.
 
-OpenAI-audio-shaped endpoint — POST /v1/audio/speech. Payload:
-  {"model": "indic-speak", "input": "<text>", "voice": "<voice id>",
-   "instructions": "{\"lang\": \"<iso>\"}", "speed": 1.0}
+POST /v1/audio/speech, OpenAI-audio shaped; the response is the WAV body as
+binary, saved to `out_dir/<segment_id>.wav`. Supports a real speaking rate.
 
-Returns the WAV body directly (binary); the response is NOT JSON. We
-save it under `out_dir/<segment_id>.wav` and let the mixer pick up the
-file.
-
-Speaking rate
--------------
-`supports_rate = True`: the engine re-speaks at a different pace rather than
-the caller stretching the waveform afterwards, which is the whole distinction
-`models/tts/base.py` draws between method 1 and method 2.
-
-**The field name is not in the published docs.** console.bodhan.ai/api-docs
-lists only `model`, `input`, `voice` and `instructions`, so `speed` here is
-taken from the OpenAI `/v1/audio/speech` shape this endpoint otherwise
-follows exactly. That is an inference, and this file does not pretend
-otherwise — but it is a *checkable* one rather than a silent one: the API
-answers an unknown or out-of-range field with 422, and `_post_one` turns a
-422 on a rated request into an error naming `BODHAN_TTS_RATE_FIELD`, which
-overrides the name without a code change. Set it to `rate`, or to
-`instructions.speed` to nest it inside the instructions blob instead.
-
-The rate is sent ONLY when it differs from 1.0, so a run that never asks for
-one is byte-identical to the payload this adapter has always sent and cannot
-be broken by the inference above.
-
-Env (loaded from `.env`):
-  BODHAN_TTS_URL        (default: https://api.bodhan.ai/v1)
-  BODHAN_TTS_KEY        (required)
-  BODHAN_TTS_MODEL      (default: indic-speak)
-  BODHAN_TTS_RATE_FIELD (default: speed; or `rate`, or `instructions.<name>`)
-  BODHAN_TTS_RATE_RANGE (default: 0.25,4.0 — OpenAI's bounds)
+Env: BODHAN_TTS_{URL,KEY,MODEL,RATE_FIELD,RATE_RANGE}.
 """
 from __future__ import annotations
 
@@ -52,15 +22,10 @@ log = logging.getLogger(__name__)
 
 
 #: The 14 delivery styles indic-speak accepts, verbatim from the hosted API
-#: docs (console.bodhan.ai/api-docs). Case and spacing are significant and
-#: an unknown value is a 422, not a silent fallback -- so the CLI pins
-#: `--tts-style` to this list and a typo fails at argparse instead of
-#: costing an API round trip. Omit style entirely for a neutral reading.
-#:
-#: The six Ekman emotions here trace to AI4Bharat's Rasa corpus
-#: (INTERSPEECH 2024); that paper reports `fear` and `surprise` as the
-#: hardest to synthesize, so weak differentiation on those two is expected
-#: rather than evidence the knob is broken.
+#: docs. Case and spacing matter and an unknown value is a 422, not a silent
+#: fallback, so the CLI pins `--tts-style` to this list. Omit style for a
+#: neutral reading. `fear` and `surprise` differentiate weakly — the Rasa
+#: corpus they come from reports both as the hardest to synthesize.
 INDIC_SPEAK_STYLES = (
     "AIR style news",
     "Customer Care",
@@ -80,9 +45,9 @@ INDIC_SPEAK_STYLES = (
 DEFAULT_MODEL = "indic-speak"
 
 
-#: Where the speaking rate goes in the payload, and the bounds it is clamped
-#: to. Both are env-overridable because neither is documented; see the module
-#: docstring. `instructions.<name>` nests it inside the instructions JSON.
+#: Where the speaking rate goes in the payload. Env-overridable because the
+#: field is undocumented; `instructions.<name>` nests it inside the
+#: instructions JSON.
 RATE_FIELD = os.getenv("BODHAN_TTS_RATE_FIELD") or "speed"
 
 
@@ -94,11 +59,9 @@ def _rate_range() -> tuple:
 
 class BodhanTTS(BodhanClientMixin, BaseTTS):
     name = "bodhan"
-    #: The engine takes a speaking rate, so `speed_control` is real here --
-    #: it re-synthesises at the new pace instead of resampling a finished
-    #: clip. Edge was the only other adapter that could do this and it is
-    #: gone, so without this flag `--tts-speed-control` would no-op on every
-    #: engine the install has.
+    #: Real speed control: the engine re-synthesises at the new pace instead
+    #: of resampling a finished clip. This is the only adapter left that can,
+    #: so without the flag `--tts-speed-control` no-ops everywhere.
     supports_rate = True
 
     def __init__(
@@ -122,8 +85,7 @@ class BodhanTTS(BodhanClientMixin, BaseTTS):
         )
 
     def _ensure_loaded(self) -> None:
-        # `Accept: audio/wav` — this is the one Bodhan service that answers
-        # with bytes rather than JSON.
+        # The one Bodhan service that answers with bytes rather than JSON.
         if not self._ensure_bodhan_session(
             missing_key_message=(
                 "BODHAN_TTS_KEY is not set. Add it to .env or pass api_key=…"
@@ -167,8 +129,8 @@ class BodhanTTS(BodhanClientMixin, BaseTTS):
                 segments.append(TTSSegment(
                     id=req.id, audio_path=dest, duration_s=dur,
                     sample_rate=sr, voice=req.voice, speaker=req.speaker,
-                    # Evidence of the pace actually asked of the engine, so
-                    # a closed-loop run can be audited after the fact.
+                    # The pace actually asked of the engine, so a closed-loop
+                    # run can be audited afterwards.
                     extra={"rate_factor": float(getattr(req, "rate", 1.0) or 1.0)},
                 ))
             except Exception as e:
@@ -199,9 +161,8 @@ class BodhanTTS(BodhanClientMixin, BaseTTS):
             "input": text,
             "voice": voice or "Amit",
         }
-        # Only ever sent when a rate was actually asked for: at 1.0 the
-        # payload stays exactly what it has always been, so the undocumented
-        # field name cannot break a run that does not use it.
+        # Only sent when a rate was asked for, so the undocumented field name
+        # cannot break a run that does not use it.
         rated = abs(rate - 1.0) > 1e-9
         if rated:
             lo, hi = _rate_range()
@@ -221,9 +182,8 @@ class BodhanTTS(BodhanClientMixin, BaseTTS):
             resp = self._session.post(url, json=payload, timeout=self.timeout_s)
             self._last_post_ts = time.monotonic()
 
-            # Surface the rate-limit headers whenever the server sends them —
-            # Bodhan only ships them on MT today, but logging on sight means
-            # future ASR/TTS rollouts show up without an adapter change.
+            # Bodhan only ships these on MT today; logging on sight means a
+            # later TTS rollout needs no adapter change.
             self._log_ratelimit_headers(resp)
 
             if resp.status_code == 429:
@@ -232,10 +192,8 @@ class BodhanTTS(BodhanClientMixin, BaseTTS):
                             attempt + 1, wait)
                 time.sleep(wait); continue
             if 500 <= resp.status_code < 600:
-                # Fail fast when the service is clearly dead: identical status
-                # + body across two attempts means retrying is just burning
-                # wall-clock (observed with Bodhan TTS "internal_server_error"
-                # outages, where every retry returns the same 500).
+                # Identical status and body across two attempts means the
+                # service is down and retrying only burns wall-clock.
                 sig = (resp.status_code, resp.text[:200])
                 if last_err_sig == sig and attempt >= 1:
                     raise RuntimeError(
@@ -248,12 +206,9 @@ class BodhanTTS(BodhanClientMixin, BaseTTS):
                             resp.status_code, attempt + 1, wait)
                 time.sleep(wait); continue
             if resp.status_code >= 400:
-                # A 422 on a request that carries a rate is the one failure
-                # this adapter can diagnose outright: the rate field name is
-                # not in the published docs (see the module docstring), so
-                # it is the first thing to suspect and the message says how
-                # to change it rather than leaving the reader to find this
-                # file. Unrated requests fall through to the generic error.
+                # A 422 on a rated request almost certainly means the
+                # undocumented rate field name is wrong, so say how to change
+                # it. Unrated requests fall through to the generic error.
                 if resp.status_code == 422 and rated:
                     raise RuntimeError(
                         f"Bodhan TTS rejected the speaking rate (HTTP 422). "

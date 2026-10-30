@@ -7,28 +7,18 @@ import { IconAlert, IconCheck, IconChevron } from '../ui/Icons';
 import { Skeleton } from '../ui/Card';
 import type { Phase, Stage } from '../../api/types';
 
-// `done` and `skipped` both mean "nothing more will happen here", which is
-// what the connectors and the Finished check need to know.
 function isComplete(p: Phase | Stage): boolean {
   return p.state === 'done' || p.state === 'skipped';
 }
 
-// Actually ran. The checkmark is keyed off THIS, not `isComplete`: painting a
-// skipped pill with a tick is what made Lip-sync claim a render that never
-// happened.
 function isDone(p: Phase | Stage): boolean {
   return p.state === 'done';
 }
 
-// Work a later submission does -- casting voices, the lip-sync render. Drawn
-// as a waiting node, never as a tick and never muted-out.
 function isDeferred(p: Phase): boolean {
   return p.state === 'pending' && Boolean(p.deferred);
 }
 
-// Every pill opens, whatever its state — including one this run skipped,
-// which previously refused to open and so could not explain itself. The
-// exception is `Finished`: it marks a moment and contains no steps.
 function hasDetail(p: Phase): boolean {
   return p.substages.length > 0 || (p.contains?.length ?? 0) > 0;
 }
@@ -42,7 +32,9 @@ function Connector({ side, lit, failed }: {
     <div
       className={cn(
         'absolute top-[12px] h-[2px] -translate-y-1/2',
-        side === 'left' ? 'left-0 right-1/2' : 'left-1/2 right-0',
+        side === 'left'
+          ? 'left-0 right-[calc(50%+12px)]'
+          : 'left-[calc(50%+12px)] right-0',
         'bg-ink/[0.12]',
       )}
     >
@@ -65,8 +57,7 @@ function stateIcon(stage: Stage) {
   if (state === 'failed') return <IconAlert width={10} height={10} className="text-danger" />;
   if (state === 'running') return <span className="inline-block h-1.5 w-1.5 rounded-full bg-aqua animate-pulse" />;
   if (state === 'skipped') return <span className="text-[10px] text-ink4">skip</span>;
-  // Planned, not this run's to do. Says "later", not "skipped" -- the two
-  // read very differently to someone waiting at the cast gate.
+
   if (state === 'pending' && stage.deferred) return <span className="text-[10px] text-ink4">later</span>;
   return null;
 }
@@ -92,6 +83,7 @@ function SubstageRow({ stage }: { stage: Stage }) {
   );
 }
 
+/** Pipeline progress ribbon. It reads job phases and renders their current states and details. */
 export function StageRibbon() {
   const progress = useStore((s) => s.progress);
   const [expanded, setExpanded] = useState<string | null>(null);
@@ -104,13 +96,28 @@ export function StageRibbon() {
     );
   }
 
-  // The MT gate specifically, NOT "the next pill is deferred". Those are
-  // different screens: a finished dub waiting for lip-sync also has a
-  // deferred pill next, and there the honest header is "Lip-sync not
-  // started" — telling that operator to pick voices would be nonsense.
   const atGate = Boolean(progress.milestones?.awaiting_cast);
 
-  const phases = progress.phases ?? [];
+  // Every UI job runs the full pipeline by default -- there is no "this run
+  // intentionally skipped lip-sync" case here, so every `skipped` pill really
+  // means "not run yet". The backend's `_group_phases` writes `skipped` as
+  // the default for an empty group and `_finished_phase` counts it as
+  // complete, which rolls Finished up to `done` and lights the connector
+  // line through pills that have not run. Normalise `skipped` → `pending`
+  // across the whole ribbon so the state is honest end to end.
+  const rawPhases = progress.phases ?? [];
+  const anySkipped = rawPhases.some((p) => p.id !== 'finished' && p.state === 'skipped');
+  const phases = rawPhases.map((p) => {
+    if (p.id !== 'finished' && p.state === 'skipped') {
+      return { ...p, state: 'pending' as const };
+    }
+    // Finished → pending whenever any upstream pill was treated as skipped
+    // (now pending), or we are still at the cast gate.
+    if (p.id === 'finished' && p.state === 'done' && (atGate || anySkipped)) {
+      return { ...p, state: 'pending' as const };
+    }
+    return p;
+  });
   if (!phases.length) {
     return (
       <section className="card px-5 py-3.5">
@@ -124,14 +131,10 @@ export function StageRibbon() {
   }
 
   const n = phases.length;
-  // Numerator: stages that RAN. Denominator: stages this run could reach --
-  // a skipped group is not outstanding work, so counting it would make the
-  // bar read "2 of 5" forever on a job that is doing everything it can.
+
   const doneCount = phases.filter(isDone).length;
   const liveCount = phases.filter((p) => p.state !== 'skipped').length;
-  // The last pill that actually ran. The filled connector is measured from
-  // here, so the line reports progress rather than reaching the end of the
-  // bar the moment the remaining stages are merely accounted for.
+
   const lastDoneIdx = phases.reduce((acc, p, i) => (isDone(p) ? i : acc), -1);
   const runningIdx = phases.findIndex((p) => p.state === 'running');
   const failedIdx = phases.findIndex((p) => p.state === 'failed');
@@ -157,13 +160,15 @@ export function StageRibbon() {
         >
           {failedIdx >= 0
             ? `Failed · ${current?.label}`
-            : allDone
-              ? 'Finished'
-              : atGate
-                // Only here. "Not started" would read as "any moment now";
-                // at the gate nothing happens at all until the operator
-                // picks voices, and the header is where that gets said.
-                ? 'Translation complete. Please select the voices as per your requirement to proceed with the dubbed audio and video generation.'
+            : atGate
+              // Checked first: a job awaiting cast is never "Finished", even
+              // if a planning gap once let the Dub-audio/Lip-sync groups come
+              // back empty-and-therefore-`skipped` (see `plan_stages` in
+              // `ui/progress.py`), which made `allDone` true for a dub that
+              // had not been cast yet.
+              ? 'Translation complete. Please select the voices as per your requirement to proceed with the dubbed audio and video generation.'
+              : allDone
+                ? 'Finished'
                 : pending
                   ? `${pending.label} not started`
                   : (current?.label ?? 'Starting')}
@@ -194,19 +199,7 @@ export function StageRibbon() {
           const deferred = isDeferred(p);
           const running = i === runningIdx && failedIdx < 0;
           const failed = i === failedIdx;
-          // The filled line is HOW FAR THE JOB GOT, so it stops at the stage
-          // that is running, or — when the job is waiting on the operator —
-          // at the one they have to start next. It reaches that circle and
-          // no further.
-          //
-          // Each gap is drawn as two halves: this pill's right and the next
-          // pill's left. Lighting the right half of every finished pill plus
-          // the left half of the one after the last finished pill produces a
-          // line that ends touching the next circle.
-          //
-          // Measured from the last pill that actually RAN, not from the
-          // first unfinished one, so a genuinely skipped group in the middle
-          // does not cut the line in two.
+
           const lineEnd = i <= lastDoneIdx;
           const prevDone = i > 0 && i - 1 <= lastDoneIdx;
           const expandable = hasDetail(p);
@@ -256,21 +249,13 @@ export function StageRibbon() {
                         ? 'bg-gradient-to-br from-brand to-aqua text-white'
                         : running
                           ? 'border-2 border-aqua bg-canvas text-aqua-ink'
-                          // Both unfinished states show the number; only the
-                          // weight of the ring separates them. Skipped sits
-                          // back a shade ("not part of this run"); deferred
-                          // keeps the ordinary outline, because it IS coming.
+
                           : skipped
                             ? 'border border-edge/50 bg-ink/[0.03] text-ink4/70'
                             : 'border border-edge/70 bg-canvas text-ink4',
                   )}
                 >
-                  {/* Every stage that has not run keeps its NUMBER, skipped
-                      ones included — a stage is still the third stage
-                      whether or not this job is doing it, and a circle with
-                      nothing in it reads as broken. The tick is reserved for
-                      "this ran"; muted styling carries "not part of this
-                      run" on its own. */}
+
                   {failed ? (
                     <IconAlert width={11} height={11} />
                   ) : done ? (
@@ -331,9 +316,7 @@ export function StageRibbon() {
                 {phase.substages.map((s) => (
                   <SubstageRow key={s.key} stage={s} />
                 ))}
-                {/* The steps this group covers that this run is not taking.
-                    Stateless on purpose — they were never planned, so there
-                    is no verdict to report, only membership. */}
+
                 {(phase.contains ?? []).map((c) => (
                   <div key={c.key} className="flex items-center gap-2 py-0.5">
                     <span className="flex w-4 shrink-0 items-center justify-center">

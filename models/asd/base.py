@@ -1,10 +1,9 @@
 """Shared types for active speaker detection.
 
-An ASD model takes the video, the audio, and a `FaceTracks` object, and
-scores — per face track, per frame — whether that face is speaking. The
-score is bounded to [0, 1]; sigmoid or softmax normalisation is the
-adapter's responsibility, so downstream aggregation (Hungarian assignment)
-has one metric to compare on.
+An ASD model takes the video, the audio and a `FaceTracks`, and scores per
+track per frame whether that face is speaking. Scores are bounded to [0, 1] —
+normalising is the adapter's job, so the Hungarian assignment downstream has
+one metric to compare on.
 """
 from __future__ import annotations
 
@@ -20,9 +19,9 @@ import numpy as np
 class ASDScore:
     """Per-face-track, per-frame ASD scores for a single video.
 
-    `frames` and `scores` are parallel and sorted by frame. Frames the
-    tracker reported for this track are included; frames outside the track
-    are omitted (not zero-filled) so a consumer must align explicitly.
+    `frames` and `scores` are parallel and sorted by frame. Frames outside the
+    track are omitted rather than zero-filled, so a consumer must align
+    explicitly.
     """
     track_id: str
     frames: np.ndarray            # (N,) int32
@@ -46,9 +45,9 @@ class ASDResult:
     ) -> float:
         """Average ASD score for `track_id` on frames [start_frame, end_frame].
 
-        Returns -inf when the track did not appear in that interval — the
-        sentinel the Hungarian solver reads as "cannot assign". Returning 0
-        would silently rank an absent face above a quiet-but-present one.
+        Returns -inf when the track did not appear in that interval, which the
+        Hungarian solver reads as "cannot assign". Returning 0 would rank an
+        absent face above a quiet but present one.
         """
         score = self.per_track.get(track_id)
         if score is None or score.frames.size == 0:
@@ -83,8 +82,7 @@ class BaseASD(ABC):
     ) -> ASDResult:
         """Score every face track against the audio.
 
-        `reference_audio` is a map `{speaker_id: wav_path}` and is used only
-        by target-speaker-aware adapters (TS-TalkNet). Plain TalkNet ignores
-        it. Passing it to a model that cannot use it is fine — it just does
-        not change the output.
+        `reference_audio` maps `{speaker_id: wav_path}` and is read only by
+        target-speaker-aware adapters; passing it to one that cannot use it
+        simply changes nothing.
         """

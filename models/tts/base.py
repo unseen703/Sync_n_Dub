@@ -1,23 +1,16 @@
-"""Shared types + abstract base for TTS adapters.
+"""Shared types and abstract base for TTS adapters.
 
-A TTS adapter takes a list of `TTSRequest` (segment id, text, voice,
-optional reference audio for cloning) and writes one WAV per segment
-under `out_dir`. The returned `TTSResult.segments[i].audio_path` is the
-file the downstream mixer reads.
+An adapter takes `TTSRequest`s and writes one WAV per segment under
+`out_dir`; `TTSResult.segments[i].audio_path` is what the mixer reads.
 
-The adapter does NOT time-stretch — duration adjustment is the caller's
-job (`backend.duration.wsola_stretch_cap`) so the stretch logic stays
-engine-agnostic and the cap is enforced centrally.
+An adapter does NOT time-stretch — duration adjustment is the caller's job, so
+the stretch logic stays engine-agnostic and the cap is enforced centrally.
 
-`TTSRequest.rate` is the one exception, and it is NOT a stretch: it is a
-SYNTHESIS parameter handed to the engine so it *speaks* faster or slower,
-re-deciding phoneme durations and prosody from scratch. Post-hoc stretching
-instead resamples an already-spoken waveform. The two produce audibly
-different artefacts at the same ratio, and telling them apart is the entire
-point of comparing method 1 (stretch the clip) against method 2 (ask the
-engine for a shorter clip) — so an adapter must implement `rate` by passing it
-to the engine, never by stretching its own output. An adapter that cannot do
-that leaves `supports_rate = False` and the caller skips the whole mechanism.
+`TTSRequest.rate` is the exception and is NOT a stretch: it is a synthesis
+parameter the engine uses to re-decide phoneme durations and prosody, which
+sounds different from resampling a finished waveform. An adapter must
+implement it by passing it through, never by stretching its own output; one
+that cannot leaves `supports_rate = False` and the caller skips the mechanism.
 """
 from __future__ import annotations
 
@@ -87,10 +80,9 @@ class BaseTTS(ABC):
     """Every TTS adapter subclasses this."""
 
     name: str = "base"
-    # True only when the engine itself accepts a speaking-rate parameter.
-    # Adapters that would have to fake it with a time-stretch leave it False;
-    # the caller then no-ops its speed control instead of silently measuring a
-    # stretch while believing it measured synthesis.
+    # True only when the engine itself accepts a speaking-rate parameter. An
+    # adapter that would fake it with a time-stretch leaves it False, and the
+    # caller no-ops its speed control rather than measuring the wrong thing.
     supports_rate: bool = False
 
     def __init__(self, device: Optional[str] = None, **kwargs):

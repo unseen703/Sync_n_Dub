@@ -2,25 +2,13 @@ import { useStore } from '../../store/useStore';
 import { Button, DemoChip } from '../ui/Button';
 import { IconKeyboard, IconMoon, IconPlus, IconSun } from '../ui/Icons';
 import { Tooltip } from '../ui/Tooltip';
-import { cn } from '../../lib/cn';
 import { MOCKED } from '../../api';
 
-/**
- * The product header: wordmark, what the product is, and the one action
- * that starts work.
- *
- * It spans the full width above all three columns rather than sitting in a
- * sidebar, because the thing it identifies is the product, not the job
- * list. The old UI put "Dubbing Studio" at the top of the left rail, which
- * made the brand read as a label for the list underneath it.
- */
 export function BrandBar() {
   const setNewJobOpen = useStore((s) => s.setNewJobOpen);
   const theme = useStore((s) => s.theme);
   const toggleTheme = useStore((s) => s.toggleTheme);
   const setShortcutsOpen = useStore((s) => s.setShortcutsOpen);
-  const mode = useStore((s) => s.mode);
-  const toggleMode = useStore((s) => s.toggleMode);
 
   return (
     <header
@@ -37,7 +25,7 @@ export function BrandBar() {
                      bg-gradient-to-br from-brand to-aqua text-white shadow-lg shadow-brand/30"
           aria-hidden="true"
         >
-          {/* A mouth/waveform mark: the two things this product joins. */}
+
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                strokeWidth="2.1" strokeLinecap="round">
             <path d="M5 10v4M9.5 6.5v11M14.5 8.5v7M19 11v2" />
@@ -56,42 +44,6 @@ export function BrandBar() {
       </span>
 
       <div className="ml-auto flex items-center gap-1.5">
-        {/*
-          A view switch, not a permission. It only changes how much of the
-          pipeline the screen admits to; every control stays reachable in
-          both modes. See `mode` in the store for why it is not a check.
-        */}
-        <Tooltip
-          label={
-            mode === 'admin'
-              ? 'Showing technical detail — switch to the simple view'
-              : 'Show technical detail: run config, model names, job ids, errors'
-          }
-        >
-          <div
-            role="group"
-            aria-label="View mode"
-            className="hidden rounded-lg border border-line bg-canvas/60 p-0.5 sm:flex"
-          >
-            {(['user', 'admin'] as const).map((m) => (
-              <button
-                key={m}
-                type="button"
-                onClick={() => { if (mode !== m) toggleMode(); }}
-                aria-pressed={mode === m}
-                className={cn(
-                  'rounded-[6px] px-2 py-1 text-[11.5px] font-medium capitalize transition-colors',
-                  mode === m
-                    ? 'bg-brand/20 text-brand-ink'
-                    : 'text-ink3 hover:text-ink',
-                )}
-              >
-                {m}
-              </button>
-            ))}
-          </div>
-        </Tooltip>
-
 
         <Tooltip label="Keyboard shortcuts (?)">
           <button

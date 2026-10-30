@@ -1,6 +1,5 @@
 """Models package. Each submodule hosts a family of swappable adapters.
 
-Currently:
   - models.diarization: speaker diarization (pyannote)
   - models.faces      : face detection (retinaface, mediapipe) + tracking (bytetrack)
   - models.asd        : active-speaker detection (loconet)

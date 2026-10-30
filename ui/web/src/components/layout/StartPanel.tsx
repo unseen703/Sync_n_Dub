@@ -10,26 +10,11 @@ import { ensureScriptFont, langClass } from '../../lib/lang';
 import { fmtBytes, fmtClock } from '../../lib/format';
 import type { Options, ProbeResult, UploadResult } from '../../api/types';
 
-/**
- * Start a dub from the home page: paste a link, or upload a file.
- *
- * The two routes converge deliberately. A YouTube link is probed by
- * `POST /api/youtube/probe` (yt-dlp, no download); a local file is sent to
- * `POST /api/uploads` and probed with ffprobe. Both answer with the same
- * `{title, duration_s, estimates}`, so everything below this point —
- * the language and type pickers, the quote, the submit — has one code
- * path and cannot drift between sources.
- *
- * `Type` is the whole-dub delivery register (`tts_style`). Four formats,
- * no emotions: an emotion is a per-segment mood that stage 9b2 derives
- * from the source speaker's own delivery, so choosing one here would
- * flatten every line of the video into it. Left unset, stage 9b1 reads
- * the register off the video's own metadata instead.
- */
 type Source =
   | { kind: 'url'; probe: ProbeResult }
   | { kind: 'upload'; upload: UploadResult };
 
+/** New-dub form. It collects a source and settings from the user, then creates a job. */
 export function StartPanel() {
   const refreshJobs = useStore((s) => s.refreshJobs);
   const selectJob = useStore((s) => s.selectJob);
@@ -41,18 +26,14 @@ export function StartPanel() {
   const [busy, setBusy] = useState<'probe' | 'upload' | 'create' | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [language, setLanguage] = useState('hi');
-  // NOT '' — Radix <Select.Item> throws on an empty value
-  // string, which took the whole app down to a white page.
+
   const [style, setStyle] = useState('auto');
-  // No lip-sync control here any more. A submission dubs the audio and
-  // stops; the model is named afterwards, on the review page, against the
-  // face size this run measured. Offering the choice here meant committing
-  // the most expensive stage in the pipeline before anyone had seen the
-  // dub — and "auto" meant committing it from a number nobody saw.
+  const [targetScript, setTargetScript] = useState('codemix');
+
   const [whole, setWhole] = useState(false);
   const [start, setStart] = useState(0);
   const [end, setEnd] = useState(60);
-  // Preselected from the server, so the picker and the pipeline agree.
+
   const [spoken, setSpoken] = useState('auto');
   const [detectedLang, setDetectedLang] = useState<{ code: string; language?: string; method?: string } | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
@@ -73,10 +54,6 @@ export function StartPanel() {
   const title = src?.kind === 'url' ? src.probe.title : src?.upload.title;
   const duration = src?.kind === 'url' ? src.probe.duration_s : src?.upload.duration_s;
 
-  // The cap is on the LIP-SYNCED portion, and nothing is lip-synced at
-  // submit any more — so this is a heads-up, not a gate. Blocking here
-  // would refuse a 90-minute audio dub for compute it will never spend;
-  // the real refusal lives at `POST .../lipsync`, where the model is known.
   const cap = options?.limits.max_lipsync_s ?? 1200;
   const span = whole ? (duration ?? 0) : end - start;
   const overCapForLater = span > cap;
@@ -128,6 +105,7 @@ export function StartPanel() {
         style: style === 'auto' ? null : style || null,
         source_language: spoken || null,
         window: whole ? null : { start_s: start, end_s: end },
+        code_mix: targetScript === 'codemix',
       });
       await refreshJobs();
       selectJob(res.job_id);
@@ -155,9 +133,7 @@ export function StartPanel() {
         <Button onClick={() => void check()} disabled={!url.trim() || busy !== null}>
           {busy === 'probe' ? <IconSpinner /> : null} Check
         </Button>
-        {/* A real <input type=file>, kept offscreen and driven by the
-            button, so the control is keyboard-reachable and the browser's
-            own picker does the work. */}
+
         <input
           ref={fileRef}
           type="file"
@@ -189,19 +165,9 @@ export function StartPanel() {
         </p>
       ) : null}
 
-      {/* The three pickers do NOT wait for a source. None of them depends
-          on it, and hiding them until a link resolves made the only two
-          language controls in the product invisible on first load — the
-          question "where do I choose the languages" answers itself when
-          they are simply on screen. */}
       <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
             <div>
-              {/* Stating the spoken language beats detection. Each
-                  diarization turn is its own ASR call, and on 1-5 s of
-                  audio the detector is unreliable — one English lecture
-                  came back in four different Indic scripts. The adapter
-                  now pins one detection for the whole file, but a wrong
-                  pin is then consistently wrong. */}
+
               <Eyebrow className="mb-2">Original language</Eyebrow>
               <Select
                 ariaLabel="Original language"
@@ -251,6 +217,18 @@ export function StartPanel() {
                   { value: 'auto', label: 'Work it out from the video',
                     hint: 'Automatically detected from the video' },
                   ...(options?.styles ?? []).map((s) => ({ value: s.value, label: s.label })),
+                ]}
+              />
+            </div>
+            <div>
+              <Eyebrow className="mb-2">Code-mix</Eyebrow>
+              <Select
+                ariaLabel="Code-mix"
+                value={targetScript}
+                onValueChange={setTargetScript}
+                items={[
+                  { value: 'codemix', label: 'Code-mix' },
+                  { value: 'native', label: 'Native' },
                 ]}
               />
             </div>
@@ -305,10 +283,7 @@ export function StartPanel() {
               {busy === 'create' ? <IconSpinner /> : null} Create dubbed video
             </Button>
             <span className="text-[12px] text-ink3">
-              {/* By VALUE, not by preset name. This read `estimates.standard`
-                  and silently rendered nothing the moment the presets
-                  collapsed to one — an estimate that quietly disappears is
-                  worse than one that is wrong. */}
+
               {Object.values(
                 (src.kind === 'url' ? src.probe.estimates : src.upload.estimates) ?? {},
               )[0]?.text}

@@ -123,8 +123,10 @@ class Wav2LipSync(BaseLipSync):
         # `resolve_resize_factor`. An explicit int wins and is passed through
         # untouched.
         resize_factor: Optional[int] = None,
-        wav2lip_batch_size: int = 16,
-        face_det_batch_size: int = 4,
+        # None = scale from VRAM via backend.scaling (baselines 16 / 4 on
+        # 16 GiB). An explicit int wins. See backend/scaling.py.
+        wav2lip_batch_size: Optional[int] = None,
+        face_det_batch_size: Optional[int] = None,
         # Reuse per-frame face boxes across runs. Wav2Lip has no upstream
         # caching, so `--use_saved_coord`/`--saved_coord` were added to the
         # vendored inference.py under MuseTalk's names; both adapters share
@@ -144,8 +146,15 @@ class Wav2LipSync(BaseLipSync):
         self.python_bin = python_bin or os.getenv("WAV2LIP_PYTHON") or sys.executable
         self.pads = pads
         self.resize_factor = resize_factor
-        self.wav2lip_batch_size = wav2lip_batch_size
-        self.face_det_batch_size = face_det_batch_size
+        if wav2lip_batch_size is None or face_det_batch_size is None:
+            from backend.scaling import (wav2lip_batch_default,
+                                         wav2lip_face_det_default)
+            if wav2lip_batch_size is None:
+                wav2lip_batch_size = wav2lip_batch_default()
+            if face_det_batch_size is None:
+                face_det_batch_size = wav2lip_face_det_default()
+        self.wav2lip_batch_size = int(wav2lip_batch_size)
+        self.face_det_batch_size = int(face_det_batch_size)
         self.use_coord_cache = use_coord_cache
 
     def _ensure_loaded(self) -> None:

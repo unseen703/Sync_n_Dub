@@ -278,9 +278,9 @@ def resolve_speaker_voices(job_root: Path, config: Dict[str, Any],
     """Best available voice assignment per speaker, with its provenance."""
     merged = merged or {}
     out: Dict[str, dict] = {}
-    for step in (_from_voices_json(job_root),
-                 _from_speaker_voice_map(job_root, merged),
+    for step in (_from_speaker_voice_map(job_root, merged),
                  _from_segments(merged),
+                 _from_voices_json(job_root),
                  _replay_else_branch(job_root, config)):
         for sid, info in step.items():
             out.setdefault(sid, info)
@@ -428,8 +428,7 @@ def submit_style_options() -> List[Dict[str, str]]:
 
     Filtered from the engine's own list rather than written out, so a value
     that stops existing upstream disappears here instead of 422-ing at
-    synthesis. `tests/test_ui_create.py` asserts the four are still real
-    members of `INDIC_SPEAK_STYLES`.
+    synthesis.
 
     `NEUTRAL_STYLE` leads, and is not one of them. The form's other
     non-engine value, "auto", means *classify a register from the video's

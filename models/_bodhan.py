@@ -1,22 +1,8 @@
-"""What the four Bodhan adapters do identically.
+"""Shared constructor-time setup for the Bodhan adapters.
 
-ASR, MT, TTS and transliteration are four services behind one REST host, and
-each adapter had its own copy of: resolving `BODHAN_<STAGE>_{URL,KEY,MODEL}`
-plus the three shared `BODHAN_{MAX_RETRIES,MIN_INTERVAL_S,MAX_BACKOFF_S}`
-knobs, building a `requests.Session` with the auth header, the per-instance
-pacing floor, and an exponential backoff that honours `Retry-After`. The
-`_backoff` bodies were byte-identical in all four.
-
-**The retry LOOPS are deliberately not here.** They differ in ways that are
-real: ASR posts multipart and has a `422 + render_mode` diagnosis, TTS posts
-JSON, returns bytes and has a `422 + rate field` diagnosis, and three of the
-four fail fast on a repeated 5xx body while transliteration does not. Folding
-those into one function means either dropping an asymmetry or encoding it as
-a flag, and there is no test anywhere that exercises this HTTP path — so the
-loops stay where their special cases are readable.
-
-Everything in this module is pure or constructor-time. Nothing here makes a
-request.
+Env resolution, the authenticated session, the pacing floor and the
+`Retry-After` aware backoff. The retry LOOPS stay in each adapter, where their
+different 4xx diagnoses are readable. Nothing here makes a request.
 """
 from __future__ import annotations
 
@@ -34,11 +20,10 @@ DEFAULT_URL = "https://api.bodhan.ai/v1"
 class BodhanClientMixin:
     """Constructor-time setup, pacing and backoff for a Bodhan adapter.
 
-    Mixed in beside the stage's own `Base*` class. It does NOT define
-    `__init__`: each adapter keeps its own signature, because
-    `models._registry`'s kwarg filter reads `inspect.signature(cls.__init__)`
-    and a `**kwargs` passthrough here would make every adapter claim to
-    accept everything.
+    Mixed in beside the stage's own `Base*` class. It deliberately defines no
+    `__init__`: `models._registry`'s kwarg filter reads
+    `inspect.signature(cls.__init__)`, so a `**kwargs` passthrough here would
+    make every adapter claim to accept everything.
     """
 
     # Set by `_init_bodhan`; declared for readers.
@@ -67,15 +52,10 @@ class BodhanClientMixin:
     ) -> None:
         """Resolve the endpoint from argument, then env, then default.
 
-        `url_fallback_env` / `key_fallback_env` are the transliteration
-        adapter's: it accepts `BODHAN_MT_URL` / `BODHAN_MT_KEY` when it has no
-        credentials of its own, because the two share a host and most installs
-        only ever set the MT pair.
-
-        The three `BODHAN_MAX_RETRIES` / `MIN_INTERVAL_S` / `MAX_BACKOFF_S`
-        knobs are read UNPREFIXED, as they always were: they describe how hard
-        to lean on the host, which is a property of the host and not of the
-        service.
+        `url_fallback_env` / `key_fallback_env` exist for the transliteration
+        adapter, which accepts the MT credentials when it has none of its own.
+        The retry/pacing knobs are read UNPREFIXED: they describe how hard to
+        lean on the host, not on one service.
         """
         url_env = [f"BODHAN_{env_prefix}_URL"]
         key_env = [f"BODHAN_{env_prefix}_KEY"]
@@ -108,11 +88,10 @@ class BodhanClientMixin:
     ) -> bool:
         """Build the session once. Returns False if it was already built.
 
-        `content_type=None` is the ASR adapter: it posts multipart, and
-        `requests` must be left to set the boundary itself.
-
-        A missing key raises HERE rather than at the first request, so the
-        failure names the variable instead of arriving as a 401 per segment.
+        `content_type=None` is for the multipart ASR adapter, where `requests`
+        must set the boundary itself. A missing key raises here rather than at
+        the first request, so the failure names the variable instead of
+        arriving as a 401 per segment.
         """
         if self._loaded:
             return False
@@ -135,11 +114,9 @@ class BodhanClientMixin:
         return True
 
     def _pace(self) -> None:
-        """Hold a floor between consecutive requests from this instance.
-
-        Serial per-turn calls would otherwise burst past the server's
-        per-second budget and spend the run in 429 backoff.
-        """
+        """Hold a floor between consecutive requests from this instance, or
+        serial per-turn calls burst past the server's per-second budget and
+        spend the run in 429 backoff."""
         gap = time.monotonic() - self._last_post_ts
         if gap < self.min_interval_s:
             time.sleep(self.min_interval_s - gap)
@@ -161,8 +138,8 @@ class BodhanClientMixin:
                                level: int = logging.INFO) -> None:
         """Surface `x-ratelimit-*` whenever the server sends them.
 
-        Bodhan only ships them on MT today; logging on sight means a future
-        ASR/TTS rollout shows up without an adapter change.
+        Bodhan only ships them on MT today; logging on sight means a later
+        ASR/TTS rollout needs no adapter change.
         """
         pairs = [(k, v) for k, v in resp.headers.items()
                  if k.lower().startswith("x-ratelimit")]

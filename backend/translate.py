@@ -1,9 +1,8 @@
 """Backend-facing machine-translation entry point.
 
-Takes an `ASRResult` (segment-level) and a target language, returns one
-translated segment per input segment. Writes a parallel JSON next to the
-ASR output so downstream stages (duration adjustment, TTS) can pick it up
-without re-translating.
+Takes an `ASRResult` and a target language and returns one translated segment
+per input segment, written to a merged JSON beside the ASR output so later
+stages do not re-translate.
 """
 from __future__ import annotations
 
@@ -24,10 +23,9 @@ log = logging.getLogger(__name__)
 def _filter_to_signature(fn: Callable[..., Any], kwargs: Dict[str, Any]) -> Dict[str, Any]:
     """Drop the kwargs `fn` cannot accept, instead of letting it raise.
 
-    The generation controls below are TRANSLATE-time, not constructor args,
-    and not every adapter's translate entry point takes them. Filtering here
-    is what keeps an adapter that never heard of `n_best` (and any future one)
-    working unchanged rather than dying on a TypeError.
+    The generation controls are translate-time and not every adapter takes
+    them, so filtering here keeps an adapter that never heard of `n_best`
+    working rather than dying on a TypeError.
     """
     try:
         sig = inspect.signature(fn)
@@ -62,16 +60,13 @@ def translate_asr(
 ) -> MTResult:
     """Translate every segment of `asr_result` into `target_language`.
 
-    `n_best > 1` asks the adapter for alternative wordings per segment and
-    records them in `MTSegment.extra["candidates"]`, which
-    `mt_result_to_jsonable_merged` writes out as `candidates_text` and
-    `backend.duration.plan_segment_durations` then ranks (method 8). It
-    routes through `BaseMT.translate_nbest`, whose contract guarantees
-    `candidates[0] == text`, so the top-1 is unchanged.
+    `n_best > 1` routes through `BaseMT.translate_nbest` and records the
+    alternatives in `MTSegment.extra["candidates"]`, which
+    `backend.duration.plan_segment_durations` later ranks. The contract
+    guarantees `candidates[0] == text`, so the top-1 is unchanged.
 
-    `n_best <= 1` takes the exact same `mt.translate(...)` call this function
-    has always made -- same callable, same kwargs, no generation controls --
-    so the default path is bit-identical to the pre-n-best behaviour.
+    `n_best <= 1` makes the plain `mt.translate(...)` call with no generation
+    controls at all.
     """
     if model not in available_models():
         raise ValueError(
@@ -97,10 +92,8 @@ def translate_asr(
              n_best)
     mt = get_mt(model, device=device, **model_kwargs)
 
-    # n_best == 1 keeps the historical call verbatim. Anything above it goes
-    # through translate_nbest, and the three generation controls are filtered
-    # against the chosen callable's signature so an adapter that does not take
-    # them is unaffected rather than raising.
+    # The generation controls are filtered against the chosen callable's
+    # signature, so an adapter that does not take them is unaffected.
     call = mt.translate if n_best <= 1 else getattr(mt, "translate_nbest", mt.translate)
     gen_kwargs = _filter_to_signature(call, {
         "n_best": n_best,
@@ -138,10 +131,8 @@ def mt_result_to_jsonable_merged(asr_result: ASRResult,
         seg["mt_text"] = m.text
         seg["mt_target_language"] = m.target_language
         seg["mt_target_script"] = m.target_script
-        # The key `plan_segment_durations` has been reading since it was
-        # written, and that nothing has ever filled. Without it `pool` is
-        # always `[base]`, `ranked` is always length 1, and `candidates[]` is
-        # written as though ranking happened -- method 8 is silently dead.
+        # The key `plan_segment_durations` reads. Without it `pool` is always
+        # `[base]` and ranking is silently a no-op.
         cands = (m.extra or {}).get("candidates") or []
         if len(cands) > 1:
             seg["candidates_text"] = list(cands)

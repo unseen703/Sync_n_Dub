@@ -8,32 +8,7 @@ import {
   type THRender,
 } from '../../api/talkingHead';
 
-/**
- * Make a still portrait speak.
- *
- * Three steps, gated in order, because each one is useless without the one
- * before it: a photo WITH A FACE, a language, then a line.
- *
- * The face check is server-side and happens on upload rather than at render
- * time — finding out a picture has no face after a GPU job is queued is the
- * expensive way to learn it.
- *
- * What this page must not do is oversell. MuseTalk animates the MOUTH and
- * copies the rest of the frame through (measured: 0.87% of the frame changes
- * between output frames). A user expecting a nodding, blinking avatar would
- * read a correct render as a broken one, so the note from the server is
- * shown up front, not buried.
- *
- * A line with no `audio_url` is listed and MARKED rather than hidden: an
- * empty page would suggest the feature is missing, when the only missing
- * piece is the clip. (Every line shipped that way until the 50 clips were
- * supplied; the rule stays, for lines added later.)
- *
- * The render is a background job, so this page POSTs once and then polls.
- * It is 8-21x the clip length on this host — minutes — which is long enough
- * that a synchronous request would die to a browser timeout while the GPU
- * work carried on.
- */
+/** Talking-head workflow. It collects a portrait and line, starts a render, and shows its result. */
 export function TalkingHeadPage() {
   const [opts, setOpts] = useState<THOptions | null>(null);
   const [lang, setLang] = useState('hi');
@@ -81,14 +56,6 @@ export function TalkingHeadPage() {
     }
   }, []);
 
-  /**
-   * Poll one render until it stops being `running`.
-   *
-   * Driven off `render.state` rather than a boolean of our own, because the
-   * server recomputes that state from the file on every call — a render
-   * whose process was killed reports `failed`, not `running`, so this stops
-   * instead of polling until the tab closes.
-   */
   useEffect(() => {
     if (!render || render.state !== 'running') return;
     let live = true;
@@ -99,9 +66,7 @@ export function TalkingHeadPage() {
           setRender(r);
           if (r.state !== 'running') setRendering(false);
         })
-        .catch(() => {
-          /* a dropped poll is not a failed render; the next tick retries */
-        });
+        .catch(() => {});
     }, 3000);
     return () => {
       live = false;
@@ -119,9 +84,7 @@ export function TalkingHeadPage() {
         photo_id: photo.photo_id, dialogue_id: picked, language: lang,
       }));
     } catch (e) {
-      // The server's refusals are the useful ones and they are specific:
-      // the clip is missing from disk, the photo is no longer staged, no
-      // GPU is free. Show the sentence rather than "render failed".
+
       setErr(String((e as Error).message ?? e));
       setRendering(false);
     }
@@ -131,8 +94,7 @@ export function TalkingHeadPage() {
   const shown = cat === 'all' ? lines : lines.filter((l) => l.category === cat);
   const faceOk = photo?.ok === true;
   const pickedLine = lines.find((l) => l.id === picked) ?? null;
-  // Every gate, in the order the page presents them, so the button can say
-  // which one is not met instead of being inertly grey.
+
   const blocker = !faceOk
     ? 'Upload a portrait with a clear face first.'
     : !picked
@@ -162,7 +124,6 @@ export function TalkingHeadPage() {
         </div>
       ) : null}
 
-      {/* 1 — the photo, and the face gate */}
       <section className="mt-6">
         <div className="eyebrow mb-2">1 · Photo</div>
         <div className="card flex flex-wrap items-center gap-3 px-3 py-3">
@@ -208,8 +169,6 @@ export function TalkingHeadPage() {
         ) : null}
       </section>
 
-      {/* 2 — language. Disabled until there is a face, so the order of the
-          steps is visible rather than merely implied. */}
       <section className={`mt-6 ${faceOk ? '' : 'opacity-45'}`}>
         <div className="eyebrow mb-2">2 · Language</div>
         <select
@@ -229,7 +188,6 @@ export function TalkingHeadPage() {
         </select>
       </section>
 
-      {/* 3 — the line */}
       <section className={`mt-6 ${faceOk ? '' : 'opacity-45'}`}>
         <div className="eyebrow mb-2">3 · Pick a line</div>
         <div className="mb-3 flex flex-wrap gap-1.5">
@@ -299,9 +257,7 @@ export function TalkingHeadPage() {
             )}
             {rendering ? 'Generating…' : 'Generate talking head'}
           </Button>
-          {/* The unmet gate, in words. A greyed-out button with no reason
-              beside it is the shape this page shipped with, and it read as
-              "broken" rather than "not yet". */}
+
           {blocker ? (
             <span className="text-[12px] text-ink4">{blocker}</span>
           ) : rendering ? (
@@ -348,11 +304,7 @@ export function TalkingHeadPage() {
               ) : null}
               {render.model ? <span>{render.model}</span> : null}
             </div>
-            {/* Repeated HERE, next to the result, and not only at the top of
-                the page. Mouth-only is measured behaviour (0.87% of the
-                frame changes between output frames), and the moment someone
-                is most likely to read a correct render as a broken one is
-                the moment they first watch it. */}
+
             <p className="max-w-prose text-[11.5px] text-ink4">{opts?.note}</p>
           </div>
         ) : null}

@@ -1,9 +1,8 @@
-"""Shared types + abstract base for transliteration adapters.
+"""Shared types and abstract base for transliteration adapters.
 
-Transliteration is a script change, not a translation: `"gradient"` → `"ग्रेडिएंट"`
-leaves the word unchanged, only the glyphs that render it change. The code-mix
-stage uses it to re-script retained English spans (plan §6, Path B) and to
-normalise mixed-script output back to one script.
+A script change, not a translation: `"gradient"` -> `"ग्रेडिएंट"` is the same
+word in different glyphs. The code-mix stage uses it to re-script retained
+English spans and to normalise mixed-script output to one script.
 """
 from __future__ import annotations
 
@@ -80,4 +79,4 @@ class BaseTransliterator(ABC):
         target_language: str,
         target_script: str = "native",
     ) -> TranslitResult:
-        """Re-script each request; order preserved."""
+        """Re-script each request, preserving order."""

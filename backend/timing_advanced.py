@@ -1,7 +1,6 @@
 """The two search-based timing producers: `word_anchored` (M4) and `dp` (M7).
 
-`backend/timing.py` holds the contract -- the dataclasses, the shared
-source/TTS helpers and the dispatcher -- and is imported, never copied. The
+`backend/timing.py` holds the contract and is imported, never copied. The
 bottom of this module assigns both producers onto it, so importing this module
 IS the registration and `timing.plan("dp", ...)` works unchanged.
 
@@ -12,15 +11,15 @@ Time units:
   * `segments[].words[]`                                ABSOLUTE
   * `segments[].tts_words[]`                            CLIP-RELATIVE
 
-The cost formulas live here (`_COST_DEFINITIONS`, `segment_cost`). Two
-degenerate settings hold by construction:
+The cost formulas are `_COST_DEFINITIONS` and `segment_cost`. Two degenerate
+settings hold by construction:
 
   lambda_pause = lambda_speechrate = lambda_phoneme = 0  ->  naive_slot placement
   lambda_duration = 0, lambda_pause = 1                  ->  pause_aware onsets
 
 The second reproduces pause_aware's semantics, not its exact output: on an
 overrunning clip pause_aware is held to one tempo per segment while the DP may
-re-cut. `tests/test_timing_plan.py` pins that gap as a strict xfail.
+re-cut.
 """
 from __future__ import annotations
 
@@ -1074,8 +1073,6 @@ def plan_dp(
         On an overrunning clip pause_aware is held to one tempo per segment
         and degrades to `prev_end + pause_min_keep_s` with `qc.pauses_floored`
         set, while the DP re-cuts and lands on every onset.
-        `tests/test_timing_plan.py` asserts equality only on the segments
-        pause_aware did not degrade and pins the rest as a known gap.
     """
     merged_json = Path(merged_json)
     data = json.loads(merged_json.read_text())

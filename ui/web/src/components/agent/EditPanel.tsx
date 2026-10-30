@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Button } from '../ui/Button';
 import { Eyebrow } from '../ui/Card';
+import { Dialog } from '../ui/Dialog';
 import { SpeakerTable } from '../speakers/SpeakerTable';
 import { VideoStage } from '../video/VideoStage';
 import { NowPlayingCues } from '../video/NowPlayingCues';
@@ -9,8 +10,6 @@ import * as api from '../../api';
 import { fmtClock } from '../../lib/format';
 import { ActionWorkspace } from './ActionWorkspace';
 import { LipsyncPanel } from './LipsyncPanel';
-import { EnhancePanel } from './EnhancePanel';
-import { ReviewVideoPanel } from './ReviewVideoPanel';
 import { HistoryPanel } from './HistoryPanel';
 import type {
   AgentScript,
@@ -21,51 +20,6 @@ import type {
   ScriptEdit,
 } from '../../api/types';
 
-/**
- * Everything you can do to a finished dub, under the video that shows it.
- *
- * This was a separate page at `#/job/<id>/edit` until 2026-10-21. Reviewing a
- * dub therefore meant bouncing between two screens — the video on one, the
- * controls that change it on the other — so judging a voice meant
- * remembering what it sounded like. It is one column now, in the order the
- * work actually happens:
- *
- *   1. the cast          who is speaking, in which voice, in which delivery
- *   2. the chat box      ask for a change in plain language
- *   3. the script        read the dub, correct a line by typing it
- *   4. lip-sync          commit the GPU, once the three above look right
- *   5. things you can say / what it can do
- *
- * `backend/edit_agent.py` turns a sentence into typed ops, and `POST
- * /api/jobs/{id}/agent` STAGES them — nothing re-renders until Apply, which
- * is the existing `edits/apply` route with its cost preview. A misparsed
- * sentence therefore costs nothing, which is the whole reason the agent is
- * not wired straight to the GPU.
- *
- * Messages ACCUMULATE. "make him female" followed by "and speed up the
- * intro" is two edits on one plan, not a correction of the first.
- *
- * There is no "What this can change" summary block. It listed the clip,
- * language, lip-sync model and every speaker's voice and tone — a second,
- * read-only copy of facts the cast table above and the lip-sync panel below
- * already show, kept in step by hand. A staged change now appears ON the
- * thing it changes instead.
- */
-/**
- * Fold the live selection into a TYPED request.
- *
- * Clicking a quick action already produced "cue 5: speed this up by 1.2x";
- * typing your own sentence did not, so the selection never left the browser
- * and the agent scoped the edit to the whole dub — while the "Editing cue
- * #5" chip stayed on screen insisting otherwise.
- *
- * The prefix is the vocabulary the agent documents and
- * `edit_agent.resolve_cue_aliases` rewrites into a canonical SEG id, so
- * nothing new has to be understood on the wire. It is added ONLY when the
- * message carries no scope of its own: a sentence that already names a cue,
- * a speaker or a timestamp is left exactly as written, because the words you
- * typed outrank the row you happen to have highlighted.
- */
 function scoped(
   text: string,
   selectedCue: string | null,
@@ -86,6 +40,7 @@ function scoped(
   return text;
 }
 
+/** Editing workspace. Input: job id. Output: cast, script, staged edits, and post-render tools for that job. */
 export function EditPanel({ jobId }: { jobId: string }) {
   const pushToast = useStore((s) => s.pushToast);
   const params = useStore((s) => s.agentParams);
@@ -120,11 +75,11 @@ export function EditPanel({ jobId }: { jobId: string }) {
     }
   }, [jobId, load]);
 
-  const muteCue = useCallback(async (segId: string) => {
+  const muteCue = useCallback(async (segId: string, on: boolean) => {
     setBusy(true);
     setError(null);
     try {
-      await api.muteCue(jobId, segId);
+      await api.muteCue(jobId, segId, on);
       await load();
     } catch (e) {
       setError((e as Error).message);
@@ -164,7 +119,7 @@ export function EditPanel({ jobId }: { jobId: string }) {
     try {
       await api.agentSend(jobId, text);
       setMsg('');
-      await load(); // params + script follow the new plan
+      await load();
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -183,8 +138,7 @@ export function EditPanel({ jobId }: { jobId: string }) {
         body: `Re-running: ${(r.dirty_stages ?? []).join(' → ')}`,
       });
       await load();
-      // The cast is re-derived by the replay, so the table's own payload is
-      // stale from here on.
+
       void refreshSpeakers();
       void refreshHistory();
     } catch (e) {
@@ -210,17 +164,22 @@ export function EditPanel({ jobId }: { jobId: string }) {
 
   const staged = (params?.dirty_stages?.length ?? 0) > 0;
 
+  const pendingMutes = new Set<string>();
+  for (const turn of params?.turns ?? []) {
+    for (const op of turn.ops ?? []) {
+      if ((op as { op?: string }).op !== 'mute_cue') continue;
+      const segs = ((op as { scope?: { segments?: unknown[] } }).scope?.segments ?? []) as unknown[];
+      for (const sid of segs) {
+        if (typeof sid === 'string') pendingMutes.add(sid);
+      }
+    }
+  }
+
   return (
     <div className="space-y-4">
-      {/* ---- top row: the dub on the left, the cues and cast on the right ----
 
-          The video, the chat box and the staged edits stack down the LEFT —
-          you describe a change right under the thing it changes. The cues that
-          follow playback and the cast sit on the RIGHT, the two read-mostly
-          panels. On a narrow screen the grid collapses to one column and the
-          same top-to-bottom order holds. */}
       <div className="grid gap-4 lg:grid-cols-[minmax(0,1.7fr)_minmax(0,1fr)]">
-        {/* LEFT: player → chat → staged edits */}
+
         <div className="min-w-0 space-y-4">
           <VideoStage />
 
@@ -252,50 +211,33 @@ export function EditPanel({ jobId }: { jobId: string }) {
           />
         </div>
 
-        {/* RIGHT: the line playing now → the cast */}
         <div className="min-w-0 space-y-4">
           <NowPlayingCues
             segments={script?.segments ?? []}
             busy={busy}
-            onMute={(segId) => void muteCue(segId)}
+            mutedIds={pendingMutes}
+            onMute={(segId, on) => void muteCue(segId, on)}
             onStageScript={(edits) => void stageScript(edits)}
           />
           <SpeakerTable scroll segments={script?.segments ?? []} />
         </div>
       </div>
 
-      {/* ---- finish the job ---- */}
       <LipsyncPanel jobId={jobId} onStarted={() => void load()} />
-      {/* 9i sits under 9h: it restores whatever that produced, and is
-          disabled by the server until there is a render to restore. */}
-      <EnhancePanel jobId={jobId} />
-      {/* The ASD review video: a read-off-disk overlay of who the run thought
-          was speaking. A download, not inline playback — the renderer writes
-          mp4v, which browsers will not play. */}
-      <ReviewVideoPanel jobId={jobId} />
-      <HistoryPanel />
+
+      <HistoryPanel jobId={jobId} />
     </div>
   );
 }
 
-/** One concrete before/after inside a staged turn. */
 interface Diff {
   object: string;
   before: string;
   after: string;
-  /** The result only exists once the LLM/render runs, so "after" is a
-      promise, not a value — shown in a quieter style. */
+
   pending?: boolean;
 }
 
-/**
- * Turn an agent op (opaque `{op, scope, params}`) into the one or more
- * before/after rows a human can read. The "before" is looked up from the
- * current script and cast so the card shows what the dub says NOW, not just
- * what the op asked for. Defensive about param key names — small models nest
- * them inconsistently, and an unrecognised op still names itself rather than
- * vanishing.
- */
 function opDiffs(
   op: Record<string, unknown>,
   segById: Map<string, AgentScriptRow>,
@@ -376,8 +318,34 @@ function opDiffs(
         after: String(params.tone ?? spk?.tone.staged ?? '—'),
         pending: Boolean(params.rewrite_text),
       }];
-    case 'retranslate':
-      return [{ object: tgt, before: firstText, after: 're-translated on apply', pending: true }];
+    case 'retranslate': {
+      const kind = String((op as Record<string, unknown>).kind ?? '');
+      const tgtLang = String(params.target_language ?? '').trim();
+      const srcText = String(rows[0]?.src_text ?? '').trim();
+      // Script path: target language matches the dub's source language, so
+      // the handler copies the ASR line verbatim into mt_text — no LLM
+      // round trip. Show the actual before→after if we have the ASR text.
+      if (kind === 'script') {
+        if (!srcText) {
+          return [{
+            object: tgt,
+            before: firstText,
+            after: 'source cue is empty — no change applied',
+          }];
+        }
+        return [{
+          object: tgt + (tgtLang ? ` · ${tgtLang}` : ''),
+          before: firstText,
+          after: srcText,
+        }];
+      }
+      return [{
+        object: tgt + (tgtLang ? ` · ${tgtLang}` : ''),
+        before: firstText,
+        after: 're-translated on apply',
+        pending: true,
+      }];
+    }
     case 'code_mix':
       return [{
         object: tgt,
@@ -399,24 +367,38 @@ function opDiffs(
   }
 }
 
-/**
- * The staged edits, newest first, as before/after cards — the committed plan,
- * directly under the chat box that builds it.
- *
- * Each card is one turn (one thing asked for, in the user's words), broken
- * into the concrete objects it changes and what each reads as before and
- * after. Removal is two-step and per card: the first press arms the question,
- * the second drops that turn and the server rebuilds the rest of the plan.
- *
- * The Apply bar lives here, with the edits it applies, rather than up in the
- * chat box — nothing re-renders until it is pressed.
- */
 function sourceLabel(source: string): string {
   switch (source) {
     case 'script': return 'direct edit';
     case 'llm': return 'parsed by LLM';
     case 'rules': return 'parsed by rules';
     default: return source;
+  }
+}
+
+function kindChipClass(kind: string): string {
+  switch (kind) {
+    case 'rule':
+      return 'bg-sky-500/15 text-sky-700';
+    case 'script':
+      return 'bg-amber-500/15 text-amber-700';
+    case 'llm':
+      return 'bg-fuchsia-500/15 text-fuchsia-700';
+    default:
+      return 'bg-ink1/10 text-ink3';
+  }
+}
+
+function kindTitle(kind: string): string {
+  switch (kind) {
+    case 'rule':
+      return 'rule: handler mutates deterministically, no outside call';
+    case 'script':
+      return 'script: the replay re-runs a pipeline stage via an external model';
+    case 'llm':
+      return 'llm: the handler rewrites text through the LLM at apply time';
+    default:
+      return kind;
   }
 }
 
@@ -443,9 +425,9 @@ function StagedChanges({
   onApply: () => void;
   onDiscard: () => void;
 }) {
-  // One armed remove at a time, keyed by the turn's real index. Pressing
-  // remove on another card moves the question rather than arming two.
+
   const [confirming, setConfirming] = useState<number | null>(null);
+  const [reviewOpen, setReviewOpen] = useState(false);
 
   const segById = new Map((script?.segments ?? []).map((r) => [r.id, r]));
 
@@ -462,12 +444,11 @@ function StagedChanges({
 
       {turns.length === 0 ? (
         <p className="text-[11.5px] text-ink4">
-          Changes appear here as before → after cards, newest on
-          top. Nothing re-renders until you apply.
+          Changes appear here. Nothing re-renders until you apply.
         </p>
       ) : (
         <div className="max-h-[22rem] space-y-2 overflow-y-auto pr-0.5">
-          {/* Newest first, but keep each turn's REAL index for removal. */}
+
           {turns
             .map((t, i) => ({ t, i }))
             .reverse()
@@ -522,6 +503,31 @@ function StagedChanges({
                     </button>
                   </div>
 
+                  {t.ops.length > 0 && (
+                    <div className="mt-1.5 flex flex-wrap gap-1">
+                      {t.ops.map((op, k) => {
+                        const kind = String(
+                          (op as Record<string, unknown>).kind ?? '',
+                        );
+                        const name = String(
+                          (op as Record<string, unknown>).op ?? '',
+                        );
+                        if (!kind || !name) return null;
+                        return (
+                          <span
+                            key={k}
+                            title={kindTitle(kind)}
+                            className={`inline-flex items-center gap-1 rounded px-1.5 py-px text-[10px] font-medium ${kindChipClass(kind)}`}
+                          >
+                            <span className="uppercase tracking-wide">{kind}</span>
+                            <span className="font-normal text-ink3">·</span>
+                            <span className="font-mono">{name}</span>
+                          </span>
+                        );
+                      })}
+                    </div>
+                  )}
+
                   <div className="mt-2 space-y-1.5">
                     {diffs.map((d, k) => (
                       <div key={k} className="rounded-md bg-canvas/50 px-2.5 py-1.5">
@@ -550,8 +556,8 @@ function StagedChanges({
       {canApply ? (
         <div className="mt-3 space-y-2 border-t border-line/60 pt-3">
           <div className="flex flex-wrap items-center gap-3">
-            <Button variant="primary" onClick={onApply} disabled={busy}>
-              Apply edits
+            <Button variant="primary" onClick={() => setReviewOpen(true)} disabled={busy}>
+              Review &amp; apply
             </Button>
             <Button variant="ghost" onClick={onDiscard} disabled={busy}>
               Discard edits
@@ -562,8 +568,7 @@ function StagedChanges({
               {cost?.gpu_required ? ' · uses the GPU' : ''}
             </span>
           </div>
-          {/* The compute cost a re-render actually incurs, stated before the
-              click rather than discovered after it. */}
+
           {(cost?.warnings ?? []).map((w, i) => (
             <p key={i} className="flex items-start gap-1.5 text-[12px] text-warn">
               <span aria-hidden="true">⚠</span>
@@ -572,6 +577,76 @@ function StagedChanges({
           ))}
         </div>
       ) : null}
+
+      <Dialog
+        open={reviewOpen}
+        onOpenChange={setReviewOpen}
+        width="max-w-xl"
+        title="Apply these changes and re-render?"
+        description="Review what will be applied, then re-render the stages that depend on these edits."
+        footer={
+          <>
+            <Button variant="ghost" onClick={() => setReviewOpen(false)} disabled={busy}>
+              Cancel
+            </Button>
+            <Button
+              variant="primary"
+              busy={busy}
+              onClick={() => {
+                setReviewOpen(false);
+                onApply();
+              }}
+            >
+              Apply &amp; re-render
+              {cost?.total_est_s ? ` · about ${fmtClock(cost.total_est_s)}` : ''}
+            </Button>
+          </>
+        }
+      >
+        <div className="space-y-4">
+          <section>
+            <Eyebrow className="mb-2">
+              What you changed{turns.length ? ` · ${turns.length}` : ''}
+            </Eyebrow>
+            <ul className="space-y-1.5">
+              {turns.map((t, i) => (
+                <li key={i} className="flex items-baseline gap-2 text-[12.5px]">
+                  <span
+                    className={`inline-block rounded px-1.5 py-px text-[10px] font-medium ${
+                      t.source === 'script'
+                        ? 'bg-emerald-500/15 text-emerald-700'
+                        : 'bg-violet-500/15 text-violet-700'
+                    }`}
+                  >
+                    {t.source === 'script' ? 'user' : 'agent'}
+                  </span>
+                  <span className="min-w-0 flex-1 truncate text-ink">{t.message}</span>
+                </li>
+              ))}
+            </ul>
+          </section>
+
+          <section>
+            <Eyebrow className="mb-2">What re-runs</Eyebrow>
+            <p className="text-[12.5px] text-ink2">
+              {dirtyStages.length ? dirtyStages.join(' → ') : 'Nothing — these changes need no re-render.'}
+              {cost?.total_est_s ? ` · about ${fmtClock(cost.total_est_s)}` : ''}
+              {cost?.gpu_required ? ' · uses the GPU' : ''}
+            </p>
+          </section>
+
+          {(cost?.warnings ?? []).length ? (
+            <section className="rounded-xl border border-warn/40 bg-warn/[0.07] px-3 py-2.5">
+              {(cost?.warnings ?? []).map((w, i) => (
+                <p key={i} className="flex gap-2 text-[12.5px] leading-relaxed text-ink2">
+                  <span aria-hidden="true">⚠</span>
+                  <span>{w}</span>
+                </p>
+              ))}
+            </section>
+          ) : null}
+        </div>
+      </Dialog>
     </section>
   );
 }

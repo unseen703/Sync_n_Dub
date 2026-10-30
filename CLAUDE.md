@@ -75,7 +75,6 @@ interpreter's dir, and `BaseLipSync._subprocess_env()` puts it on PATH, because 
 - **Merged JSON is versioned** at `mt/versions/<stem>.v<NNN>.<producer>.json`; the live file is rewritten
   in place by 9b/9b2/9c/9c2/9e and every edit. **Trap:** `edit_agent._find_merged_json` takes the newest
   `mt/*.mt.json` by mtime, so a snapshot placed in `mt/` or named `.mt.json` silently becomes the document.
-  `tests/test_mt_versions.py` guards it.
 - **Downloads keep uploader metadata** (`<stem>.meta.json`, 18 fields via `downloader.video_metadata()`).
   `categories` drives the register classifier (9b1). `description`, `title`, `tags` are untrusted: pass
   them as delimited data with enum answers.
@@ -88,7 +87,7 @@ interpreter's dir, and `BaseLipSync._subprocess_env()` puts it on PATH, because 
 - **Stage 9c2** rewrites a line when `est > target * --condense-speed-cap` (1.5). On in the UI; the CLI
   needs `--condense-overlong`.
 - **Edit replays read the run's own `request.json`**, not argparse defaults. A new `SpeedSetup` field also
-  goes in `plan_config`; `tests/test_ui_backend_sync.py` greps both.
+  goes in `plan_config`.
 - **Bodhan is the only adapter left in every hosted-stage registry** — ASR, MT, transliteration and
   TTS (2026-10-28). `--voice-engine` is gone: the voice catalog follows from `--tts`
   (`pipeline._default_voice_engine`). Diarization is pyannote community-1 alone, alignment is `mms_fa`
@@ -111,16 +110,16 @@ A new caller imports the canonical one. A new adapter inherits. A case that does
 | ASD face crops, VRAM windowing | `models/asd/_av_frontend.py` |
 | where a vendored upstream lives, either side of the move | `models/_vendor.py::resolve_vendor_repo` |
 
-Don't break these: `_REGISTRY_SPEC` stays a module-level dict literal (`repo_checkup.py` parses it), registry
-error strings are pinned by `scripts/ab_refactor.py`, Bodhan retry loops are deliberately not shared, and
-`backend/speed.py` stays dependency-free. Why: [docs/STAGES.md](docs/STAGES.md).
+Don't break these: `_REGISTRY_SPEC` stays a module-level dict literal (tooling parses it with `ast`),
+Bodhan retry loops are deliberately not shared, and `backend/speed.py` stays dependency-free.
+Why: [docs/STAGES.md](docs/STAGES.md).
 
 ---
 
 ## 3. Running things
 
 **UI.** `ui/server.py` (FastAPI, loopback only, port 7861) serves `ui/web-dist/`. Jobs launch detached via
-`scripts/ui_run_job.sh`, the one launcher that sets the libstdc++ preload. The progress bar is 5 pills:
+`./ui_run_job.sh`, the one launcher that sets the libstdc++ preload. The progress bar is 5 pills:
 `Prepare`, `Translate`, `Dub audio`, `Lip-sync` (`progress.PHASE_GROUPS`) plus a synthetic `Finished`.
 
 **A UI job ends at the MT gate.** `ui/runner.py` forces `stop_after_mt=True` on every submission — not a
@@ -160,12 +159,21 @@ $PY -m backend.edit_agent -j <job_id> --list-ops
 
 Dry run by default; `--apply` writes, `--run` re-renders, `--revert` undoes.
 
-**The regex parser runs first** (2026-10-28). `parse_request` tries `_rule_parse` and returns on a match;
-Gemma 3 12B via OpenRouter (JSON mode off — the model emits `{".ops":[...]}` under it) sees only the
-sentences the patterns could not place. Every phrasing in the op catalogue parses without the LLM, and
-`scripts/audit_edit_ops.py` prints the proof (72 rows, op + scope, bare and cue-scoped). What this gives up
-is the model's ability to ABSTAIN on an ambiguous sentence; what keeps it safe is that each branch guards
-the ones that could swallow it. Three rules that are easy to break:
+**The LLM parses every request** (2026-10-29). `parse_request` calls `_llm_parse` first; the regex is the
+fallback for the no-key case so the agent is still useful offline. Gemma 3 12B via OpenRouter (JSON mode
+off — the model emits `{".ops":[...]}` under it). The user turn is JUST the natural-language request plus
+the fixed op catalogue in `_SYSTEM`: no speakers, no cue digest, no job state crosses the wire. Validation
+that depended on that context (unknown speaker, window landing in a silence gap) runs at apply time in the
+handlers.
+
+After parsing, each op is tagged `rule`, `script` or `llm` by `backend.edits.classify_op`, surfaced in the
+plan render, `--json`, and the `/api/jobs/{id}/agent` response. `rule` means the handler mutates
+deterministically; `script` means the replay re-runs a pipeline stage via an external model (today Bodhan
+transliteration for `code_mix mode=stage`, Bodhan MT for `set_target_language`); `llm` means the handler
+itself calls `ctx.rewriter` at apply time (`retranslate`, `set_tone` with `rewrite_text=true`, `code_mix
+mode=llm`, `replace_term` without a replacement).
+
+Three rules in the regex path (used only as the no-key fallback) that are still easy to break:
 
 - **A cue id is a scope.** `resolve_cue_aliases` rewrites `cue 5` → `SEG_0004` before either parser runs,
   so `_scope_from` matches `SEG_\d{4}` FIRST. Without that branch every cue-scoped request widened to the
@@ -179,7 +187,7 @@ the ones that could swallow it. Three rules that are easy to break:
   what is offered, never what is accepted: a typed request naming any engine style still parses.
 
 A quick-action `fill` that carries a `<placeholder>` must also set `needs` — the workspace opens a picker
-for it and refuses to send an unfilled one. `tests/test_edit_agent.py` pins all four rules.
+for it and refuses to send an unfilled one.
 
 **Langfuse tracing** wraps `backend/llm.py`. Needs both `LANGFUSE_PUBLIC_KEY` and `LANGFUSE_SECRET_KEY`;
 `--check-langfuse` verifies them. `DUBBING_LANGFUSE_CAPTURE_CONTENT=0` drops prompt text and keeps

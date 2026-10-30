@@ -1,14 +1,8 @@
-"""Shared types + abstract base for ASR adapters.
+"""Shared types and abstract base for ASR adapters.
 
-An ASR adapter takes a mono 16 kHz audio clip (optionally restricted to a
-start/end window) and returns `ASRResult` — text, segments, and word-level
-timestamps when the adapter can produce them. Adapters that cannot do word
-timings leave `words` empty; the forced-alignment stage (`stages/align`)
-produces them later from the final text.
-
-Bodhan Indic-Transcribe deliberately omits word timestamps (see plan §5
-"What Bodhan does not provide"). We model that as the empty case rather
-than inventing fake timings.
+An adapter takes mono 16 kHz audio and returns an `ASRResult`. Word timings
+are optional — an adapter that cannot produce them leaves `words` empty and
+the forced-alignment stage derives them later from the final text.
 """
 from __future__ import annotations
 
@@ -98,21 +92,17 @@ class BaseASR(ABC):
     """Every ASR adapter subclasses this."""
 
     name: str = "base"
-    # ISO-639 codes this adapter is willing to transcribe, or `None` to mean
-    # "the model is language-agnostic (or auto-detects) and will accept any
-    # code the user asks for". Set to a non-empty set on adapters whose
-    # upstream model only ships with a fixed language inventory — the ASR
-    # registry filters those out of `available_models(language=…)` so the
-    # CLI/UI never offers an adapter that would reject the chosen source
-    # language at run time.
+    # ISO-639 codes this adapter accepts, or None for language-agnostic. The
+    # registry filters on it, so the CLI/UI never offers an adapter that would
+    # reject the chosen source language at run time.
     supported_languages: Optional[set[str]] = None
 
     @classmethod
     def supports_language(cls, language: Optional[str]) -> bool:
         """True iff `language` is one this adapter will accept.
 
-        None languages pass through unconditionally (language detection or
-        caller-set default) — only an explicit non-matching code is rejected.
+        None passes through unconditionally; only an explicit non-matching
+        code is rejected.
         """
         if cls.supported_languages is None or not language:
             return True
@@ -136,11 +126,8 @@ class BaseASR(ABC):
     ) -> ASRResult:
         """Transcribe `audio_path`.
 
-        Args:
-          language: ISO-639 code or `None` to let the model detect.
-          segments: optional pre-sliced windows `(id, start_s, end_s, speaker?)`.
-            When supplied, the adapter transcribes each window separately and
-            returns one `ASRSegment` per input — the plan's "speaker-aware
-            timed dialogue" is built this way. Without segments, the adapter
-            runs full-file ASR and returns whatever segmentation it picks.
+        `language` is an ISO-639 code, or None to let the model detect. With
+        `segments` — `(id, start_s, end_s, speaker?)` windows — each is
+        transcribed separately and returns one `ASRSegment`; without them the
+        adapter runs full-file ASR and picks its own segmentation.
         """

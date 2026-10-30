@@ -1,12 +1,11 @@
-"""Shared types + abstract bases for the face stack.
+"""Shared types and abstract bases for the face stack.
 
-Two interfaces:
-  - `BaseFaceDetector`: video → per-frame face boxes.
-  - `BaseFaceTracker` : per-frame boxes → stable track identities over time.
+  - `BaseFaceDetector`: video -> per-frame face boxes.
+  - `BaseFaceTracker` : per-frame boxes -> stable track identities over time.
 
-The data classes are what every downstream stage (ASD, speaker↔face
-assignment, lip-sync) reads. They are JSON-serializable through plain dicts
-and `numpy.ndarray` → list so the manifest can carry them without pickling.
+The data classes are what ASD, speaker-face assignment and lip-sync read. They
+serialise through plain dicts and ndarray -> list, so the manifest carries them
+without pickling.
 """
 from __future__ import annotations
 
@@ -24,11 +23,11 @@ import numpy as np
 
 @dataclass
 class FaceBox:
-    """A single face detection, in a single frame.
+    """A single face detection in a single frame.
 
-    Coordinates are pixel-space of the ORIGINAL frame (not any letterboxed
-    or resized tensor the detector consumed). `score` is the detector's own
-    confidence, kept raw so ByteTrack's association step can read it.
+    Coordinates are pixel-space of the original frame, not of any letterboxed
+    or resized tensor the detector consumed. `score` is the detector's raw
+    confidence, which ByteTrack's association step reads.
     """
     frame_idx: int
     x1: float
@@ -36,8 +35,8 @@ class FaceBox:
     x2: float
     y2: float
     score: float
-    # 5-point landmarks (eyes, nose, mouth corners) when the detector provides
-    # them. None for detectors that do not (e.g. a bare bbox-only mode).
+    # 5-point landmarks (eyes, nose, mouth corners), None for bbox-only
+    # detectors.
     landmarks: Optional[np.ndarray] = None   # shape (5, 2), xy
 
     @property
@@ -70,13 +69,9 @@ class FaceDetections:
 class FaceTrack:
     """A stable identity across a span of frames.
 
-    `frames` and `bboxes` are parallel: `bboxes[i]` is the box at frame
-    `frames[i]`. `score[i]` is the detector score for that frame; the tracker
-    carries it through so later stages (ASD, assignment) can weight by it.
-
-    Missing frames (brief occlusions the tracker interpolated through) are
-    represented as gaps in `frames`, not by zero rows — a consumer that wants
-    a dense per-frame signal should resample.
+    `frames`, `bboxes` and `scores` are parallel. Missing frames (occlusions
+    the tracker passed through) are gaps in `frames`, not zero rows, so a
+    consumer wanting a dense per-frame signal has to resample.
     """
     track_id: str
     frames: np.ndarray            # shape (N,) int, strictly increasing
@@ -130,8 +125,8 @@ class FaceTracks:
         return {t.track_id: t for t in self.tracks}
 
     def save_npz(self, path: Path) -> Path:
-        """Persist a compact binary form. The manifest keeps the summary; this
-        file holds the raw per-frame boxes a downstream stage might rescore."""
+        """Persist the raw per-frame boxes; the manifest keeps only the
+        summary."""
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         payload: dict = {
@@ -153,13 +148,7 @@ class FaceTracks:
 
     @classmethod
     def load_npz(cls, path: Path) -> "FaceTracks":
-        """Read back what `save_npz` wrote.
-
-        The writer shipped without a reader, so every consumer that wanted the
-        per-frame boxes had to re-derive this key scheme by hand -- which is
-        how `save_npz`'s own promise ("a downstream stage might rescore") went
-        unkept. Keep the two together.
-        """
+        """Read back what `save_npz` wrote. Keep the two in step."""
         path = Path(path)
         d = np.load(path, allow_pickle=True)
         tracks = []
@@ -186,10 +175,9 @@ class FaceTracks:
 class BaseFaceDetector(ABC):
     """Takes a video, returns per-frame face boxes.
 
-    Implementations must be safe to construct without weights — register load
-    in `_ensure_loaded()` and call it from `detect()`. The CLI enumerates
-    adapters at startup; a greedy constructor would download gigabytes before
-    the user picked one.
+    Construction must not need weights — load them in `_ensure_loaded()` and
+    call it from `detect()`. The CLI enumerates adapters at startup, so a
+    greedy constructor would download gigabytes before the user picks one.
     """
 
     name: str = "base"
@@ -212,20 +200,17 @@ class BaseFaceDetector(ABC):
     ) -> FaceDetections:
         """Run detection over the video.
 
-        Args:
-          video_path: any OpenCV/FFmpeg-readable video.
-          every_n: skip rate; `>1` detects on every nth frame and the tracker
-            interpolates. Lecture footage with slow motion tolerates `every_n=2`.
-          min_score: detector-confidence floor. ByteTrack handles low-score
-            boxes itself, so keep this permissive (0.3–0.5) at detect time.
+        `every_n > 1` detects on every nth frame and lets the tracker
+        interpolate; lecture footage tolerates 2. Keep `min_score` permissive
+        (0.3-0.5) — ByteTrack handles low-score boxes itself.
         """
 
 
 class BaseFaceTracker(ABC):
     """Associates per-frame boxes into stable track identities.
 
-    The input is one video's `FaceDetections`; the output is `FaceTracks`
-    with canonical ids `FACE_01`, `FACE_02`, … in first-appearance order.
+    Takes one video's `FaceDetections` and returns `FaceTracks` with ids
+    `FACE_01`, `FACE_02`, … in first-appearance order.
     """
 
     name: str = "base"
@@ -249,9 +234,9 @@ def tracks_from_detections_array(
 ) -> FaceTracks:
     """Fold a tracker's per-frame output into `FaceTrack` objects.
 
-    `per_frame_tracks[frame_idx]` is a list of `(raw_track_id, xyxy, score)`.
-    We rewrite raw ids to `FACE_01`, `FACE_02`, … in first-appearance order so
-    downstream manifests are stable across tracker swaps.
+    `per_frame_tracks[frame_idx]` holds `(raw_track_id, xyxy, score)` rows. Raw
+    ids are rewritten to `FACE_01`, `FACE_02`, … in first-appearance order, so
+    manifests stay stable across tracker swaps.
     """
     id_map: Dict[int, str] = {}
     buckets: Dict[str, List[Tuple[int, np.ndarray, float]]] = {}

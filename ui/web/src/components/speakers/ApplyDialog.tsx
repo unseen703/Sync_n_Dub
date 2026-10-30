@@ -2,27 +2,12 @@ import { useEffect, useState } from 'react';
 import { Dialog } from '../ui/Dialog';
 import { Button } from '../ui/Button';
 import { Eyebrow, Skeleton } from '../ui/Card';
-import { IconAlert, IconBolt, IconCheck } from '../ui/Icons';
+import { IconAlert, IconBolt } from '../ui/Icons';
 import { useStore, toStagedDiffs } from '../../store/useStore';
 import { toneLabel } from '../../lib/format';
 import { fmtDuration } from '../../lib/format';
-import { MOCKED } from '../../api';
 import type { EditPlan } from '../../api/types';
 
-/**
- * The cost dialog.
- *
- * It lists what re-runs AND what does not, and the second half matters more
- * than the first: what an operator is actually afraid of when they change a
- * voice is losing the transcription and translation they already checked.
- * "Download · Diarization · Transcription · Translation stay as they are"
- * is the sentence that lets them click the button.
- *
- * The quoted cost equals the applied cost because this path never asks for
- * a retranslate — `set_voice` is deterministic and `set_tone` runs with
- * `rewrite_text=False`, so there is no LLM and no network in the loop. That
- * guarantee holds only while the endpoint refuses `retranslate`.
- */
 export function ApplyDialog({
   open,
   onOpenChange,
@@ -45,10 +30,10 @@ export function ApplyDialog({
   }, [open, previewPlan]);
 
   const diffs = toStagedDiffs(staged);
-  /** The speaker's user-given name, falling back to the diarization id. */
+
   const nameFor = (id: string) =>
     speakers?.speakers.find((s) => s.id === id)?.label ?? id;
-  /** The tone's human label. The wire value is what we SEND, not what we show. */
+
   const toneFor = (v: string | null) => toneLabel(speakers?.tone_options, v);
   const nameOf = (voice: string | null) =>
     voice
@@ -62,9 +47,7 @@ export function ApplyDialog({
       width="max-w-xl"
       title="Apply these changes and re-render?"
       description={
-        MOCKED.edits
-          ? 'The apply endpoint is not built on the server yet — this dialog shows the real shape with stub numbers, and confirming will NOT re-render anything.'
-          : 'Nothing has changed yet. Everything below is what applying would cost, and the transcript and translation are not re-run.'
+         'Review the changes made and what will run again.'
       }
       footer={
         <>
@@ -112,17 +95,6 @@ export function ApplyDialog({
         ) : plan ? (
           <>
             <CostSection plan={plan} />
-            <section>
-              <Eyebrow className="mb-2">Kept as they are</Eyebrow>
-              <ul className="space-y-1">
-                {(plan.cost?.unaffected_labels ?? []).map((p) => (
-                  <li key={p} className="flex items-center gap-2 text-[12.5px] text-ink2">
-                    <IconCheck width={13} height={13} className="shrink-0 text-ok" />
-                    {p}
-                  </li>
-                ))}
-              </ul>
-            </section>
 
             {(plan.warnings ?? []).length ? (
               <section className="rounded-xl border border-warn/40 bg-warn/[0.07] px-3 py-2.5">
@@ -148,8 +120,7 @@ export function ApplyDialog({
 }
 
 function CostSection({ plan }: { plan: EditPlan }) {
-  // `cost` is what `ui/cost.py::estimate` returned; `dirty_stages` beside it
-  // is a bare list of ids, which is why the rows come from `cost.stages`.
+
   const stages = plan.cost?.stages ?? [];
   if (!stages.length) {
     return (

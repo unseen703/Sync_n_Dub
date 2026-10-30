@@ -1,11 +1,8 @@
 """Routes for the Talking Head page.
 
-Mounted the same way as the other routers — ABOVE the StaticFiles mount in
-`ui/server.py`, or Starlette's registration-order matching shadows every one
-of these behind the static handler (404 on GET, 405 on POST) with nothing in
-`app.routes` to show for it.
-
-The calls, in the order the page uses them:
+Must be mounted above the StaticFiles mount in `ui/server.py`, or Starlette's
+registration-order matching shadows every route here behind the static
+handler (404 on GET, 405 on POST).
 
   POST /api/talking-head/photo         a picture -> is there a face?
   GET  /api/talking-head/options       languages + categories for the dropdowns
@@ -13,23 +10,8 @@ The calls, in the order the page uses them:
   POST /api/talking-head/render        queue the animation
   GET  /api/talking-head/render/{id}   poll it
 
-The render call was a deliberate 501 until 2026-10-21, on the grounds that
-every catalogue entry shipped `audio_url: null` and a talking head with no
-audio is a still frame rather than a smaller version of the feature. The 50
-clips are on disk now and the catalogue has no null left, so the refusal had
-outlived its reason -- and was the only thing standing between a working
-model and a page whose Generate button was greyed out.
-
-It still refuses the two cases it should: a line whose `audio_url` is null
-(an entry added later without a clip), and a line whose link points at a file
-that is not there. `playable` is computed from the URL being non-null, so
-those two look identical from the catalogue alone and only the second can be
-caught by checking the disk.
-
-The render itself is a background THREAD, not an inline call. It is 8-21x the
-clip length on this host, which is minutes -- long enough that a synchronous
-request dies to a browser timeout while the GPU work carries on. Same shape
-as `ui/bbox_video.py`, which solved this first.
+Render runs in a background thread: it takes 8-21x the clip length on this
+host, long enough that a synchronous request dies to a browser timeout.
 """
 from __future__ import annotations
 
@@ -53,16 +35,14 @@ log = logging.getLogger("ui.talkinghead")
 router = APIRouter()
 
 #: One definition, in `ui.talking_head`, so the uploader and the renderer
-#: cannot disagree about where photos and clips live. This module used to
-#: keep its own copy of the same expression.
+#: cannot disagree about where photos and clips live.
 DATA_DIR = TH.DATA_DIR
 
-#: Pictures only. The dubbing uploader's extension list is for video, and
-#: reusing it here would accept an .mp4 for a page that cannot use one.
+#: Pictures only — the dubbing uploader's list is for video and would accept
+#: an .mp4 here.
 IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".bmp", ".webp")
 
-#: A portrait is not a feature film. 40 MB is generous for a photo and keeps
-#: a loopback UI from filling the disk on a mis-drag.
+#: Generous for a photo, and keeps a mis-drag from filling the disk.
 MAX_IMAGE_MB = 40
 
 
@@ -71,12 +51,10 @@ def _bad(msg: str) -> HTTPException:
 
 
 def _photo_path(photo_id: str) -> Optional[Path]:
-    """The staged upload for an id, whatever extension it arrived with.
+    """Return the staged upload for an id, whatever extension it arrived with.
 
-    `photo_id` is a `uuid4().hex` this module minted, so it cannot carry a
-    path separator — but it comes back from the client, so it is matched
-    against the staging folder's own listing rather than interpolated into a
-    path and trusted.
+    `photo_id` comes back from the client, so the resolved path is checked to
+    be inside the staging folder rather than trusted.
     """
     staging = DATA_DIR / "uploads" / "talking_head"
     if not staging.is_dir():
@@ -90,11 +68,8 @@ def _photo_path(photo_id: str) -> Optional[Path]:
 
 @router.get("/api/talking-head/options")
 def options() -> Dict[str, Any]:
-    """Dropdown contents.
-
-    Languages come from `ui.langs`, which derives them from the voice
-    catalog — not from a list written here. A hand-kept copy is how the tone
-    picker once shipped values the engine 422s on.
+    """Dropdown contents. Languages come from `ui.langs`, which derives them
+    from the voice catalog rather than a list kept here.
     """
     from .langs import LANGUAGES, options as lang_options
 
@@ -105,12 +80,9 @@ def options() -> Dict[str, Any]:
         seen.add(row["code"])
         langs.append({**row, "n_dialogues": len(TH.dialogues_for(row["code"])),
                       "has_dialogues": row["code"] in have})
-    # A language the CATALOGUE has lines for but the TTS catalog does not.
-    # This page plays a supplied clip; it never synthesises, so it is not
-    # bound to the voice table the dub form is bound to. English is exactly
-    # this case: a valid engine `lang` with no voice RECORDED in it, so
-    # `languages_for("bodhan")` leaves it out — and leaving it out of here
-    # too would hide lines that are sitting in the file, ready to play.
+    # Languages the catalogue has lines for but the TTS catalog does not.
+    # This page plays supplied clips and never synthesises, so it is not bound
+    # to the voice table — English has lines but no recorded voice.
     for code in sorted(have - seen):
         meta = LANGUAGES.get(code) or {}
         langs.append({"code": code,
@@ -134,7 +106,6 @@ def dialogues(language: str) -> Dict[str, Any]:
         "categories": TH.categories(),
         "dialogues": rows,
         "n_playable": sum(1 for r in rows if r["playable"]),
-        # Said plainly rather than leaving an empty list to be interpreted.
         "message": (None if rows else
                     f"No lines for {language!r} yet. Add them to "
                     f"data/talking_head/dialogues.json — no code change "
@@ -147,9 +118,8 @@ def dialogues(language: str) -> Dict[str, Any]:
 async def upload_photo(file: UploadFile = File(...)) -> Dict[str, Any]:
     """Stage a photo and report whether it holds a usable face.
 
-    The face check is the page's gate, so it happens HERE rather than at
-    render time: finding out that a picture has no face after a GPU job has
-    been queued is the expensive way to learn it.
+    The face check runs here rather than at render time, so a faceless
+    picture is caught before a GPU job is queued.
     """
     name = (file.filename or "").lower()
     ext = next((e for e in IMAGE_EXTS if name.endswith(e)), None)
@@ -189,9 +159,7 @@ async def upload_photo(file: UploadFile = File(...)) -> Dict[str, Any]:
 
     probe = await run_in_threadpool(TH.probe_image, dest)
     if not probe.get("ok"):
-        # Keep the file: the message explains what was wrong and the user
-        # may want to see the picture they sent. Staging is swept, not
-        # permanent.
+        # Keep the file so the user can see what they sent; staging is swept.
         log.info("talking head: %s rejected (%s)", dest.name,
                  probe.get("reason"))
     try:
@@ -206,11 +174,9 @@ async def upload_photo(file: UploadFile = File(...)) -> Dict[str, Any]:
 def render(body: Dict[str, Any]) -> Dict[str, Any]:
     """Animate the photo against a chosen line.
 
-    Refuses while the catalogue has no audio. The renderer needs a waveform:
-    MuseTalk's whisper front-end drives the mouth from it, so without a clip
-    there is nothing to animate TO and the output would be the input frame
-    repeated. A 409 naming the entry is more useful than a job that runs and
-    returns a still.
+    Refuses a line with no audio: MuseTalk's whisper front-end drives the
+    mouth from the waveform, so without a clip the output is the input frame
+    repeated.
     """
     photo_id = str((body or {}).get("photo_id") or "").strip()
     dialogue_id = str((body or {}).get("dialogue_id") or "").strip()
@@ -234,10 +200,8 @@ def render(body: Dict[str, Any]) -> Dict[str, Any]:
 
     audio = TH.audio_path_for(row.get("audio_url") or "")
     if audio is None:
-        # The catalogue says playable and the disk disagrees. Worth its own
-        # refusal: `playable` is computed from the URL being non-null, so a
-        # link to a clip nobody copied across looks identical to a working
-        # one until the render fails on the GPU.
+        # `playable` only means the URL is non-null, so a link to a clip that
+        # was never copied across looks fine until the render fails on the GPU.
         raise HTTPException(
             409, f"{dialogue_id!r} points at {row.get('audio_url')!r}, which "
                  f"is not a file under data/. The catalogue entry has a link "
@@ -249,8 +213,7 @@ def render(body: Dict[str, Any]) -> Dict[str, Any]:
             404, "That photo is no longer staged. Upload it again — the "
                  "staging folder is swept, not permanent.")
 
-    # The GPU check happens HERE, not at upload: this is the moment the VRAM
-    # is about to be spent. Same call `routes_edits.run_lipsync_now` makes.
+    # Check the GPU here, not at upload — this is when the VRAM is spent.
     try:
         from ui.runner import _preflight_gpu
         _preflight_gpu()
@@ -269,11 +232,10 @@ def render(body: Dict[str, Any]) -> Dict[str, Any]:
 
 @router.get("/api/talking-head/render/{render_id}")
 def render_status(render_id: str) -> Dict[str, Any]:
-    """Poll one render. `ready` plus `url` is the only pair the page needs.
+    """Poll one render; the page only needs `ready` plus `url`.
 
-    `state` is recomputed from the file on every call rather than trusted
-    from the status doc — a killed render would otherwise read `running`
-    forever and the page would poll until the tab closed.
+    `state` is recomputed from the file each call — a killed render would
+    otherwise read `running` forever.
     """
     return TH.render_status(render_id.strip("/"))
 

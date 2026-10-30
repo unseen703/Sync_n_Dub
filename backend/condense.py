@@ -16,7 +16,8 @@ How it works:
   retranslating from the source throws away a translation that is usually
   correct and merely long.
 * **The prompt is `translate_agetn.prompt.txt` verbatim**, with
-  `{{target_language}}` filled in. It carries its own syllable arithmetic,
+  `{{target_language}}` and `{{source_language}}` filled in. It carries its
+  own syllable arithmetic,
   a cheapest-first cutting strategy, the preservation rules (negation,
   modality, numbers, protected terms) and a QC schema.
 * **The model's metrics are recorded, not trusted.** `est_duration_s` as
@@ -94,16 +95,15 @@ def _env_int(name: str, default: int) -> int:
 
 #: The reference prompt, verbatim from `translate_agetn.prompt.txt` with
 #: `{{target_language}}` substituted at call time. Kept as one string so it
-#: can be diffed against that file; `tests/test_condense.py` asserts the two
-#: have not drifted.
+#: can be diffed against that file.
 _SYSTEM_TEMPLATE = (Path(__file__).resolve().parent.parent
                     / "translate_agetn.prompt.txt")
 
 #: Fallback if the file is missing, so a deployment that lost it still
 #: dubs. Deliberately terse -- the real prompt is the file.
-_FALLBACK_SYSTEM = """You are a bilingual dubbing QC reviewer for an {{original/primary language}} -> {{target_language}} dubbing pipeline. Shorten machine-translated lines so each one fits its own audio slot, preserving meaning, tone and protected terminology.
+_FALLBACK_SYSTEM = """You are a bilingual dubbing QC reviewer on a dubbing pipeline that goes {{source_language}} -> {{target_language}}. Shorten machine-translated lines so each one fits its own audio slot, preserving meaning, tone and protected terminology.
 
-You receive a `segments` array of one or more segment objects, each with `segment_id`, `english_asr`, `mt_text`, `target_duration_s`, `est_duration_s`, `protected_terms` and `stretch_cap_pct`.
+You receive a `segments` array of one or more segment objects, each with `segment_id`, `original_language_asr`, `mt_text`, `target_duration_s`, `est_duration_s`, `protected_terms` and `stretch_cap_pct`.
 
 Each segment is an independent rewrite. Use only that segment's own fields. Never move, borrow or blend wording between segments, and never use one segment as context for another. Echo `segment_id` exactly. Return exactly one output object per input segment, in input order, with the same count -- never merged, split, omitted or added.
 
@@ -112,15 +112,25 @@ Rewrite `mt_text`, not `original_language_asr`. Use `original_language_asr` only
 Return exactly one JSON object: {"segments": [{"segment_id": "<echo>", "text": "<rewritten line>", "fits": false, "infeasible": false, "meaning_loss": "none", "adequacy": "ok", "adequacy_issues": [], "preserved_terms": [], "asr_suspect": false, "note": null}]}"""
 
 
-def _system_prompt(language: str) -> str:
-    """The reference prompt with the target language filled in."""
+def _language_name(code: Optional[str], default: str) -> str:
+    """ISO code -> English language name, or the code itself if unknown."""
+    try:
+        from ui.langs import english_name
+    except Exception:                                     # noqa: BLE001
+        return code or default
+    return english_name(code, default)
+
+
+def _system_prompt(language: str, source_language: str) -> str:
+    """The reference prompt with both languages filled in."""
     try:
         raw = _SYSTEM_TEMPLATE.read_text()
     except OSError as e:                                  # noqa: BLE001
         log.warning("condense: %s unreadable (%s); using the short fallback "
                     "prompt", _SYSTEM_TEMPLATE.name, e)
         raw = _FALLBACK_SYSTEM
-    return raw.replace("{{target_language}}", language)
+    return (raw.replace("{{target_language}}", language)
+               .replace("{{source_language}}", source_language))
 
 
 def _segment_payload(seg: Dict[str, Any], *, text: str, est_s: float,
@@ -143,7 +153,7 @@ def _segment_payload(seg: Dict[str, Any], *, text: str, est_s: float,
                  if isinstance(sp, dict) and sp.get("text")]
     return {
         "segment_id": str(seg.get("id", "")),
-        "english_asr": str(seg.get("text") or ""), ## change it to original language asr.
+        "original_language_asr": str(seg.get("text") or ""),
         "mt_text": text,
         "target_duration_s": round(float(target_s), 2),
         "est_duration_s": round(float(est_s), 2),
@@ -162,9 +172,11 @@ def _user_payload(rows: List[Dict[str, Any]]) -> str:
 
 
 def _rewrite_prompt(rows: List[Dict[str, Any]], *,
-                    language: str) -> List[Dict[str, str]]:
+                    language: str,
+                    source_language: str) -> List[Dict[str, str]]:
     return [
-        {"role": "system", "content": _system_prompt(language)},
+        {"role": "system",
+         "content": _system_prompt(language, source_language)},
         {"role": "user", "content": _user_payload(rows)},
     ]
 
@@ -287,6 +299,7 @@ def condense_overlong(
     mt_json: Path,
     *,
     language: str,
+    source_language: Optional[str] = None,
     voice: str = "default",
     cache_dir: Optional[Path] = None,
     client: Any = None,
@@ -307,6 +320,12 @@ def condense_overlong(
     batch that fails or comes back unmappable is re-asked one segment at a
     time, so batching can cost an extra call but never a segment.
 
+    `source_language` names what is SPOKEN in the source, for the prompt's
+    own wording and for the `original_language_asr` field it reads. Left
+    unset it comes from the merged JSON's own `language`, which is what ASR
+    detected or was pinned to -- so an auto-detected non-English source is
+    described to the model correctly without the caller doing anything.
+
     Requires `plan_segment_durations` (stage 9c) to have run: it reads the
     `target_duration_s` and `est_duration_s` that stage writes.
     """
@@ -314,6 +333,8 @@ def condense_overlong(
     batch = max(1, int(batch_size or _env_int("CONDENSE_BATCH_SIZE",
                                               DEFAULT_BATCH_SIZE)))
     data = json.loads(mt_json.read_text())
+    src_name = _language_name(source_language or data.get("language"),
+                              "the source language")
     segs = data.get("segments") or []
     summary: Dict[str, Any] = {
         "model": None, "considered": 0, "rewritten": 0, "rejected": 0,
@@ -415,7 +436,8 @@ def condense_overlong(
         summary["calls"] += 1
         try:
             reply = client.chat_json(
-                _rewrite_prompt(rows, language=language),
+                _rewrite_prompt(rows, language=language,
+                                source_language=src_name),
                 temperature=0.2,
                 # Scaled: the client's 2048 default truncates a
                 # multi-segment reply into unparseable JSON.

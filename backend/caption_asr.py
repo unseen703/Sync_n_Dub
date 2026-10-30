@@ -1,35 +1,9 @@
-"""Use YouTube's own captions as the transcript, in place of running ASR.
+"""Use a video's published captions as the transcript instead of running ASR.
 
-Stage 7 costs a hosted Bodhan call per turn (or a local WhisperX pass). When
-the uploader has published a HUMAN-AUTHORED transcript, that transcript is
-both free and usually better than anything we would infer from the audio, so
-there is no reason to re-derive it.
-
-**Manual captions only, by default, and that distinction is the whole point.**
-YouTube serves two kinds of caption track and yt-dlp reports which is which:
-
-  - `manual`    — written or corrected by a person. This is the win.
-  - `automatic` — YouTube's OWN ASR output.
-
-Substituting an automatic track for our ASR is not a saving, it is swapping
-one speech recogniser for another one we did not choose and cannot configure
-— on Indic-accented English, which is what this repo mostly processes, that
-is a bet against the engine we picked deliberately. `allow_auto=True` exists
-for callers who want it anyway, but nothing defaults to it.
-
-**Captions are reshaped onto the diarization turns, not used as segments.**
-A caption cue is a display unit: it breaks on line length and reading speed,
-not on who is talking. Everything downstream of stage 7 keys off
-`seg["speaker"]` — stage 9d casts a voice per speaker, `backend/tts.py`
-resolves every segment through it — so a transcript with no speaker labels
-would silently collapse the cast onto one voice. Mapping each cue to the
-diarized turn it overlaps most keeps the exact shape turn-sliced ASR
-produces, so no downstream stage can tell the difference.
-
-**Stage 8 then re-times the text.** Caption cue boundaries are loose by
-design (a cue is held long enough to read). Forced alignment re-derives word
-timings from the audio, so the looseness does not survive into the dub. That
-is why captions are viable here at all.
+Picks a manual caption track (automatic ones are YouTube's own ASR and are
+opt-in), checks it is usable, and reshapes its cues onto the diarization turns
+so the result has the same shape turn-sliced ASR produces. Returns None for
+every "no" answer, leaving the caller to run ASR.
 """
 from __future__ import annotations
 
@@ -41,15 +15,14 @@ from models.asr.base import ASRResult, ASRSegment
 
 log = logging.getLogger(__name__)
 
-#: A track whose cues repeat themselves this much is YouTube's rolling
-#: "karaoke" auto-caption style, where each cue restates the tail of the
-#: previous one. Feeding that to MT duplicates whole phrases in the dub.
-#: `backend.transcripts.rolling_duplication_ratio` measures it.
+#: Above this, the track is YouTube's rolling "karaoke" style where each cue
+#: restates the previous one's tail, which duplicates whole phrases in the dub.
+#: Measured by `backend.transcripts.rolling_duplication_ratio`.
 MAX_ROLLING_DUPLICATION = 0.35
 
-#: Below this, the caption track does not cover enough of the speech to be a
-#: transcript -- forced captions on a few signs, or a partial upload. Falling
-#: back to ASR is better than dubbing a fraction of the video.
+#: Below this the track covers too little speech to be a transcript — forced
+#: captions on a few signs, or a partial upload. ASR is better than dubbing a
+#: fraction of the video.
 MIN_TURN_COVERAGE = 0.60
 
 
@@ -64,11 +37,9 @@ def pick_caption_track(
     `subtitles` is what `downloader.download_youtube` fills in:
     `{lang: {"path": ..., "source": "manual"|"auto"}}`.
 
-    Language keys are matched by BASE code. YouTube publishes manual English
-    under keys like `en-GB`, and on at least one video in this corpus under
-    the channel-suffixed `en-LUU0EuDKgKo` -- asking for plain `en` there
-    returns an auto-translation instead. A base-code match finds the real
-    track; an exact-key match would miss it.
+    Keys are matched by BASE code — YouTube publishes manual English under
+    `en-GB` and even channel-suffixed keys like `en-LUU0EuDKgKo`, where asking
+    for plain `en` returns an auto-translation instead.
     """
     if not subtitles:
         return None
@@ -133,10 +104,9 @@ def captions_to_asr_result(
 ) -> ASRResult:
     """Build an `ASRResult` from a caption file, shaped like turn-sliced ASR.
 
-    With `turns`, one segment per diarized turn carrying that turn's speaker
-    -- identical to what `backend.asr.transcribe(..., turns=...)` returns, so
-    stages 8 onward cannot tell the two apart. Without `turns`, one segment
-    per cue and no speaker.
+    With `turns`, one segment per diarized turn carrying that turn's speaker,
+    identical to `backend.asr.transcribe(..., turns=...)`. Without `turns`, one
+    segment per cue and no speaker.
     """
     from .transcripts import load_transcript
 
@@ -155,9 +125,8 @@ def captions_to_asr_result(
             extra={"captions": {"source": source, "cues": len(cues),
                                 "path": str(caption_path)}})
 
-    # Each cue goes to exactly ONE turn -- the one it overlaps most. Assigning
-    # a cue to every turn it touches would repeat the sentence in the dub,
-    # once per speaker, which is worse than losing it.
+    # Each cue goes to exactly one turn, the one it overlaps most. Assigning it
+    # to every turn it touches repeats the sentence once per speaker.
     buckets: List[List[str]] = [[] for _ in turns]
     unplaced = 0
     for c in cues:
@@ -201,9 +170,8 @@ def transcript_from_captions(
 ) -> Optional[ASRResult]:
     """The whole decision in one call: a usable ASRResult, or None for ASR.
 
-    Returns None -- never raises -- for every "no" answer, because the caller
-    is choosing between this and running ASR. A caption problem must cost the
-    saving, not the run.
+    Never raises — the caller is choosing between this and running ASR, so a
+    caption problem must cost the saving, not the run.
     """
     track = pick_caption_track(subtitles, language=language, allow_auto=allow_auto)
     if not track:

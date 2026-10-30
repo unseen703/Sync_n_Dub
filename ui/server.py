@@ -752,7 +752,7 @@ def main() -> None:
     except ImportError:                                  # pragma: no cover
         LOG.warning("python-dotenv is not installed; .env was not loaded")
 
-    # `scripts/ui_run_job.sh` resolves its interpreter from `DUBBING_PY`,
+    # `./ui_run_job.sh` resolves its interpreter from `DUBBING_PY`,
     # falling back to a sibling conda env. Defaulting it to our own
     # interpreter runs a detached job under the env that launched this
     # server; `setdefault` keeps an operator value from `.env` winning.

@@ -1,31 +1,23 @@
 """Warm-model LatentSync driver: load once, render many pieces.
 
-Run UNDER the `latentsync` conda env, with the vendored repo as the working
-directory (relative paths like `configs`, `checkpoints/whisper/...` and the
-HF id `stabilityai/sd-vae-ft-mse` resolve from there) -- exactly as the
-`LatentSyncSync` adapter already shells out. The adapter invokes this instead
-of the vendored `scripts/inference.py` when it has more than one piece for a
-GPU: that script's `main()` loads the model and builds the pipeline for a
-SINGLE (video, audio) call, so a segmented render used to pay a full diffusion-
-stack load per piece.
+Runs under the `latentsync` conda env with the vendored repo as the working
+directory, since `configs`, `checkpoints/whisper/...` and the VAE id resolve
+from there. The vendored `scripts/inference.py` builds the pipeline per
+(video, audio) call, so this replicates its setup once and loops a manifest
+through the same `pipeline(...)`, freeing per-piece buffers in between. The
+pixels are identical; only when the weights load differs.
 
-This driver replicates that one-time setup (the vendored `scripts/inference.py`
-`main()` body) once, then loops a JSON manifest of pieces through the same
-`pipeline(...)` call, freeing the per-piece buffers in between. The pixels are
-identical to the per-call path -- only when the weights load changes.
-
-Nothing here edits the vendored clone; it imports the clone's internals, with
-the repo put on `sys.path` from `--repo` so those imports resolve while the
-driver file itself lives in this repo.
+Imports the clone's internals rather than editing it, with `--repo` on
+`sys.path`.
 
 Manifest: a JSON list of objects
   {"video": ..., "audio": ..., "out": ..., "temp_dir": ...,
    "targets_npz": ... | null}
-Per piece the driver prints one line the adapter parses from stdout:
+Per piece it prints one line the adapter parses from stdout:
   [worker] ok   <out>
   [worker] fail <out> :: <reason>
 so one piece crashing is reported against that piece rather than aborting the
-rest (the adapter also treats a missing output file as the failure arbiter).
+rest.
 """
 from __future__ import annotations
 
@@ -38,9 +30,10 @@ import traceback
 
 
 def _mem_used_pct():
-    """Share of system RAM in use, or None. Mirrors MuseTalk's self-contained
-    guard (vendor/musetalk/scripts/inference.py) -- the `dubbing` env's
-    `backend.memguard` is not importable here."""
+    """Share of system RAM in use, or None.
+
+    Self-contained because `backend.memguard` is not importable from this env.
+    """
     try:
         total = avail = None
         with open("/proc/meminfo") as fh:
@@ -88,7 +81,7 @@ def main() -> int:
 
     config = OmegaConf.load(args.unet_config_path)
 
-    # ---- one-time model setup (vendor scripts/inference.py::main) ----------
+    # ---- one-time model setup, mirroring the vendor's main() --------------
     is_fp16 = torch.cuda.is_available() and torch.cuda.get_device_capability()[0] > 7
     dtype = torch.float16 if is_fp16 else torch.float32
 

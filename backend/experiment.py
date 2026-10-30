@@ -1,22 +1,15 @@
-"""Run the same clip through several dubbing variants, holding everything else fixed.
+"""Run the same clip through several dubbing variants, holding everything else
+fixed.
 
-Every arm must see the same upstream input, which two mechanisms provide:
+Two mechanisms keep the arms comparable. `reuse_prefix` runs
+download -> ASR -> align -> MT once and caches it at
+`data/exp/<base>/_shared/prefix.mt.json`, copied into each variant and never
+mutated, so the variance of those network calls stays out of the measurement.
+`reuse_tts_from` lets an arm symlink another's `tts/raw/`, so a variant that
+only changes PLACEMENT runs on the same waveform and only one that changes
+what is said, or how fast, pays for its own synthesis.
 
-  `reuse_prefix`      download -> ASR -> align -> MT runs ONCE and is cached
-                      at `data/exp/<base>/_shared/prefix.mt.json`. Bodhan's
-                      ASR and MT are network calls with real variance, so
-                      re-running them per arm would put that variance inside
-                      the measurement. The cached prefix is COPIED into each
-                      variant and never mutated.
-
-  `reuse_tts_from`    a variant may take another variant's `tts/raw/` by
-                      symlink. An arm that only changes PLACEMENT -- the
-                      timing producer, the render-time stretch filter, the mix
-                      strategy -- runs on the same synthesised waveform. Only
-                      an arm that changes what is said, or how fast it is
-                      spoken, pays for its own TTS pass.
-
-Output tree (one directory per variant, nothing shared but the prefix)::
+Output tree, one directory per variant with nothing shared but the prefix::
 
     data/exp/<base>/_shared/prefix.mt.json      copied, never mutated
     data/exp/<base>/<variant_id>/
@@ -27,37 +20,26 @@ Output tree (one directory per variant, nothing shared but the prefix)::
         mix/<base>.dubbed.wav
         metrics.json
 
-How it drives the pipeline
---------------------------
-Nothing here re-implements a stage. The bootstrap and the post-MT chain go
-through `backend.pipeline.run_pipeline` (via `variant_tag` / `exp_root` /
-`post_mt_only_from`); `backend.timing.plan` and `backend.mix.mix_dubbed_audio`
-are called directly where the pipeline cannot interleave them.
+No stage is re-implemented here; everything goes through
+`backend.pipeline.run_pipeline`, with `backend.timing.plan` and
+`backend.mix.mix_dubbed_audio` called directly in the two places the pipeline
+API cannot interleave. The timing plan has to be built after the TTS clips
+exist and before the mix reads them, while `run_post_mt_stages` does both in
+one call, so the mix is invoked directly. And `tts_kwargs` has no
+`run_pipeline` counterpart, so a variant setting it pays for a second
+synthesis pass, logged as `resynthesis_reason`.
 
-Two places the pipeline API does not reach, both reported rather than worked
-around silently:
-
-  * the timing plan must be built AFTER the TTS clips exist and BEFORE the mix
-    reads them, while `run_post_mt_stages` runs TTS and mix in one call. So
-    the mix is invoked directly, with the source video / M&E stem taken off
-    the `PipelineResult` the bootstrap returned.
-  * `tts_kwargs` is the one `synthesize_segments` knob with no `run_pipeline`
-    counterpart, so a variant that sets it pays for a second synthesis pass,
-    logged as `resynthesis_reason`. Everything else in the `tts` section,
-    `speed_control` and its `speed_*` companions included, is forwarded onto
-    the pipeline's own stage-9f pass by `_forward_tts_to_pipeline`.
-
-Config shape. A variant's `config` has four optional sections, each validated
-against the real signature of the function it feeds, so a typo'd knob fails at
-load time instead of forty minutes into a sweep::
+A variant's `config` has four optional sections, each validated against the
+real signature of the function it feeds, so a typo'd knob fails at load time
+rather than forty minutes into a sweep::
 
     {"pipeline": {...run_pipeline knobs...},
      "tts":      {...synthesize_segments knobs...} | null,
      "timing":   {"producer": "dp", "params": {...plan_dp knobs...}} | null,
      "mix":      {...mix_dubbed_audio knobs...} | null}
 
-`null` skips that stage. `variant.json` records the resolved value of every
-knob in every live section, defaults included.
+`null` skips that stage. `variant.json` records every live knob's resolved
+value, defaults included.
 """
 from __future__ import annotations
 

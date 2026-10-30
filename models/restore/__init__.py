@@ -1,21 +1,12 @@
 """Face-restoration adapter registry.
 
   - gfpgan : TencentARC/GFPGAN v1.4 + Real-ESRGAN x4plus, run over a
-             finished render by `scripts/face_enhance.py`.
+             finished render by `backend/face_enhance.py`.
 
-**This is not a lip-sync model, and that distinction is the whole reason the
-package exists.** It used to be one: `wav2lip_hd` was registered in
-`models/lipsync/` as a fifth lip-sync adapter, when all it did was run
-`wav2lip` and then this pass. That shape does not scale -- 5 lip-sync models
-x {plain, restored} is 10 registry entries, each needing its own `FACTS` row,
-measured rate band, caveat and op-catalogue line, and 15 once a second
-restorer lands. It also forced a re-render for every restoration tweak,
-which matters because the pass measured 1156 s against the MuseTalk render's
-447 s: 2.6x the cost of the thing it cleans.
-
-Restoration is orthogonal to lip-sync. It takes a video and gives back a
-video, and has no idea which model drew the mouths -- so it is `--lipsync X
---restore gfpgan`, 5 + 2 rather than 5 x 2.
+Restoration is orthogonal to lip-sync: video in, video out, with no idea which
+model drew the mouths. It is therefore its own stage (`--lipsync X --restore
+gfpgan`) rather than a variant of each lip-sync model, which keeps the
+registry additive and lets a restoration tweak skip the re-render.
 """
 from __future__ import annotations
 

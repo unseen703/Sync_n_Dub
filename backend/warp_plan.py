@@ -367,9 +367,8 @@ def plan_warped(
     if out_json:
         plan_obj.write(Path(out_json))
     # This producer rewrites the merged JSON in place (adding
-    # `tts_warped_audio` per segment), so it owes a version;
-    # `tests/test_mt_versions.py::test_every_mutating_stage_snapshots` greps
-    # for this. Snapshot what is about to be written, not what lands on disk.
+    # `tts_warped_audio` per segment), so it owes a version.
+    # Snapshot what is about to be written, not what lands on disk.
     merged_json.write_text(json.dumps(data, indent=2, ensure_ascii=False))
     try:
         from .mt_versions import snapshot as _mt_snapshot

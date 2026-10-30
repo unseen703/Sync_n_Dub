@@ -3,24 +3,20 @@
 Audio-conditioned latent diffusion with SyncNet supervision and TREPA
 temporal consistency. Slower than MuseTalk, higher fidelity. Apache-2.0.
 
-**1.6 was removed on 2026-10-28.** It needed ~18 GB against 16311 MiB cards,
-so it had no margin and an OOM surfaced as "produced no mp4" -- the one
-registered model that could not actually run on this host.
+A version is a (checkpoint, resolution) PAIR, kept together in `VERSIONS`.
+The architecture is identical across versions, so a checkpoint loaded under
+the wrong resolution config generates badly with no error — a finished mp4
+with a soft mouth. `_ensure_loaded` reads `data.resolution` from the config
+and refuses a mismatched pair, which matters because
+`LATENTSYNC_UNET_CONFIG` can point at a hand-edited yaml.
 
-A version is a (checkpoint, resolution) PAIR and `VERSIONS` keeps the two
-together. The architecture is identical across versions, so a 1.5 checkpoint
-loads happily under a 512 config and generates badly -- no error, a finished
-mp4 with a soft mouth. `_ensure_loaded` reads `data.resolution` out of the
-config and refuses a mismatched pair. That guard stays with 1.6 gone,
-because `LATENTSYNC_UNET_CONFIG` can still point at a hand-edited 512 yaml.
-
-Shells out to the repo's `scripts/inference.py` rather than importing it --
-LatentSync pins specific diffusers / accelerate versions.
+Shells out to the repo's `scripts/inference.py` rather than importing it,
+since LatentSync pins specific diffusers / accelerate versions.
 
 Env:
   LATENTSYNC_REPO              (default: models/lipsync/vendor/latentsync,
                                 falling back to third_party/LatentSync)
-  LATENTSYNC_VERSION           (1.5; the only version left)
+  LATENTSYNC_VERSION           (1.5)
   LATENTSYNC_UNET_CONFIG       (overrides the version's config)
   LATENTSYNC_UNET_CKPT         (overrides the version's checkpoint)
   LATENTSYNC_PYTHON            (default: current python)
@@ -36,8 +32,9 @@ from pathlib import Path
 from typing import Optional
 
 from backend.media_io import probe_video as _probe_video
-from .base import (BaseLipSync, LipSyncRequest, LipSyncResult,
-                   resolve_env_python, resolve_vendor_repo, run_streaming)
+from .base import (MAX_RENDER_HEIGHT, BaseLipSync, LipSyncRequest,
+                   LipSyncResult, cap_resolution, resolve_env_python,
+                   resolve_vendor_repo, run_streaming)
 
 log = logging.getLogger(__name__)
 
@@ -60,6 +57,21 @@ DEFAULT_VERSION = "1.5"
 #: because 1.5 and 1.6 both called theirs `latentsync_unet.pt`, and 1.6's
 #: may still be sitting in the vendor checkout under that name.
 _HF_REPO = {"1.5": "ByteDance/LatentSync-1.5"}
+
+#: Why the frame cap applies here (2026-10-29). Upstream keeps the whole
+#: piece resident -- see `memory_efficient` below, ~4.7 GiB for a 750-frame
+#: 1080p piece even on the lean path -- so RAM is linear in pixels and a 4K
+#: piece is ~19 GiB. `backend.lipsync` renders one piece per GPU at once, so
+#: two concurrent 4K pieces wanted ~38 GiB on a 62 GiB host and the workers
+#: were reaped mid-render. The mouth is rebuilt at 256x256 either way.
+#:
+#: `targets_npz` needs NO conversion across this: the artifact records the
+#: `width`/`height` its landmarks live in and
+#: `latentsync/utils/targets.py::Targets.lmk_for` scales them to the render.
+#: That is why this adapter uses the scale factor for nothing, unlike
+#: MuseTalk's `coord_list`, which is a bare box list and must be rescaled.
+_CAP_WHY = ("LatentSync holds the whole piece in RAM and rebuilds the mouth "
+            "at 256x256 regardless, so the extra pixels only cost memory")
 
 
 def _config_resolution(cfg_path: Path) -> Optional[int]:
@@ -102,6 +114,10 @@ class LatentSyncSync(BaseLipSync):
         enable_deepcache: bool = False,
         memory_efficient: bool = True,
         targets_npz: Optional[str] = None,
+        # Downscale anything taller than this before rendering; 0 disables
+        # the cap. See `_CAP_WHY`. `LATENTSYNC_MAX_HEIGHT` matches Wav2Lip's
+        # `WAV2LIP_MAX_HEIGHT` rather than inventing a third convention.
+        max_height: Optional[int] = None,
         cuda_device: Optional[int] = None,
     ):
         super().__init__(device=device, cuda_device=cuda_device)
@@ -135,6 +151,15 @@ class LatentSyncSync(BaseLipSync):
         # and keeps only the source (~4.7 GB). The pixels are identical -- it
         # changes when frames are freed, not how they are drawn.
         self.memory_efficient = bool(memory_efficient)
+        if max_height is None:
+            env_cap = (os.getenv("LATENTSYNC_MAX_HEIGHT") or "").strip()
+            try:
+                max_height = int(env_cap) if env_cap else MAX_RENDER_HEIGHT
+            except ValueError:
+                log.warning("latentsync: LATENTSYNC_MAX_HEIGHT=%r is not an "
+                            "integer; using %d", env_cap, MAX_RENDER_HEIGHT)
+                max_height = MAX_RENDER_HEIGHT
+        self.max_height = int(max_height or 0)
         # Per-frame face targets: 106 landmarks per frame, the entire
         # contribution the stock InsightFace pass makes, so supplying them
         # reproduces the stock warp while choosing the speaking face.
@@ -198,11 +223,23 @@ class LatentSyncSync(BaseLipSync):
         out = Path(request.out_path)
         out.parent.mkdir(parents=True, exist_ok=True)
 
+        # The capped re-encode lives beside the output, not in the system temp
+        # dir: it can be a GiB at 4K and `data/jobs/` is where this run's bulk
+        # is budgeted. Removed in `finally`, including on failure.
+        cap_dir = out.parent / f"_cap_gpu{self.cuda_device}_{out.stem}"
+        video_abs = Path(request.video).resolve()
+        if self.max_height > 0:
+            cap_dir.mkdir(parents=True, exist_ok=True)
+            video_abs, _scale = cap_resolution(
+                video_abs, cap_dir, self.max_height,
+                tag=f"latentsync[gpu={self.cuda_device}]",
+                why=_CAP_WHY, log=log)
+
         cmd = [
             self.python_bin, "-m", "scripts.inference",
             "--unet_config_path", self.unet_config_path,
             "--inference_ckpt_path", self.unet_ckpt_path,
-            "--video_path", str(Path(request.video).resolve()),
+            "--video_path", str(video_abs),
             "--audio_path", str(Path(request.audio).resolve()),
             "--video_out_path", str(out.resolve()),
             "--inference_steps", str(self.inference_steps),
@@ -221,9 +258,12 @@ class LatentSyncSync(BaseLipSync):
         if targets:
             cmd += ["--targets_npz", str(Path(targets).resolve())]
         log.info("latentsync[gpu=%s]: %s", self.cuda_device, " ".join(cmd))
-        proc = subprocess.run(cmd, cwd=str(self.repo_path),
-                              env=self._subprocess_env(),
-                              capture_output=True, text=True)
+        try:
+            proc = subprocess.run(cmd, cwd=str(self.repo_path),
+                                  env=self._subprocess_env(),
+                                  capture_output=True, text=True)
+        finally:
+            shutil.rmtree(cap_dir, ignore_errors=True)
         if proc.returncode != 0:
             return LipSyncResult(
                 model_name=f"latentsync-{self.version}", out_video=out,
@@ -241,7 +281,8 @@ class LatentSyncSync(BaseLipSync):
                    "inference_steps": self.inference_steps,
                    "guidance_scale": self.guidance_scale,
                    "deepcache": self.enable_deepcache,
-                   "memory_efficient": self.memory_efficient},
+                   "memory_efficient": self.memory_efficient,
+                   "max_height": self.max_height},
         )
 
     def sync_many(self, requests):
@@ -264,14 +305,28 @@ class LatentSyncSync(BaseLipSync):
 
         worker = Path(__file__).resolve().parent / "_latentsync_worker.py"
         manifest = []
+        # One cap dir for the whole batch, removed once the worker exits. Each
+        # piece is capped here rather than inside the worker because this is
+        # the layer that knows `max_height`, and because a capped piece that
+        # fails to encode must fall back to its own source, not the batch's.
+        cap_dirs: list[Path] = []
         for request in requests:
             out = Path(request.out_path)
             out.parent.mkdir(parents=True, exist_ok=True)
             # Per-request targets win: the caller slices per piece, so that
             # value is the one indexed against this piece's frames.
             targets = (request.extra or {}).get("targets_npz") or self.targets_npz
+            video_abs = Path(request.video).resolve()
+            if self.max_height > 0:
+                cap_dir = out.parent / f"_cap_gpu{self.cuda_device}_{out.stem}"
+                cap_dir.mkdir(parents=True, exist_ok=True)
+                cap_dirs.append(cap_dir)
+                video_abs, _scale = cap_resolution(
+                    video_abs, cap_dir, self.max_height,
+                    tag=f"latentsync[gpu={self.cuda_device}]",
+                    why=_CAP_WHY, log=log)
             manifest.append({
-                "video": str(Path(request.video).resolve()),
+                "video": str(video_abs),
                 "audio": str(Path(request.audio).resolve()),
                 "out": str(out.resolve()),
                 # Own temp dir per piece, so pieces cannot stomp each
@@ -309,6 +364,8 @@ class LatentSyncSync(BaseLipSync):
                                  tag=f"latentsync[gpu={self.cuda_device}]")
         finally:
             Path(mf_path).unlink(missing_ok=True)
+            for d in cap_dirs:
+                shutil.rmtree(d, ignore_errors=True)
 
         # Per-piece failure reasons the worker printed, keyed by output path.
         reasons = {}
@@ -351,6 +408,7 @@ class LatentSyncSync(BaseLipSync):
                        "guidance_scale": self.guidance_scale,
                        "deepcache": self.enable_deepcache,
                        "memory_efficient": self.memory_efficient,
+                       "max_height": self.max_height,
                        "warm_batch": len(requests)}))
         return results
 

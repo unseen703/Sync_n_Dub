@@ -1,11 +1,5 @@
-/**
- * Talking Head page calls.
- *
- * Kept out of `api/index.ts`'s mock switch on purpose: there is nothing to
- * pretend about here. The face check is the page's gate, and a mocked
- * "yes there is a face" would be exactly the confident-wrong-answer shape
- * the repo keeps paying for.
- */
+
+/** Talking-head API client. Inputs are a photo, language, dialogue, and render settings; outputs are typed server responses. */
 export interface THLanguage {
   code: string;
   english: string;
@@ -24,7 +18,7 @@ export interface THDialogue {
   category: string;
   text: string;
   audio_url: string | null;
-  /** False until a clip is supplied. The line is still offered. */
+
   playable: boolean;
 }
 
@@ -56,9 +50,7 @@ async function json<T>(res: Response): Promise<T> {
     try {
       const body = await res.json();
       detail = body?.detail ?? body?.message ?? detail;
-    } catch {
-      /* a non-JSON error body is still an error */
-    }
+    } catch {}
     throw new Error(String(detail));
   }
   return (await res.json()) as T;
@@ -72,7 +64,7 @@ export interface THDialogueList {
   dialogues: THDialogue[];
   categories: THCategory[];
   n_playable: number;
-  /** Non-null when the language has no lines yet, and says where to add them. */
+
   message: string | null;
 }
 
@@ -90,14 +82,6 @@ export function thUploadPhoto(file: File): Promise<THPhoto> {
   );
 }
 
-/**
- * One render, as both the POST and the poll return it.
- *
- * `ready` is computed server-side from the FILE, not from `state` — a killed
- * render leaves a stale `running` behind forever, and a `done` that wrote no
- * mp4 is the failure CLAUDE.md §4 records for lip-sync. So the page branches
- * on `ready`, and `state` is only what it tells the user.
- */
 export interface THRender {
   render_id: string;
   state: 'running' | 'done' | 'failed' | 'absent';

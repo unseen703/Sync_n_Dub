@@ -9,18 +9,20 @@ there. Together they're a from-scratch recipe for that env, line for line.
 
 | Env | Spec | Why it's separate |
 |---|---|---|
-| `dubbing` | `dubbing.yml` + `dubbing.pip.txt` | The main pipeline + UI env — everything in `backend/`, `models/` (except the three below) and `ui/` runs here. |
+| `dubbing` | `dubbing.yml` + `dubbing.pip.txt` | The main pipeline + UI env — everything in `backend/`, `models/` (except the two sidecars below) and `ui/` runs here. Face restoration (basicsr / gfpgan / facexlib / realesrgan) was folded in on 2026-10-30. |
 | `musetalk` | `musetalk.yml` + `musetalk.pip.txt` + `build_mmcv_musetalk.sh` | diffusers/mmcv/mmdet/mmpose pins conflict with `dubbing`. |
 | `latentsync` | `latentsync.yml` + `latentsync.pip.txt` | diffusers/transformers/insightface pins conflict with `dubbing`. |
-| `restore` | `restore.yml` + `restore.pip.txt` | `basicsr`/`gfpgan` need a dead-import patch `dubbing` doesn't carry — see `restore.yml` for whether this needs its own env at all. Renamed from `wav2liphd` on 2026-10-28; the adapter still accepts the old name with a warning. |
 | `dubui` | `dubui.yml` | Node, for building `ui/web/` — never a runtime dependency of the server. |
 
 **Deliberately excluded**: `lipgan` (vestigial — its adapter was removed
 2026-10-23 and its last display row on 2026-10-28, see
-`tests/test_lipsync_env_python.py`) and
-`.venv-diarization` (CLAUDE.md records it as the "wrong interpreter" trap,
-not a real deploy target). `chemformer`, `chemformer-gpu` and `vllm` on this
-host are unrelated projects.
+`tests/test_lipsync_env_python.py`); `restore` / `wav2liphd` (merged into
+`dubbing` on 2026-10-30 — the four packages are now in
+`envs/dubbing.pip.txt`, basicsr's dead-import patch is applied inline by
+`scripts/install.sh`, and face-restore weights are placed into site-packages
+by `scripts/fetch_assets.py`); and `.venv-diarization` (CLAUDE.md records
+it as the "wrong interpreter" trap, not a real deploy target). `chemformer`,
+`chemformer-gpu` and `vllm` on this host are unrelated projects.
 
 ## What these fix
 
@@ -35,7 +37,7 @@ compute capability 12.0 (`nvidia-smi --query-gpu=compute_cap` on this host:
 ## Recreating an env
 
 Each `.yml`'s header has the exact commands. The short version, for any of
-the four Python envs:
+the three Python envs:
 
 ```bash
 conda env create -f envs/<name>.yml -n <name>
@@ -46,13 +48,12 @@ conda env create -f envs/<name>.yml -n <name>
 
 `musetalk` additionally needs `envs/build_mmcv_musetalk.sh` (mmcv has no
 prebuilt wheel for this torch/CUDA/GPU-arch combination, so it's compiled
-locally — budget ~20+ minutes for that one step). `restore` is a clone of
-`dubbing` plus four packages, not a fresh env (see `restore.yml`).
-
-These specs are not yet wired into `setup.sh` — that's the next stage. For
-now they're the accurate, reviewable record of what each env needs; a doctor
-script comes later and will check each one is actually importable, the same
-way `scripts/setup_face_restore.py` already smoke-tests the restore env.
+locally — budget ~20+ minutes for that one step). `scripts/install.sh`
+already runs the dead-import patch for basicsr /
+`torchvision.transforms.functional_tensor` inline after the `dubbing` env
+is built, and `scripts/fetch_assets.py` places the facexlib / gfpgan /
+realesrgan weights into site-packages whenever the `restore` feature is
+fetched.
 
 ## Keeping these honest
 

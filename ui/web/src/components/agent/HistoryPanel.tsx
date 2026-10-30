@@ -2,8 +2,10 @@ import { useCallback, useEffect, useState } from 'react';
 import * as Collapsible from '@radix-ui/react-collapsible';
 import { Button } from '../ui/Button';
 import { Eyebrow } from '../ui/Card';
-import { IconChevron } from '../ui/Icons';
+import { Dialog } from '../ui/Dialog';
+import { IconChevron, IconRevert } from '../ui/Icons';
 import { useStore } from '../../store/useStore';
+import * as api from '../../api';
 import { fmtRelative } from '../../lib/format';
 import { cn } from '../../lib/cn';
 import type { EditRecord } from '../../api/types';
@@ -40,7 +42,7 @@ function opColor(op: string): string {
   }
 }
 
-function RecordCard({ record, admin }: { record: EditRecord; admin: boolean }) {
+function RecordCard({ record }: { record: EditRecord }) {
   const [open, setOpen] = useState(false);
 
   return (
@@ -56,12 +58,28 @@ function RecordCard({ record, admin }: { record: EditRecord; admin: boolean }) {
                 <span
                   key={i}
                   className={cn(
-                    'inline-block rounded px-1.5 py-px text-[10px] font-medium',
+                    'inline-flex items-center gap-1 rounded px-1.5 py-px text-[10px] font-medium',
                     opColor(op.op),
                   )}
+                  title={
+                    op.kind === 'rule'
+                      ? 'rule: deterministic, no outside call'
+                      : op.kind === 'script'
+                      ? 'script: pipeline-stage replay via an external model'
+                      : op.kind === 'llm'
+                      ? 'llm: LLM rewrites text at apply time'
+                      : undefined
+                  }
                 >
-                  {opLabel(op.op)}
-                  {op.target !== '—' ? ` · ${op.target}` : ''}
+                  {op.kind ? (
+                    <span className="uppercase tracking-wide opacity-70">
+                      {op.kind}
+                    </span>
+                  ) : null}
+                  <span>
+                    {opLabel(op.op)}
+                    {op.target !== '—' ? ` · ${op.target}` : ''}
+                  </span>
                 </span>
               ))}
             </div>
@@ -127,14 +145,7 @@ function RecordCard({ record, admin }: { record: EditRecord; admin: boolean }) {
                 ))}
               </div>
             ) : null}
-            {admin && Object.keys(record.speaker_voice_overrides).length > 0 ? (
-              <div className="rounded-md bg-canvas/50 px-2.5 py-1.5">
-                <div className="font-mono text-[11px] text-ink3">Voice overrides</div>
-                <pre className="mt-0.5 text-[11px] text-ink2">
-                  {JSON.stringify(record.speaker_voice_overrides, null, 2)}
-                </pre>
-              </div>
-            ) : null}
+
           </div>
         </Collapsible.Content>
       </div>
@@ -142,17 +153,50 @@ function RecordCard({ record, admin }: { record: EditRecord; admin: boolean }) {
   );
 }
 
-export function HistoryPanel() {
+/** Edit history and restore controls. Input: job id. Output: prior changes and reversible actions. */
+export function HistoryPanel({ jobId }: { jobId: string }) {
   const history = useStore((s) => s.editHistory);
   const refreshHistory = useStore((s) => s.refreshEditHistory);
-  const admin = useStore((s) => s.mode === 'admin');
+  const refreshSpeakers = useStore((s) => s.refreshSpeakers);
+  const pushToast = useStore((s) => s.pushToast);
   const [open, setOpen] = useState(false);
+  const [confirming, setConfirming] = useState(false);
+  const [reverting, setReverting] = useState(false);
 
   const load = useCallback(() => {
     void refreshHistory();
   }, [refreshHistory]);
 
   useEffect(() => { load(); }, [load]);
+
+  const revertAll = useCallback(async () => {
+    setReverting(true);
+    try {
+      const res = await api.revertEdits(jobId);
+      setConfirming(false);
+      pushToast({
+        kind: res.n_restored > 0 ? 'success' : 'warn',
+        title: res.n_restored > 0
+          ? `Reverted ${res.n_restored} segment${res.n_restored === 1 ? '' : 's'}`
+          : 'Nothing to revert',
+        body: res.n_restored > 0
+          ? 'The transcript is back to its pre-edit wording. Re-apply or re-cast to rebuild the audio.'
+          : 'No segment carried a saved backup, so nothing changed.',
+      });
+      for (const w of res.warnings) {
+        pushToast({ kind: 'warn', title: 'Not everything could be undone', body: w });
+      }
+      await Promise.all([refreshHistory(), refreshSpeakers()]);
+    } catch (e) {
+      pushToast({
+        kind: 'error',
+        title: 'Could not revert',
+        body: e instanceof Error ? e.message : String(e),
+      });
+    } finally {
+      setReverting(false);
+    }
+  }, [jobId, pushToast, refreshHistory, refreshSpeakers]);
 
   const edits = history?.edits ?? [];
   const hasEdits = edits.length > 0;
@@ -189,9 +233,22 @@ export function HistoryPanel() {
             </span>
           ) : null}
 
-          <Button size="sm" variant="ghost" className="ml-auto" onClick={load}>
-            Refresh
-          </Button>
+          <div className="ml-auto flex items-center gap-1.5">
+            {hasEdits && !history?.is_running ? (
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() => setConfirming(true)}
+                title="Put the transcript back to its pre-edit wording"
+              >
+                <IconRevert width={13} height={13} />
+                Revert all
+              </Button>
+            ) : null}
+            <Button size="sm" variant="ghost" onClick={load}>
+              Refresh
+            </Button>
+          </div>
         </div>
 
         <Collapsible.Content className="overflow-hidden">
@@ -209,34 +266,49 @@ export function HistoryPanel() {
                   </p>
                 ) : null}
                 {[...edits].reverse().map((r) => (
-                  <RecordCard key={r.file} record={r} admin={admin} />
+                  <RecordCard key={r.file} record={r} />
                 ))}
               </>
             )}
 
-            {admin && (history?.snapshots?.length ?? 0) > 0 ? (
-              <div className="mt-3 border-t border-line/50 pt-3">
-                <Eyebrow className="mb-2">Transcript versions</Eyebrow>
-                <div className="space-y-1">
-                  {history!.snapshots.map((s) => (
-                    <div
-                      key={s.file}
-                      className="flex items-center gap-2 rounded-md bg-canvas/50 px-2.5 py-1.5 text-[11.5px]"
-                    >
-                      <span className="font-mono text-ink3">{s.producer}</span>
-                      <span className="text-ink4">·</span>
-                      <span className="text-ink4">{fmtRelative(s.mtime)}</span>
-                      <span className="ml-auto truncate font-mono text-[10px] text-ink4">
-                        {s.file}
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            ) : null}
           </div>
         </Collapsible.Content>
       </Collapsible.Root>
+
+      <Dialog
+        open={confirming}
+        onOpenChange={setConfirming}
+        title="Revert every applied edit?"
+        description="This restores the transcript. It does not re-render anything."
+        footer={(
+          <>
+            <Button variant="ghost" onClick={() => setConfirming(false)} disabled={reverting}>
+              Cancel
+            </Button>
+            <Button variant="danger" busy={reverting} onClick={() => void revertAll()}>
+              Revert {edits.length} edit{edits.length === 1 ? '' : 's'}
+            </Button>
+          </>
+        )}
+      >
+        <div className="space-y-3 text-[12.5px] leading-relaxed text-ink2">
+          <p>
+            Every line goes back to the wording it had before you edited it. The
+            edit history stays on disk, so you can see what was undone.
+          </p>
+          <p>
+            <span className="font-medium text-ink">The dubbed audio does not change.</span>{' '}
+            What you can play right now was synthesised from the edited text and
+            still will be, until the job is re-cast. The same goes for any
+            lip-synced video.
+          </p>
+          <p className="text-ink3">
+            A voice assigned to a whole speaker is not stored per line and cannot
+            be undone here — re-cast that speaker instead. The server will say so
+            if it applies to this job.
+          </p>
+        </div>
+      </Dialog>
     </section>
   );
 }

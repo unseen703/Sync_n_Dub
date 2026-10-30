@@ -11,7 +11,7 @@ Env
                        crashing -- an NLQ edit still parses, it just loses
                        the LLM's reading of the sentence.
   OPENROUTER_URL       default https://openrouter.ai/api/v1
-  OPENROUTER_MODEL     default google/gemma-3-12b-it
+  OPENROUTER_MODEL     default google/gemini-2.5-flash
   OPENROUTER_JSON_MODE auto (=off) | on | off -- see JSON_MODE_ENV
 
 The default is a small model and a weak structured-output generator, so the
@@ -35,10 +35,14 @@ from . import tracing as _tracing
 log = logging.getLogger(__name__)
 
 DEFAULT_URL = "https://openrouter.ai/api/v1"
-#: Gemma 3 12B: 131k context, $0.05/M in and $0.15/M out, advertising
-#: `response_format` + `structured_outputs` for `chat_json`. Every op it
-#: returns is still schema-validated and re-resolved against real segment ids.
-DEFAULT_MODEL = "google/gemma-3-12b-it"
+#: Gemini 2.5 Flash via OpenRouter: 1M context, strong structured-output
+#: adherence, cheap. Replaced Gemma 3 12B as the default parser model on
+#: 2026-10-30 after the gemma stack repeatedly emitted both `create_speaker`
+#: and `set_voice` for one sentence. Every op it returns is still
+#: schema-validated and re-resolved against real segment ids. The exact
+#: slug `OPENROUTER_MODEL` in `.env` wins over this default when set --
+#: use that to pin a different Gemini version per-job without a code change.
+DEFAULT_MODEL = "google/gemini-2.5-flash"
 
 #: Sent so usage is recognisable in the OpenRouter dashboard. Both headers
 #: are optional and carry no secrets.

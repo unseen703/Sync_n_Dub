@@ -1,12 +1,8 @@
-"""RetinaFace detector (via InsightFace's SCRFD or the `retina-face` package).
+"""RetinaFace detector, via InsightFace's SCRFD or the `retina-face` package.
 
-InsightFace's `buffalo_l` pack ships SCRFD-10GF for detection + a 5-point
-landmark head — that is the RetinaFace-family model production pipelines
-actually ship, and it is faster and cleaner to install than the TF-era
-`retina-face` package. We fall back to the pure-TF `retina-face` only if
-InsightFace is unavailable, so a box with either dependency works.
-
-Weight download happens on first `detect()`. The box is on-disk ~250 MB.
+InsightFace's `buffalo_l` pack (SCRFD-10GF plus a 5-point landmark head) is
+preferred; the pure-TF `retina-face` is the fallback when it is unavailable.
+Weights download on the first `detect()` and run ~250 MB on disk.
 """
 from __future__ import annotations
 
@@ -48,15 +44,12 @@ class RetinaFaceDetector(BaseFaceDetector):
     def _ensure_loaded(self) -> None:
         if self._loaded:
             return
-        # Prefer InsightFace — one wheel, GPU + CPU, same weights the rest of
-        # the industry has standardized on. Fall back only if it is missing.
         try:
             from insightface.app import FaceAnalysis
 
-            # onnxruntime lists CUDAExecutionProvider even when its provider
-            # library cannot dlopen the CUDA runtime, and then falls back to
-            # CPU without raising. This makes the EP genuinely loadable; see
-            # backend.gpu.ensure_onnxruntime_cuda.
+            # onnxruntime lists CUDAExecutionProvider even when it cannot
+            # dlopen the CUDA runtime, then silently falls back to CPU. This
+            # makes the EP genuinely loadable.
             if self.device.startswith("cuda"):
                 from backend.gpu import ensure_onnxruntime_cuda
                 if not ensure_onnxruntime_cuda():
@@ -84,14 +77,10 @@ class RetinaFaceDetector(BaseFaceDetector):
             log.info("retinaface: loaded insightface pack=%s on %s", self.pack, self.device)
             return
         except ImportError as e:
-            # Say WHICH import failed. This used to log a bare "insightface
-            # unavailable", which reads as "not installed" and sent a 2026-10-17
-            # debug session off to `pip install` a package that was already
-            # there and imported fine on its own. The interesting case is an
-            # ImportError raised from INSIDE insightface's own lazy imports,
-            # once torch/cv2/onnxruntime are already loaded — the import-order
-            # trap in CLAUDE.md section 1 — and only the message distinguishes
-            # the two.
+            # Say WHICH import failed: a bare "insightface unavailable" reads
+            # as "not installed", but the interesting case is an ImportError
+            # from inside insightface's own lazy imports once torch/cv2/
+            # onnxruntime are loaded — the import-order trap in CLAUDE.md §1.
             log.warning("retinaface: insightface did not load (%s: %s); "
                         "trying the retina-face package",
                         type(e).__name__, e)
@@ -175,7 +164,7 @@ class RetinaFaceDetector(BaseFaceDetector):
 
     def _detect_frame(self, bgr: np.ndarray, frame_idx: int, min_score: float) -> List[FaceBox]:
         if self._impl == "insightface":
-            # InsightFace expects BGR, same as OpenCV reads.
+            # InsightFace expects BGR, as OpenCV reads.
             faces = self._model.get(bgr)
             out: List[FaceBox] = []
             for f in faces:

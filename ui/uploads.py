@@ -1,30 +1,14 @@
 """Local video upload — the other way a job gets its source.
 
-Everything else here starts from a URL that `check_url` has matched against
-an allowlist, and `ytmeta.probe` reads the title and duration without
-downloading. An uploaded file has neither: no host to allow, and nothing
-yt-dlp can describe. So this module supplies both halves.
+An upload has no host to allowlist and nothing yt-dlp can describe, so it
+bypasses `check_url` (an SSRF control over outbound fetches, which an upload
+is not) and is constrained by its own rules: the file lands in `<job>/source/`
+under a name this module chooses, the extension must be in `VIDEO_EXTS`, the
+size is capped by `DUBBING_UI_MAX_UPLOAD_MB`, and ffprobe must agree it holds
+a decodable video stream.
 
-**Why the allowlist is not simply widened.** `check_url` exists as an SSRF
-control: it decides which hosts this server will *fetch from*. An upload is
-not a fetch — the bytes arrive in the request body and the server never
-opens an outbound connection — so it is not the control's business, and
-loosening it to let a `file://` through would turn an SSRF guard into a
-local-file-read. Uploads therefore bypass `check_url` entirely and are
-constrained by their own rules instead:
-
-  * the file lands in `<job>/source/` under a name this module chooses, so
-    a crafted filename cannot traverse out of the job folder;
-  * the extension must be one of `VIDEO_EXTS`;
-  * the size is capped (`DUBBING_UI_MAX_UPLOAD_MB`, default 4096);
-  * `ffprobe` has to agree it holds a decodable video stream, which is the
-    only check that looks at the bytes rather than at the name.
-
-The probe is `ffprobe`, not yt-dlp, and it reads the *running interpreter's*
-ffprobe via `media_io._ffprobe_bin()` — CLAUDE.md section 1 is explicit that
-a bare `ffprobe` is not on PATH here and that the old `None` answer was
-silent, reporting `dur=0.0` for a file that plays. A duration of 0 is
-therefore treated as a failure to read the file, not as an empty video.
+A reported duration of 0 is treated as a failure to read the file, not as an
+empty video.
 """
 from __future__ import annotations
 
@@ -41,8 +25,8 @@ from ._io import env_int as _env_int
 
 log = logging.getLogger("ui.uploads")
 
-#: Containers worth accepting. Deliberately short: every one of these is
-#: something ffmpeg on this host decodes without a extra codec package.
+#: Containers worth accepting — each decodes on this host's ffmpeg with no
+#: extra codec package.
 VIDEO_EXTS = (".mp4", ".mov", ".mkv", ".webm", ".m4v", ".avi")
 
 _SAFE = re.compile(r"[^A-Za-z0-9._-]+")
@@ -55,10 +39,9 @@ def max_upload_mb() -> int:
 def safe_stem(filename: str) -> str:
     """A filename the server chose, derived from the one it was given.
 
-    The uploaded name is *data*: it reaches us from a browser and may hold
-    separators, `..`, or nothing usable at all. Only the extension is taken
-    from it after validation, and the stem is sanitised and truncated, so
-    the destination path cannot leave `<job>/source/`.
+    The uploaded name is data and may hold separators, `..`, or nothing
+    usable. The stem is sanitised and truncated so the destination path cannot
+    leave `<job>/source/`.
     """
     stem = Path(filename or "").stem
     stem = _SAFE.sub("-", stem).strip("-.")[:60]
@@ -75,11 +58,11 @@ def check_ext(filename: str) -> str:
 
 
 def probe_file(path: Path) -> Dict[str, Any]:
-    """Title, duration and dimensions for a local video, via ffprobe.
+    """Duration and dimensions for a local video, via ffprobe.
 
-    Raises `RuntimeError` with something readable rather than returning a
-    zero-filled dict: a 0.0 duration here would bound the range picker at
-    nothing and quote a 0-second render.
+    Raises `RuntimeError` rather than returning a zero-filled dict — a 0.0
+    duration would bound the range picker at nothing and quote a 0-second
+    render.
     """
     from backend.media_io import _ffprobe_bin
 

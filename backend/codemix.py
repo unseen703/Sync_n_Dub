@@ -1,30 +1,12 @@
-"""Code-mixing + script normalization (plan §6).
+"""Code-mixing and script normalization (plan §6).
 
-Takes merged ASR+MT segments and renders a `final_text` field per segment:
+Renders a `final_text` per segment: detect spans that should stay English,
+transliterate them into the target script, re-script any Latin word left in
+the MT output, and restore terms MT translated that it should not have.
+Writes back into the merged ASR+MT JSON.
 
-  1. Detect spans in the SOURCE ASR text that should stay in English
-     (termbase, acronyms, numbers-with-units, proper-nouns via a simple
-     capitalisation heuristic).
-  2. Transliterate every retained span into the target script using
-     Bodhan Indic-Transliterate.
-  3. Script-normalise the MT output: any Latin-script word still present
-     in the translation gets rewritten in the target script (so even
-     Path A — pure Bodhan native output — gets consistent scripting).
-  4. For spans the MT accidentally translated, substitute the original
-     term back in (character-level string replace on the Latin form,
-     then on the Indic-script equivalent after normalisation).
-
-Writes the result back into the merged ASR+MT JSON produced by
-`backend.translate.write_mt_outputs()` — adds:
-  segments[].retain_spans   : [{text, start, end, type, translit}]
-  segments[].final_text     : the deliverable string for TTS
-  segments[].codemix_path   : "A" (direct) | "B" (masked+translit)
-  extra.codemix             : {model, retained_terms, substitutions, …}
-
-The termbase lives under `termbase/<domain>.tsv` as two tab-separated
-columns `source\treplacement` — the replacement is the exact string we
-want in the final text, in whatever script we want it in. One override
-per line, lines starting with `#` ignored.
+The termbase is `termbase/<domain>.tsv`, two tab-separated columns
+`source\treplacement`, `#` comments ignored.
 """
 from __future__ import annotations
 
@@ -41,7 +23,7 @@ from models.translit import TranslitRequest, available_models, get_transliterato
 log = logging.getLogger(__name__)
 
 
-# Latin letter + mark — anything in the Latin script that could hold a word.
+# Anything in the Latin script that could hold a word.
 _LATIN_WORD_RE = re.compile(r"[A-Za-z][A-Za-z0-9'’\-]*")
 # Numbers with units, e.g. "5kg", "3.14ms", "128GB".
 _NUMUNIT_RE = re.compile(r"\b\d+(?:\.\d+)?[A-Za-z]+\b")
@@ -96,9 +78,9 @@ def detect_retain_spans(
     *,
     termbase: Dict[str, str],
 ) -> List[RetainSpan]:
-    """Return non-overlapping spans we want to keep in English form.
+    """Non-overlapping spans to keep in English form.
 
-    Priority (first match wins): termbase > numunit > acronym > proper.
+    First match wins, in the order termbase > numunit > acronym > proper.
     """
     hits: List[Tuple[int, int, str, str]] = []
     low = text.lower()
@@ -136,7 +118,7 @@ def _nfc(s: str) -> str:
 
 
 def extract_latin_tokens(text: str) -> List[str]:
-    """Latin-script runs in the MT output — these are candidates to re-script."""
+    """Latin-script runs in the MT output: candidates to re-script."""
     return list({m.group() for m in _LATIN_WORD_RE.finditer(text)})
 
 
@@ -148,9 +130,8 @@ def apply_substitutions(
 ) -> str:
     """Replace Latin remnants in `mt_text` with their transliteration.
 
-    Longest first so "gradient descent" wins over "gradient" alone. If a
-    span appears in the termbase, the termbase replacement wins over the
-    transliteration result — it is the domain expert's override.
+    Longest first, so "gradient descent" wins over "gradient". A termbase entry
+    beats the transliteration — it is the domain expert's override.
     """
     out = mt_text
     pairs: List[Tuple[str, str]] = []
@@ -182,10 +163,10 @@ def codemix_segments(
     out_json: Optional[Path] = None,
     translit_kwargs: Optional[dict] = None,
 ) -> dict:
-    """Run the full code-mix + script-normalisation pass.
+    """Run the full code-mix and script-normalisation pass.
 
-    Reads the merged ASR+MT JSON on disk, writes it back (in place by
-    default) with the new fields populated. Returns the updated dict.
+    Reads the merged ASR+MT JSON, writes it back in place by default, and
+    returns the updated dict.
     """
     merged_mt_json = Path(merged_mt_json)
     data = json.loads(merged_mt_json.read_text())
@@ -197,14 +178,14 @@ def codemix_segments(
         )
     termbase = load_termbase(termbase_path) if termbase_path else {}
 
-    # 1. Collect every unique Latin token across every segment so we can
-    #    batch the translit API, instead of calling it once per occurrence.
+    # Collect every unique Latin token across all segments so the translit API
+    # is called once per term, not once per occurrence.
     seg_spans: Dict[str, List[RetainSpan]] = {}
     unique_terms: Dict[str, None] = {}
     for seg in data.get("segments", []):
         src = seg.get("text") or ""
         spans = detect_retain_spans(src, termbase=termbase)
-        # also catch any lingering Latin tokens in the MT text itself
+        # also catch Latin tokens left in the MT text itself
         for tok in extract_latin_tokens(seg.get("mt_text") or ""):
             if tok and not any(sp.text.lower() == tok.lower() for sp in spans):
                 spans.append(RetainSpan(text=tok, start=-1, end=-1, type="latin_in_mt"))

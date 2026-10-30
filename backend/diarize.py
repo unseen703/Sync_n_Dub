@@ -1,6 +1,6 @@
-"""Thin wrapper over models.diarization — the backend-facing entry point.
+"""Backend-facing entry point for diarization.
 
-Keeps the model registry out of pipeline.py and gives the CLI/frontend one
+Keeps the model registry out of `pipeline.py` and gives the CLI and UI one
 place to import from.
 """
 from __future__ import annotations
@@ -29,20 +29,12 @@ def diarize(
     rttm_out: Optional[Path] = None,
     **model_kwargs,
 ) -> DiarizationResult:
-    """Diarize `audio` with the named model.
+    """Diarize a mono 16 kHz WAV with the named model.
 
-    Args:
-      audio: mono 16 kHz WAV.
-      model: one of `available_models()` — pyannote.
-      device: 'cuda' | 'cpu' | 'mps' | None (auto).
-      num_speakers / min_speakers / max_speakers: hints, honored per-adapter.
-      rttm_out: if given, also writes an RTTM file to this path.
-      **model_kwargs: forwarded to the adapter constructor. Unknown kwargs
-        are dropped with a warning, so it is safe to pass the union of what
-        any adapter might want. Per-adapter accepted keys:
-          pyannote:  checkpoint, hf_token
-
-    Returns a `DiarizationResult`.
+    The speaker-count arguments are hints, honoured per adapter. `rttm_out`
+    also writes an RTTM there. `model_kwargs` go to the adapter constructor,
+    with unknown keys dropped and warned about, so passing the union of what
+    any adapter might want is safe.
     """
     audio = Path(audio)
     if not audio.exists():

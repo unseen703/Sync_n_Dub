@@ -1,8 +1,10 @@
 """Face-detector registry.
 
-Add a new detector by adding its spec to `_REGISTRY_SPEC`. The lazy-import
-pattern matches `models.diarization.__init__`: environments that only have
-one adapter installed can still `from models.faces.detect import ...`.
+  - retinaface : InsightFace SCRFD, or the `retina-face` package
+  - mediapipe  : CPU-only, bbox-oriented
+
+Adapters import lazily, so an env with only one of them installed can still
+list the registry.
 """
 from __future__ import annotations
 

@@ -1,7 +1,7 @@
 """Stem separation — dialogue (vocals) vs music-and-effects (no_vocals).
 
-Wraps Demucs (HTDemucs by default). Uses the demucs CLI programmatically so
-we do not have to babysit the model loading loop ourselves.
+Wraps Demucs, HTDemucs by default, calling its CLI entry point rather than
+driving the model-loading loop here.
 """
 from __future__ import annotations
 
@@ -16,14 +16,12 @@ log = logging.getLogger(__name__)
 
 
 def _ensure_ffmpeg_on_path() -> None:
-    """Demucs shells out to `ffmpeg` for any non-wav input. When the system
-    has no ffmpeg installed, fall back to the one bundled by imageio-ffmpeg
-    by prepending its directory to PATH for the current process.
+    """Put an ffmpeg on PATH for demucs, which shells out to a bare `ffmpeg`
+    for any non-wav input.
 
-    Deliberately not `media_io._ffmpeg_bin()`: demucs calls bare `ffmpeg`
-    itself, so what it needs is a PATH entry, not a path we hold. Decoding
-    needs no filter the imageio build lacks, so landing on 7.0.2 rather than
-    the env's 7.1 is fine here.
+    Not `media_io._ffmpeg_bin()`: demucs needs a PATH entry, not a path we
+    hold. Decoding uses no filter the imageio build lacks, so which build it
+    lands on does not matter here.
     """
     if shutil.which("ffmpeg"):
         return
@@ -33,9 +31,8 @@ def _ensure_ffmpeg_on_path() -> None:
     except Exception:
         return
     ff_dir = str(ff.parent)
-    # imageio's binary is named e.g. `ffmpeg-linux-x86_64-v7.0.2`, not `ffmpeg`.
-    # Symlink it as `ffmpeg` in a session tmp dir and put that dir on PATH so
-    # `shutil.which("ffmpeg")` inside demucs succeeds.
+    # imageio's binary is named `ffmpeg-linux-x86_64-vN.N.N`, not `ffmpeg`, so
+    # symlink it under the expected name for demucs's own `shutil.which`.
     if ff.name != "ffmpeg":
         import tempfile
         shim_dir = Path(tempfile.gettempdir()) / "dubbingstudio-ffmpeg-shim"
@@ -68,12 +65,10 @@ def separate_stems(
     two_stems: str = "vocals",
     overwrite: bool = False,
 ) -> StemPaths:
-    """Run Demucs on the input; return the vocals + no_vocals WAV paths.
+    """Run Demucs on the input; return the vocals and no_vocals WAV paths.
 
-    `audio_or_video` can be a video file (demucs will call ffmpeg internally)
-    or an audio file. For best separation quality, pass a stereo 44.1 kHz
-    source; the 16 kHz mono WAV extracted for diarization is NOT the right
-    input here.
+    `audio_or_video` may be video or audio. Pass a stereo 44.1 kHz source —
+    the 16 kHz mono WAV extracted for diarization is NOT the right input.
     """
     src = Path(audio_or_video)
     if not src.exists():
@@ -113,11 +108,9 @@ def separate_stems(
         str(src),
     ]
     log.info("demucs.separate: %s", " ".join(argv))
-    # demucs.separate.main() is the console entry point — it calls sys.exit
-    # on argparse errors, model-load failures, and unknown --two-stems values.
-    # SystemExit inherits from BaseException, so an unwrapped exit would
-    # escape past Gradio's request handler and kill the worker thread. Convert
-    # it to a regular exception the pipeline can render as an error card.
+    # `main()` is a console entry point and calls sys.exit on argparse errors
+    # and model-load failures. SystemExit inherits from BaseException, so an
+    # unwrapped exit escapes the request handler and kills the worker thread.
     try:
         demucs.separate.main(argv)
     except SystemExit as e:

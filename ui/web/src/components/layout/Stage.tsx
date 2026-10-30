@@ -14,26 +14,7 @@ import { useStore } from '../../store/useStore';
 import { deriveCentreState } from '../../lib/centre';
 import { normalizeState } from '../../lib/format';
 
-/**
- * The centre column. The video is central, and everything else arranges
- * itself around it.
- *
- * The reveal order is `deriveCentreState`, which checks `failed` first and
- * unconditionally — but the player stays mounted BELOW the failure banner.
- * A job that dies at lip-sync still has a perfectly good original video,
- * and hiding it would make a partial failure look like a total one.
- *
- * There is no runner log on this screen. It was removed on purpose: this is
- * a user-facing product, and `progress.failure` (from `ui/errors.py`) says
- * what went wrong in a sentence. The raw log is still on disk for whoever
- * is debugging a render.
- *
- * Everything that CHANGES the dub is on this page too, under the player, as
- * of 2026-10-21 — the cast, the chat box, the script, and the lip-sync
- * control, in `EditPanel`. They used to be a separate page at
- * `#/job/<id>/edit`, which meant judging a voice from memory: the video was
- * on one screen and the controls that change it on another.
- */
+/** Job workspace. It reads the selected job and renders its media, progress, editing controls, or a landing state. */
 export function Stage() {
   const selected = useStore((s) => s.selected);
   const progress = useStore((s) => s.progress);
@@ -44,16 +25,9 @@ export function Stage() {
   const talkingHead = useStore((s) => s.talkingHead);
   const centre = deriveCentreState(progress, media);
 
-  // The agent replays stages 9b..9h over the run's merged ASR+MT JSON, which
-  // only exists once the run has got that far. Offering it mid-run would
-  // stage edits against a transcript still being written — the rule that
-  // used to gate the top bar's "Edit via agent" button, now gating the panel
-  // that replaced it.
   const running = normalizeState(progress?.state) === 'running'
     || normalizeState(progress?.state) === 'queued';
 
-  // Checked before the no-selection branch: this page has no job behind it,
-  // so it would otherwise fall through to the landing page.
   if (talkingHead) {
     return (
       <MotionConfig reducedMotion="user">
@@ -79,8 +53,7 @@ export function Stage() {
       <TopBar />
 
       <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3 lg:px-5 lg:py-4">
-        {/* The edit screen is a two-column layout and wants the room; a
-            running job is still the single centred column. */}
+
         <div className="flex flex-col gap-4">
           <ResultHeader />
 
@@ -103,12 +76,6 @@ export function Stage() {
             </div>
           ) : null}
 
-          {/* While the run is going it is the single centred column: the
-              player (from `video_ready`, including under a failure banner),
-              then the cast as it fills in from diarization. The edit screen
-              that replaces it once the run ends owns its own player, inside
-              its two-column layout — so the player is NOT rendered here for a
-              finished job, only for a running one. */}
           {running ? (
             <>
               {progress?.milestones?.video_ready ? (

@@ -379,8 +379,7 @@ def _asd_coord_list(out_root: Path, video: Path, model: str, *,
                 "will choose a face by itself — on a multi-face shot that is "
                 "whoever it finds first, not whoever is speaking. Stages 5 "
                 "and 6 must have run, and scores are only written from "
-                "2026-10-22; for an older job use "
-                "scripts/lipsync_asd_gated.py, which re-scores.",
+                "2026-10-22; for an older job re-run those stages.",
                 out_root.name, model)
             return None
 
@@ -809,15 +808,13 @@ def run_post_mt_stages(
     # 9i face restoration over the render. A NAMED parameter, not a lookup
     # into a `config` dict — this function has no `config` in scope, and a
     # `config.get(...)` here raised NameError on every run that reached it.
-    # `tests/test_ui_backend_sync.py` requires every UI kwarg to be a named
-    # pipeline parameter anyway.
+    # Every UI kwarg must be a named pipeline parameter.
     restore_model: Optional[str] = None,
     # Explicit rather than riding the shared `batch_size` adapter kwarg:
     # stage 4 picks that one too, so a lip-sync tuning value would also be
-    # handed to the diarizer. `tests/test_ui_backend_sync.py` requires every
-    # UI kwarg to be a NAMED pipeline parameter for exactly this reason --
-    # anything reaching `**adapter_kwargs` fails deep inside an adapter
-    # instead of at the boundary.
+    # handed to the diarizer. Every UI kwarg must be a NAMED pipeline
+    # parameter -- anything reaching `**adapter_kwargs` fails deep inside
+    # an adapter instead of at the boundary.
     lipsync_batch_size: Optional[int] = None,
     # Render only this (start_s, end_s) slice and splice it back into the
     # full timeline. None -- the default -- renders the whole video, exactly
@@ -933,9 +930,9 @@ def run_post_mt_stages(
             # checked 2026-10-22), so the audio cannot be made shorter after
             # the fact. The sentence has to be.
             #
-            # Marker on ONE line: `ui/progress.py` scrapes these and
-            # `tests/test_ui_progress.py` greps the literal, so a wrapped
-            # marker loses its closing `===` and silently stops matching.
+            # Marker on ONE line: `ui/progress.py` scrapes these, so a
+            # wrapped marker loses its closing `===` and silently stops
+            # matching.
             if condense_overlong_text:
                 log.info("=== stage 9c2: shortening over-long lines ===")
                 try:
@@ -943,6 +940,7 @@ def run_post_mt_stages(
                     c = condense_overlong(
                         mt_json,
                         language=target_language,
+                        source_language=source_language,
                         voice=duration_voice,
                         cache_dir=duration_cache_dir,
                         model=condense_model,
@@ -1770,17 +1768,15 @@ def _run_pipeline(
     stop_after_mt: bool = False,
     # ASR
     asr_model: Optional[str] = None,              # None → skip ASR
-    #: What is SPOKEN in the source. Defaults to English, which is what
-    #: this corpus is: the dubbing direction here is English -> Indic.
+    #: What is SPOKEN in the source. None means detect it: the Bodhan
+    #: adapter probes the longest turn once and pins that one answer to
+    #: every turn, so a 1-5 s turn cannot be labelled on its own.
     #:
-    #: It used to default to None, meaning "let the ASR detect it", and
-    #: that is unreliable at the granularity it runs at — one POST per
-    #: diarization turn, 1-5 s each. An English lecture came back on
-    #: 2026-10-17 transcribed into Telugu, Gujarati, Malayalam AND English
-    #: across nine turns, and MT then translated each as if its script were
-    #: real. Pass `None` explicitly to detect instead; the Bodhan adapter
-    #: then probes the longest turn once and pins that answer.
-    asr_language: Optional[str] = "en",
+    #: Pinning matters more than it looks. Detecting PER TURN instead let
+    #: one lecture come back as Telugu, Gujarati, Malayalam and English
+    #: across nine turns, with MT then translating each as if its script
+    #: were real. The fix is the single probe, not the hardcoded code.
+    asr_language: Optional[str] = None,
     asr_full_audio: bool = False,                 # True → transcribe raw 16k
     # Use the uploader's own published transcript instead of running ASR,
     # when a HUMAN-AUTHORED one exists for the ASR language. On by default:
@@ -1932,8 +1928,7 @@ def _run_pipeline(
             "lipsync":         lipsync_model,
             # 9i. Recorded because `ui/progress.plan_stages` branches on it:
             # a switch the planner reads but the manifest does not hold means
-            # a finished job re-plans to a different shape than it ran, which
-            # is the drift `tests/test_ui_backend_sync.py` exists to catch.
+            # a finished job re-plans to a different shape than it ran.
             "restore":         restore_model,
             "stem_model":      stem_model,
             "skip_stems":      skip_stems,
@@ -2208,20 +2203,26 @@ def _run_pipeline(
         #    so a caption problem costs the saving, never the run.
         caption_result = None
         if asr_model and captions_as_transcript:
-            caption_result = _captions_from(
-                subtitles, audio_16k, diar_result, asr_full_audio,
-                language=asr_language or "en",
-                allow_auto=captions_allow_auto)
+            if not asr_language:
+                # Caption tracks are selected by language code, and this
+                # runs BEFORE ASR, so with detection pending there is no
+                # code to select on. Guessing one picks the wrong track on
+                # exactly the non-English sources detection exists for.
+                log.info("captions: skipped -- the source language is being "
+                         "detected, and a track can only be matched by code")
+            else:
+                caption_result = _captions_from(
+                    subtitles, audio_16k, diar_result, asr_full_audio,
+                    language=asr_language,
+                    allow_auto=captions_allow_auto)
         if caption_result is not None:
             cap = caption_result.extra.get("captions", {})
             # ONE line, deliberately. `ui/progress.py` scrapes these markers
-            # and `tests/test_ui_progress.py` greps the source for the
-            # literal -- a marker split across two source lines is captured
-            # without its closing `===` and silently stops being matched,
-            # which freezes the progress bar. The test caught exactly that
-            # when this line was first written wrapped.
+            # -- a marker split across two source lines is captured without
+            # its closing `===` and silently stops being matched, which
+            # freezes the progress bar.
             log.info("=== stage 7: transcript from captions (%s, %s) ===",
-                     cap.get("source", "?"), asr_language or "en")
+                     cap.get("source", "?"), asr_language)
             asr_result = caption_result
         elif asr_model:
             log.info("=== stage 7: ASR (%s, full_audio=%s) ===",

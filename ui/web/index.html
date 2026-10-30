@@ -33,7 +33,6 @@
         --brand: #4f46e5;
         --aqua: #22d3ee;
         --rail: 19rem;
-        --spec: 20rem;
         --brandbar: 3.25rem;
       }
       * {
@@ -73,34 +72,25 @@
         padding: 0 1rem;
         border-bottom: 1px solid var(--line);
       }
+      /* Column ORDER mirrors AppShell: jobs left, stage centre. The
+         skeleton having them the other way round meant the layout visibly
+         swapped sides at first paint. */
       .bootcols {
         display: grid;
-        grid-template-columns: 1fr var(--rail);
+        grid-template-columns: var(--rail) 1fr;
         flex: 1;
         min-height: 0;
-      }
-      html.spec-open .bootcols {
-        grid-template-columns: var(--spec) 1fr var(--rail);
-      }
-      html:not(.spec-open) .boot-spec {
-        display: none;
       }
       @media (max-width: 1023px) {
         .bootcols {
           grid-template-columns: 1fr;
         }
-        .boot-rail,
-        .boot-spec {
+        .boot-rail {
           display: none;
         }
       }
-      .boot-spec {
-        border-right: 1px solid var(--line);
-        padding: 1rem;
-        overflow: hidden;
-      }
       .boot-rail {
-        border-left: 1px solid var(--line);
+        border-right: 1px solid var(--line);
         padding: 1rem;
         overflow: hidden;
       }
@@ -132,11 +122,6 @@
         .sk::after {
           animation: none;
         }
-      }
-      .sk-line {
-        height: 0.625rem;
-        border-radius: 999px;
-        background: rgba(159, 172, 191, 0.18);
       }
       .boot-mark {
         width: 1.5rem;
@@ -197,16 +182,6 @@
         .catch(function () {
           return null;
         });
-      // The spec panel's open state decides the skeleton's column count, so
-      // it has to be known before first paint or the panel pops in.
-      try {
-        var open = localStorage.getItem('ds.specOpen');
-        if (open === null ? window.innerWidth >= 1536 : open === '1') {
-          document.documentElement.classList.add('spec-open');
-        }
-      } catch (e) {
-        /* private mode: default to closed */
-      }
     </script>
   </head>
   <body>
@@ -219,12 +194,12 @@
           <span class="boot-tag">Voice translation &amp; video editing</span>
         </header>
         <div class="bootcols">
-          <aside class="boot-spec">
-            <div class="sk" style="height: 7rem; margin-bottom: 0.75rem"></div>
-            <div class="sk-line" style="width: 70%; margin-bottom: 0.75rem"></div>
-            <div class="sk-line" style="width: 85%; margin-bottom: 0.75rem"></div>
-            <div class="sk-line" style="width: 60%; margin-bottom: 0.75rem"></div>
-            <div class="sk-line" style="width: 78%"></div>
+          <aside class="boot-rail">
+            <div class="sk" style="height: 2.25rem; margin-bottom: 0.75rem"></div>
+            <div class="sk" style="height: 5.5rem; margin-bottom: 0.625rem"></div>
+            <div class="sk" style="height: 5.5rem; margin-bottom: 0.625rem"></div>
+            <div class="sk" style="height: 5.5rem; margin-bottom: 0.625rem"></div>
+            <div class="sk" style="height: 5.5rem; opacity: 0.55"></div>
           </aside>
           <main class="boot-stage">
             <div class="sk" style="height: 2.75rem; margin-bottom: 0.75rem"></div>
@@ -235,13 +210,6 @@
             ></div>
             <div class="sk" style="height: 3.5rem; max-width: 64rem; margin: 0 auto"></div>
           </main>
-          <aside class="boot-rail">
-            <div class="sk" style="height: 2.25rem; margin-bottom: 0.75rem"></div>
-            <div class="sk" style="height: 5.5rem; margin-bottom: 0.625rem"></div>
-            <div class="sk" style="height: 5.5rem; margin-bottom: 0.625rem"></div>
-            <div class="sk" style="height: 5.5rem; margin-bottom: 0.625rem"></div>
-            <div class="sk" style="height: 5.5rem; opacity: 0.55"></div>
-          </aside>
         </div>
       </div>
     </div>

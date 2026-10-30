@@ -1,6 +1,6 @@
 """NLQ edit agent — "say what to change", applied to a finished dub.
 
-    $ PY=/data1/dipak_data/miniconda3/envs/dubbing/bin/python
+    $ PY="$CONDA_PREFIX/bin/python"   # the `dubbing` env's interpreter
     $ $PY -m backend.edit_agent --job 20261016T1012__nag__hi \\
           "the speaker at 1:20 should sound female, and code-mix the
            translation between 0:30 and 1:00"
@@ -28,7 +28,7 @@ points the replay at the artifacts they left in the job folder.
 
 The LLM
 -------
-OpenRouter, default `google/gemma-3-12b-it` (see `backend.llm` for why that
+OpenRouter, default `google/gemini-2.5-flash` (see `backend.llm` for why that
 slug). It is used for two things: reading the request, and rewriting text for
 `retranslate` / `set_tone` / `code_mix(mode=llm)`. Everything else —
 resolving a timestamp to a segment, picking a voice of a given gender,
@@ -258,6 +258,49 @@ def op_catalogue() -> str:
     return "\n".join(lines)
 
 
+#: Ordinal words through 10. Covers how a user names a cue in prose rather
+#: than by its row number ("the first cue", "second cue"). Longer ordinals
+#: are rare in practice -- if someone says "the twenty-third cue" they can
+#: say "cue 23" -- and keeping the table short avoids regex surprises on
+#: words like "fifth" matching inside "fifthly".
+_ORDINAL_WORDS: Dict[str, int] = {
+    "first": 1, "second": 2, "third": 3, "fourth": 4, "fifth": 5,
+    "sixth": 6, "seventh": 7, "eighth": 8, "ninth": 9, "tenth": 10,
+}
+
+
+def _normalise_ordinals(nlq: str) -> str:
+    """Rewrite ordinal cue phrasings into the `cue N` shape the resolver reads.
+
+    "1st cue" / "2nd cue" / "3rd cue" -> "1 cue" / "2 cue" / "3 cue", then
+    `_CUE_PHRASE_RE` picks them up as `cue N`. Same for the ten ordinal
+    words. Runs BEFORE `_CUE_PHRASE_RE` so the existing cue-number map does
+    the actual resolution -- one source of truth for what "cue N" means.
+
+    This closes the 2026-10-30 "slow down 1st cue" trap: the LLM, handed the
+    raw string, invented a scope id `cue_00000001` and the per-op handler
+    then refused it as "no such segment id(s)".
+    """
+    # NB: `_CUE_PHRASE_RE` is `cue N` (noun before number), so the ordinal is
+    # rewritten into THAT shape, not `N cue`. "1st cue" / "2nd cue" become
+    # "cue 1" / "cue 2"; a plural noun ("1st cues") is preserved so a request
+    # over a list of cues still reads as a list ("cues" is unambiguous).
+    nlq = re.sub(r"\b(?:the\s+)?(\d+)(?:st|nd|rd|th)\s+(cues?|segments?|segs?)\b",
+                 lambda m: f"{m.group(2).lower()} {m.group(1)}", nlq,
+                 flags=re.I)
+
+    if not _ORDINAL_WORDS:
+        return nlq
+    pattern = (r"\b(?:the\s+)?(" + "|".join(_ORDINAL_WORDS)
+               + r")\s+(cues?|segments?|segs?)\b")
+
+    def _words(m: re.Match) -> str:
+        n = _ORDINAL_WORDS[m.group(1).lower()]
+        return f"{m.group(2).lower()} {n}"
+
+    return re.sub(pattern, _words, nlq, flags=re.I)
+
+
 def _cue_number_map(data: Dict[str, Any]) -> Dict[int, str]:
     """`{1: "SEG_0000", 2: "SEG_0001", ...}` — N is 1-based in start order.
 
@@ -326,6 +369,7 @@ def resolve_cue_aliases(nlq: str, data: Dict[str, Any]) -> str:
     An out-of-range number is left as literal text so the LLM can see it and
     refuse rather than silently redirecting to a different cue.
     """
+    nlq = _normalise_ordinals(nlq)
     nums = _cue_number_map(data)
     if not nums:
         return nlq
@@ -413,10 +457,8 @@ def segment_digest(data: Dict[str, Any], *, limit: int = _MAX_PROMPT_SEGMENTS,
 #: shape a prompt cache can reuse.
 #:
 #: The trade is that this text is now hand-maintained while `OPS` is
-#: generated, so the two can drift. `tests/test_edit_agent.py` greps every
-#: registered op name out of `OPS` and fails if one is missing from here,
-#: which is the same guard `tests/test_ui_backend_sync.py` puts on the other
-#: pair that must agree.
+#: generated, so the two can drift. Keep every registered op name mentioned
+#: in this prompt.
 #:
 #: It already caught one: `set_speaker` is registered in `backend/edits.py`
 #: but `op_catalogue()` never advertised it, so the model could not emit an
@@ -459,9 +501,9 @@ Use only the following operation names and parameters.
    Required params: text
 
 2. retranslate
-   Re-translate from the source transcript according to an instruction.
+   Re-translate from the source transcript according to an instruction, or pin the cue to a specific language.
    Required params: instruction
-   Optional params: target_language (only when the requested target language changes)
+   Optional params: target_language (ISO code, only when the requested target language changes OR the user wants the cue in a specific language — e.g. "keep this cue in english", "leave cue 4 in the source", "pass this one through"; emit target_language set to that language's ISO code and a short instruction describing the intent)
 
 3. set_tone
    Change the delivery tone.
@@ -470,20 +512,26 @@ Use only the following operation names and parameters.
    Optional params: rewrite_text (boolean; defaults to true)
 
 4. code_mix
-   Preserve specified English terms in Latin script within the target-language translation.
+   Preserve specified source-language terms in their original script within the target-language translation.
    Optional params: terms (list of strings), mode ("stage" or "llm"), termbase (path string)
    Include only parameters supported by the request and available configuration.
 
-5. set_gender
-   Change the speaker's apparent gender by selecting an appropriate TTS voice.
-   Required params: gender ("male" or "female")
+5. create_speaker
+   Mint a NEW speaker id for the scoped cues and assign a specific TTS voice to it. Use when diarization merged two different people onto one SPK id, when a stretch of audio has no speaker that fits, or when a speaker is incorrectly assigned and the user wants a new one for those cues rather than reattributing them to an existing one.
+   Required params: voice (engine voice id, e.g. "Deepika", "Chinmay", "Adarsh"), AND a scope that is a time range or cue list.
+   Optional params: gender ("male" or "female"; defaults to the voice's catalog gender), tone (one of the engine styles listed under op 3; defaults to neutral), engine (only if changing).
+   Scope rules:
+     - Required: a time range (start_s, end_s) or an explicit segments list. The whole-dub scope {"all": true} is REFUSED. A bare speaker scope is REFUSED (that is a rename, not a creation).
+     - If the request names no scope at all, return {"ops": []}.
+   Voice rules:
+     - If the request names no voice, return {"ops": []}. A new speaker without a voice has no way to be read.
 
 6. set_speaker
    Reattribute dialogue to another existing speaker.
    Required params: speaker (valid speaker ID)
 
 7. set_voice
-   Assign a specific TTS voice.
+   Assign a specific TTS voice to a speaker, and (by implication) that voice's gender. This is also how a gender change is expressed through NLQ: pick a voice of the desired gender from the catalog, do NOT emit a bare gender edit. A request like "sound female" or "make SPK_01 male" that does NOT name a voice must return {"ops": []} with a brief note asking which voice to use.
    Required params: voice
    Optional params: engine (only if changing or explicitly specifying the engine)
 
@@ -533,7 +581,7 @@ Scope may contain only these keys:
 Use the smallest scope that accurately represents the request.
 
 1. Explicit cue or segment IDs:
-   Use "segments" with the exact cue IDs provided. The user may refer to a cue by its short number ("cue 5", "#5", "cues 1 and 3", "cues 2-4"); these are rewritten into their SEG ids before you see this prompt, so you always receive canonical ids. If a number falls outside the table, it is left in the request literally — treat it as an unknown cue reference.
+   Use "segments" with the exact cue IDs provided. The user may refer to a cue by its short number ("cue 5", "#5", "cues 1 and 3", "cues 2-4") or by an ordinal ("1st cue", "2nd cue", "first cue", "the third cue"); these are rewritten into their SEG ids before you see this prompt, so you always receive canonical ids. Never invent a non-canonical scope id like `cue_00000001` -- if the request names a cue the resolver did not rewrite, treat it as an unknown cue reference and return {"ops": []} with a brief note.
 
 2. Explicit speaker:
    Use "speaker" with the exact speaker ID.
@@ -566,23 +614,21 @@ Choose the operation that most directly matches the requested change.
 - Change the translation while retaining the source meaning: retranslate.
 - Change ONE word or phrase and leave the rest of the line exactly as it is: replace_term. Prefer it over retranslate whenever the request names a specific word, including "translate the word X", "replace X with Y" or "keep X but change it to Y". retranslate regenerates the whole line and will alter wording the request never mentioned.
 - Change delivery style, such as a news read, a lecture, or an emotion: set_tone. The style must be one of the engine styles listed under operation 3; there is no "formal" and no "casual".
-- Keep specified English technical terms in the translated sentence: code_mix.
-- Change the perceived voice gender: set_gender.
-- Correct who is speaking: set_speaker.
-- Assign a particular TTS voice: set_voice.
+- Keep specified source-language technical terms INSIDE a translated sentence (term-level, not whole-cue): code_mix. The sentence is still spoken in the target language and only the listed terms stay in English. Use this only when the user names specific words.
+- Keep a WHOLE cue, or a time window, in a particular language (whether the dub's source language or any other named language): retranslate with target_language set to that language's ISO code and a short instruction describing the intent. This is how "keep this cue in english", "leave cue 4 in the source", "pass this one through as it is" and "keep SPK_01 in english" are expressed. Do NOT use code_mix for a whole-cue preservation — code_mix is term-level only.
+- Add a new speaker for a stretch of audio -- diarization merged two people, missed a voice, or assigned the wrong one and the user wants a new speaker rather than reattributing to an existing one ("create a new speaker for ...", "the speaker from X to Y is incorrectly assigned, create a new speaker ..."): create_speaker. Requires the voice to be named explicitly.This is different operation then change voice, as it will specify segment/timeline. 
+- Correct who is speaking (reattribute to an EXISTING speaker id): set_speaker.
+- Assign a particular TTS voice, including when the user asks for a gender change ("sound female, assign voice of deepika", "make him male, voice amit"): set_voice. The voice carries the gender, so the request must name a voice. A gender-only request with no voice named returns {"ops": []} with a note. Requires Speaker id explicitly.
 - Change speech speed: set_speed.
 - Restrict lip-sync processing to a time window or request a specific lip-sync model: lipsync_window.
 - Remove a word or phrase from inside a line, leaving the rest of the line standing: replace_term with replace set to "". Do not use mute_cue for this -- it discards the whole cue, not the phrase.
 - Silence, delete, remove or cut a WHOLE cue: mute_cue. The distinction that matters is phrase versus cue, not "mute" versus "delete": a request naming text inside the line is replace_term, a request naming the cue itself is mute_cue.
 - Change the dub's output language ("translate the dub to Marathi", "dub it in Tamil", "change the target language"): set_target_language. Never use retranslate for a language switch — retranslate rewrites the SAME target language.
 
-Do not substitute one operation for another merely because they can produce similar results.
-
-For requests involving distinct changes, create one operation per change. If one change fully satisfies the request, emit exactly one operation.
+Do not substitute one operation for another merely because they can produce similar results. 
+Do not send more than one operation.
 
 For example, "read SPK_01's lines as a news anchor" requires set_tone with tone "news" and scope {"speaker":"SPK_01"}. Do not add a time range.
-
-"Make it sound sad and preserve the words gradient and weight in English" requires set_tone (tone "sad") and code_mix, each with the same appropriate scope.
 
 ## PARAMETER RULES
 
@@ -590,7 +636,7 @@ For example, "read SPK_01's lines as a news anchor" requires set_tone with tone 
 - Do not include default values unless they are needed to make the requested behavior explicit.
 - For set_tone, use rewrite_text=true unless the user explicitly asks to change vocal delivery without rewriting wording. Never pass a tone that is not in the engine list; an unknown style is refused by the pipeline, not quietly ignored.
 - For code_mix, include terms only when the user identifies terms to preserve. Do not invent a termbase path.
-- For set_speed, use the numeric factor specified or unambiguously implied by the user. Do not invent a factor for vague requests such as "a little faster"; if the operation requires a factor and no configured default exists, return {"ops": []}.
+- For set_speed, use the numeric factor the user named. When the user says "slow down", "slower", or "slow it down" with no number, use factor 0.85; when they say "speed up", "faster", or "speed it up" with no number, use factor 1.2. These are the defaults the rule parser applies and they match pipeline behavior. Still refuse — return {"ops": []} — on vague modifiers that name a magnitude without saying what it is ("a little faster", "much slower", "way slower"), since the user clearly intends something other than the default but has not said what.
 - For lipsync_window, use the requested time window. Do not change the lip-sync model unless requested or necessary to specify a model.
 - Do not add target_language unless the user explicitly requests a language change.
 - Do not modify text unless the selected operation requires it.
@@ -625,8 +671,7 @@ Return the JSON object only."""
 #: `edits._lipsync_model_ids` exists at all: the hand-written list read
 #: "wav2lip, musetalk, latentsync" while five adapters were registered, so
 #: two of them were unreachable through the agent. Substituting at import
-#: keeps `_SYSTEM` a plain string, which is what the drift guards in
-#: `tests/test_edit_agent.py` grep.
+#: keeps `_SYSTEM` a plain string.
 _SYSTEM = (_SYSTEM_TEMPLATE
            .replace("{{lipsync_models}}", _lipsync_model_ids())
            .replace("{{tone_styles}}", _tone_style_ids()))
@@ -634,67 +679,60 @@ _SYSTEM = (_SYSTEM_TEMPLATE
 
 def parse_request(nlq: str, *, data: Dict[str, Any],
                   client=None) -> Tuple[List[EditOp], str]:
-    """Return `(ops, source)`; source is "rules" or "llm".
+    """Return `(ops, source)`; source is "llm" or "rules".
 
-    **The rule parser runs FIRST.** Most edit requests are a fixed shape —
-    "speed this up by 1.2x", "mute cue 5", "use Amit for SPEAKER_00" — and
-    the regexes read every one of them exactly, locally, in microseconds and
-    for nothing. Sending those to a 12B model over the network bought a
-    round trip per message and a non-deterministic reading of a sentence
-    that had only one reading. The LLM is now what it is good at: the
-    sentences the patterns genuinely cannot place.
+    **The LLM runs first on every request.** The regex parser is kept as the
+    fallback for the no-key case: without `OPENROUTER_API_KEY` the agent is
+    still useful on fixed phrasings, but with the key the LLM is the single
+    reading of every sentence. One parse shape, one place a wrong reading can
+    come from.
 
-    This reverses a deliberate earlier decision, so the reasoning it
-    replaces is worth keeping. The LLM used to go first because it reads the
-    job's actual speakers and cues and can therefore ABSTAIN — return
-    `{"ops": []}` when a request is ambiguous or names a cue that does not
-    exist — and a regex cannot: it either matches or it does not, and
-    matching is not the same as being right. Running the rules first gives
-    that veto up for every sentence they match.
+    The LLM is given ONLY the natural-language request plus the fixed op
+    catalogue in `_SYSTEM`. No speakers, no cue digest, no job state crosses
+    the wire. Validation that depended on that context — "SPK_99 doesn't
+    exist in this job", "the window landed in a silence gap" — now runs at
+    apply time, where `Scope.resolve` and the per-op handlers already own it
+    and where the error messages are the clearer ones anyway.
 
-    What makes the trade acceptable is `_rule_parse`'s own conservatism: it
-    emits only shapes it is sure of, each branch guards the ones that could
-    swallow it, and a match now carries a real scope (`_scope_from` learned
-    cue ids at the same time as this change — before that, a matched rule
-    could be right about the op and silently wrong about half the dub).
-    What remains true is that a regex cannot detect ambiguity. If a wrong
-    reading ever reaches a render, the fix is a narrower branch here, not a
-    second opinion after the fact.
+    `cue 5` / `#5` is rewritten to the canonical SEG id before parsing: it is
+    a text substitution on the NLQ string, not injected context, and both
+    parsers downstream understand only the canonical form.
 
-    If neither parser produces ops, the error offers phrasings that work
-    rather than the internal op names, which are the agent's vocabulary and
-    not anything the user typed.
+    If the LLM is unavailable (no key, or the client refuses), the regex
+    parser is used instead. If neither produces ops, the error offers
+    phrasings that work rather than the internal op names.
     """
     # `cue 5` / `#5` → `SEG_0004` before either parser runs, so both see the
     # same canonical cue ids the rest of the agent and `edits.py` understand.
     nlq = resolve_cue_aliases(nlq, data)
 
-    ops = _rule_parse(nlq)
-    if ops:
-        return ops, "rules"
-
     if client is not None and client.available():
         try:
-            ops = _llm_parse(nlq, data=data, client=client)
+            ops = _llm_parse(nlq, client=client)
+            ops = _dedup_create_speaker_set_voice(ops)
             if ops:
                 return ops, "llm"
             log.warning(
                 "the LLM could not interpret %r -- it returned no operations, "
                 "which is what it is instructed to do when a request is "
-                "ambiguous or names a speaker or cue this job does not have",
+                "ambiguous or names a value it would have to invent",
                 nlq)
             raise EditError(
                 f"could not interpret: {nlq!r}\n\n"
-                "  The patterns did not match, and the LLM read this job's "
-                "speakers and cues and could not match your request to any "
-                "of them.\n\n"
+                "  The LLM read your request against the op catalogue and "
+                "could not match it to a supported edit without inventing a "
+                "value.\n\n"
                 "  Try one of these shapes:\n\n"
                 + sample_prompts_text(per_op=2, indent="    "))
         except EditError:
             raise
         except Exception as e:
-            log.warning("llm parse failed (%s); the rule parser had already "
-                        "declined this request", e)
+            log.warning("llm parse failed (%s); falling back to the rule "
+                        "parser", e)
+
+    ops = _rule_parse(nlq, source_language=data.get("language"))
+    if ops:
+        return ops, "rules"
 
     raise EditError(
         f"could not interpret: {nlq!r}\n\n"
@@ -703,19 +741,45 @@ def parse_request(nlq: str, *, data: Dict[str, Any],
         "  Try one of these shapes:\n\n"
         + sample_prompts_text(per_op=2, indent="    "))
 
-def _llm_parse(nlq: str, *, data: Dict[str, Any], client) -> List[EditOp]:
-    times = [t for t in _find_times(nlq)]
-    speakers = sorted({str(s.get("speaker")) for s in data.get("segments", [])
-                       if s.get("speaker")})
-    # The op catalogue is NOT repeated here — it is fixed text and lives in
-    # `_SYSTEM`. What belongs in the user turn is only what varies with the
-    # request: this job's speakers, the cues (windowed around any timestamps
-    # the request mentions), and the request itself.
-    user = (
-        f"Speakers: {', '.join(speakers) or '(none labelled)'}\n"
-        f"Cues:\n{segment_digest(data, around=times or None)}\n\n"
-        f"Request: {nlq}\n\n"
-        f"JSON:")
+def _dedup_create_speaker_set_voice(ops: List[EditOp]) -> List[EditOp]:
+    """Strip set_voice from LLM output when a create_speaker is present.
+
+    The _SYSTEM prompt has an explicit "single op rule" for create_speaker,
+    but the LLM has drifted on this once in production (2026-10-30, SPK_05
+    incident): it emitted BOTH create_speaker scoped to the new cue AND
+    set_voice scoped to the ORIGINAL speaker. The second op's voice override
+    then triggered a stage-9d full cast re-shuffle via allow_voice_reuse,
+    because the newly-minted speaker and the original one both held the same
+    voice. Belt-and-braces: if the model drifts again, drop the stray op
+    rather than ship the double-write.
+
+    create_speaker already pins the voice through its own `voice` param, so
+    the set_voice is always redundant. If a user genuinely wants to change
+    both a new speaker's voice AND an existing speaker's voice in one turn,
+    they type two sentences.
+    """
+    if not any(o.op == "create_speaker" for o in ops):
+        return ops
+    kept = [o for o in ops if o.op != "set_voice"]
+    dropped = len(ops) - len(kept)
+    if dropped:
+        log.warning(
+            "parse: dropped %d set_voice op(s) that accompanied create_speaker "
+            "-- create_speaker already pins the voice, and a second write "
+            "would re-shuffle the whole cast at voice-stage replay", dropped)
+    return kept
+
+
+def _llm_parse(nlq: str, *, client) -> List[EditOp]:
+    """Send just the request to the LLM — no speakers, no cue digest.
+
+    The op catalogue and all parse rules live in `_SYSTEM`; the user turn
+    carries ONLY the natural-language request. Downstream validation runs at
+    apply time: `Scope.resolve` turns timestamps into cue ids against this
+    job's actual segments, and the per-op handlers refuse unknown speakers,
+    out-of-range factors and missing params with their own messages.
+    """
+    user = f"Request: {nlq}\n\nJSON:"
     payload = client.chat_json(
         [{"role": "system", "content": _SYSTEM},
          {"role": "user", "content": user}],
@@ -805,7 +869,42 @@ _VOICE_STOPWORDS = {
 }
 
 
-def _rule_parse(nlq: str) -> List[EditOp]:
+#: Phrases that mean "do not translate this", as opposed to naming a
+#: language to translate INTO. The source language's own names are added
+#: per job: on a Hindi-source run "keep X in Hindi" is a code-mix, while on
+#: an English-source one the same sentence is a translation request.
+_KEEP_LANG_PHRASES = (r"english",
+                      r"the\s+(?:original|source)\s+language",
+                      r"the\s+original",
+                      r"latin\s+script")
+
+#: Captured "terms" that name no term. The advertised quick action is one of
+#: them, so without this every use of it wrote a termbase row for the words
+#: "the technical terms".
+_GENERIC_TERMS = {
+    "the technical terms", "technical terms", "the terms", "terms",
+    "the english technical terms", "the source terms", "the words", "words",
+    "them", "it", "everything", "the technical words",
+}
+
+
+def _keep_language_re(source_language: Optional[str]) -> str:
+    """Alternation of the ways a request can say "leave this untranslated"."""
+    alts = list(_KEEP_LANG_PHRASES)
+    if source_language:
+        try:
+            from ui.langs import LANGUAGES
+            meta = LANGUAGES.get(str(source_language).split("-")[0].lower())
+        except Exception:                               # noqa: BLE001
+            meta = None
+        for name in ((meta or {}).get("english"), (meta or {}).get("native")):
+            if name:
+                alts.append(re.escape(name.strip().lower()))
+    return "(?:" + "|".join(alts) + ")"
+
+
+def _rule_parse(nlq: str, *,
+                source_language: Optional[str] = None) -> List[EditOp]:
     """Regex parser. Deliberately conservative: it emits only what it is sure
     of, so a half-understood sentence becomes "I did not understand" rather
     than a confident wrong edit.
@@ -926,43 +1025,101 @@ def _rule_parse(nlq: str) -> List[EditOp]:
     # "keep X in English" is the phrasing the op catalogue advertises and the
     # one people actually type; the literal words "code-mix" are the jargon.
     # Matching only the jargon left the advertised example unparseable.
+    #
+    # The language is NOT fixed to English -- the source may be any of them,
+    # and the workspace's own quick action says "in the original language".
+    # Only the source language and the keep-it phrasings are accepted, so
+    # `translate the word "gate" into Tamil` stays a translation request
+    # rather than silently becoming a code-mix.
+    keep_lang = _keep_language_re(source_language)
     if re.search(r"code[\s-]?mix", low) or re.search(
-            r"\b(keep|keeps|leave|retain|preserve)\b[^.]*\bin\s+english\b", low):
-        terms = re.search(r"\b(?:keep|leave|retain|preserve)\s+(.+?)\s+in\s+english",
-                          low)
+            rf"\b(keep|keeps|leave|retain|preserve)\b[^.]*\bin\s+{keep_lang}\b",
+            low):
+        terms = re.search(
+            rf"\b(?:keep|leave|retain|preserve)\s+(.+?)\s+in\s+{keep_lang}",
+            low)
         params = {}
-        if terms:
+        if terms and terms.group(1).strip() not in _GENERIC_TERMS:
             params["terms"] = [w.strip() for w in
                                re.split(r",|\band\b", terms.group(1))
                                if w.strip()]
         ops.append(EditOp(op="code_mix", scope=scope, params=params,
                           note="code-mix the translation"))
 
+    # create_speaker -- "create a new speaker for ..." / "the speaker from X
+    # to Y is incorrectly assigned, create a new speaker ..."
+    #
+    # Ordered BEFORE set_speaker because the sentence "create a new speaker
+    # and assign the Adarsh voice" otherwise trips set_speaker's "is / should
+    # be / belongs to <spk>" regex on "assign" nowhere, but trips set_voice's
+    # own branch on "the Adarsh voice" and would silently rewrite an existing
+    # speaker instead of minting a new one.
+    #
+    # Voice is REQUIRED (handler refuses otherwise). The regex captures a
+    # bare capitalised name after "assign the X voice" / "with the X voice";
+    # a request without that shape is left to return no ops, which is what
+    # the LLM prompt also instructs on an unparseable creation.
+    if re.search(r"\bcreate\s+(?:a\s+)?new\s+speaker\b", low):
+        # Name AFTER "voice": "with voice Chinmay", "voice Chinmay", "voiced
+        # by Chinmay". This phrasing is what the SPK_05 incident on
+        # 2026-10-30 exposed as unhandled by the earlier regex -- it only
+        # read the name BEFORE "voice" ("assign the Chinmay voice").
+        voice_m = re.search(
+            r"\b(?:voice|voiced\s+by)\s+([A-Z][a-z]{2,15})\b", t)
+        if not voice_m:
+            # Name BEFORE "voice": "assign the Chinmay voice", "with the
+            # Deepika voice", "using Adarsh voice".
+            voice_m = re.search(
+                r"\b(?:assign|with|using|use)\s+(?:the\s+)?"
+                r"([A-Z][a-z]{2,15})(?:\s+voice|\b)", t)
+        if not voice_m:
+            voice_m = re.search(r"\bvoice\s+of\s+([A-Z][a-z]{2,15})\b", t)
+        if voice_m and voice_m.group(1).lower() not in _VOICE_STOPWORDS:
+            params: Dict[str, Any] = {"voice": voice_m.group(1)}
+            g = re.search(r"\bgender\s+(?:to\s+)?(male|female)\b", low)
+            if not g:
+                g = re.search(r"\bset\s+(?:to\s+)?(male|female)\b", low)
+            if g:
+                params["gender"] = g.group(1)
+            # tone: "in a news style" / "as a lecture tone" -- validated by
+            # the handler against tone_styles(), so a loose match is safe.
+            from .edits import tone_styles
+            for style in sorted(tone_styles(), key=len, reverse=True):
+                if style.lower() == "neutral":
+                    continue
+                if re.search(
+                        rf"(?:\bin\s+(?:an?\s+)?|\bas\s+(?:an?\s+)?)"
+                        rf"{re.escape(style.lower())}\b", low):
+                    params["tone"] = style
+                    break
+            ops.append(EditOp(op="create_speaker", scope=scope,
+                              params=params,
+                              note="mint a new speaker and pin its voice"))
+
     # reattribution — "that line is SPK_02, not SPK_00"
     #
-    # Ordered BEFORE gender/voice because "the speaker at 1:20 is SPK_02"
-    # trips the gender regex on the bare word "speaker" otherwise, and a
-    # misread reattribution is a wrong voice on a real line.
+    # Ordered AFTER create_speaker so "create a new speaker for cue 4 and
+    # assign the Adarsh voice" does not match "is SPK_..." on nothing and
+    # fall through here. "actually"/"really" are allowed between the verb
+    # and the id because the workspace's own fill phrasing puts one there.
     #
-    # `actually`/`really` are allowed between the verb and the id because the
-    # workspace's own fill phrasing puts one there.
-    m = re.search(r"\b(?:is|are|should\s+be|belongs?\s+to|=)\s+"
-                  r"(?:actually\s+|really\s+)?"
-                  r"(SPK_\d+|SPEAKER[_ ]?\d+)\b", t, re.I)
-    if m and not re.search(r"\bvoice\b", low):
-        spk = m.group(1).upper().replace("SPEAKER ", "SPK_").replace(
-            "SPEAKER_", "SPK_")
-        ops.append(EditOp(op="set_speaker", scope=scope,
-                          params={"speaker": spk},
-                          note=f"reattribute the scoped cues to {spk}"))
+    # A sentence that said "create a new speaker" was already handled -- do
+    # not also emit a set_speaker from the same text.
+    if not any(o.op == "create_speaker" for o in ops):
+        m = re.search(r"\b(?:is|are|should\s+be|belongs?\s+to|=)\s+"
+                      r"(?:actually\s+|really\s+)?"
+                      r"(SPK_\d+|SPEAKER[_ ]?\d+)\b", t, re.I)
+        if m and not re.search(r"\bvoice\b", low):
+            spk = m.group(1).upper().replace("SPEAKER ", "SPK_").replace(
+                "SPEAKER_", "SPK_")
+            ops.append(EditOp(op="set_speaker", scope=scope,
+                              params={"speaker": spk},
+                              note=f"reattribute the scoped cues to {spk}"))
 
-    # gender
-    m = re.search(r"\b(male|female|man|woman)\b", low)
-    if m and re.search(r"gender|voice|sound|gender|speak", low):
-        gender = "male" if m.group(1) in ("male", "man") else "female"
-        ops.append(EditOp(op="set_gender", scope=scope,
-                          params={"gender": gender},
-                          note=f"use a {gender} voice"))
+    # gender -- NLQ gender changes now go through set_voice: the voice must
+    # be named. A bare "sound female" with no voice is deliberately left
+    # unparsed, matching the LLM prompt. The cast-table dropdown that posts
+    # a gender without a voice uses `ui/routes_edits.py`, not this parser.
 
     # explicit voice id
     #
@@ -976,17 +1133,46 @@ def _rule_parse(nlq: str) -> List[EditOp]:
     # Deliberately permissive: `_h_set_voice` checks the catalog and warns on
     # a miss, so a wrong guess here surfaces as a warning rather than a
     # silent no-op. `_VOICE_STOPWORDS` keeps the obvious false positives out.
-    m = re.search(r"\b(?:use|switch to|change .*? voice to)\s+"
-                  r"([A-Za-z]{2}-[A-Z]{2}-[A-Za-z]+Neural)\b", t)
-    if not m:
-        cand = re.search(r"\b(?:use|switch to|change .*? voice to)\s+"
-                         r"([A-Z][a-z]{2,15})\b", t)
-        if cand and cand.group(1).lower() not in _VOICE_STOPWORDS:
-            m = cand
-    if m:
-        ops.append(EditOp(op="set_voice", scope=scope,
-                          params={"voice": m.group(1)},
-                          note=f"pin voice {m.group(1)}"))
+    #
+    # Skipped when `create_speaker` already claimed the sentence -- the same
+    # "assign the Deepika voice" phrase lives inside both ops' advertised
+    # examples, and emitting both would mint a speaker and ALSO rewrite an
+    # existing one.
+    # set_voice: now REQUIRES a speaker scope -- the LLM prompt says the
+    # same, this is the defense in the no-key fallback. A sentence that
+    # names a voice but no speaker returns no set_voice op; the user has to
+    # name the speaker. The cast-table dropdown builds a set_voice with
+    # scope=Scope(speaker=...) directly in `ui/routes_edits.py`, not through
+    # this parser, so it is unaffected.
+    if not _has("create_speaker") and scope.speaker:
+        m = re.search(r"\b(?:use|switch to|change .*? voice to)\s+"
+                      r"([A-Za-z]{2}-[A-Z]{2}-[A-Za-z]+Neural)\b", t)
+        if not m:
+            # "use the Deepika voice for SPK_01", "give SPK_01 the Chinmay
+            # voice", "SPK_01 should sound female, assign the Deepika
+            # voice", "voice of Amit for SPK_01" -- the LLM prompt
+            # advertises all these shapes and the handler accepts them so
+            # long as a speaker is in scope.
+            cand = re.search(
+                r"\b(?:use|give\s+(?:SPK_\d+|SPEAKER[_ ]?\d+|this\s+speaker|"
+                r"these\s+speakers)|switch\s+to|assign)\s+(?:the\s+)?"
+                r"([A-Z][a-z]{2,15})(?:\s+voice)?\b", t)
+            if cand and cand.group(1).lower() not in _VOICE_STOPWORDS:
+                m = cand
+        if not m:
+            # "voice of Amit", "voice amit" (user's own phrasing)
+            cand = re.search(r"\bvoice\s+(?:of\s+)?([A-Z][a-z]{2,15})\b", t)
+            if cand and cand.group(1).lower() not in _VOICE_STOPWORDS:
+                m = cand
+        if not m:
+            cand = re.search(r"\b(?:use|switch to|change .*? voice to)\s+"
+                             r"([A-Z][a-z]{2,15})\b", t)
+            if cand and cand.group(1).lower() not in _VOICE_STOPWORDS:
+                m = cand
+        if m:
+            ops.append(EditOp(op="set_voice", scope=scope,
+                              params={"voice": m.group(1)},
+                              note=f"pin voice {m.group(1)}"))
 
     # literal replacement text
     #
@@ -1116,8 +1302,10 @@ class EditPlan:
                     if self.source == "rules" else ""))
         L.append("")
         L.append(f"{len(r.applied)} operation(s):")
+        from .edits import classify_op
+        src_lang = self.ctx.source_language
         for a, op in zip(r.applied, self.ops):
-            L.append(f"  • {op.op} on {a.scope}")
+            L.append(f"  • [{classify_op(op, src_lang)}] {op.op} on {a.scope}")
             if op.note:
                 L.append(f"      understood as: {op.note}")
             L.append(f"      {len(a.segments)} cue(s): "
@@ -1252,9 +1440,13 @@ def commit(plan: EditPlan) -> EditResult:
     out_dir = plan.view.root / "edits"
     out_dir.mkdir(parents=True, exist_ok=True)
     stamp = len(list(out_dir.glob("edit_*.json")))
+    from .edits import classify_op as _classify_op
+    _src_lang = plan.ctx.source_language
     (out_dir / f"edit_{stamp:03d}.json").write_text(
         json.dumps({"nlq": plan.nlq, "parsed_by": plan.source,
-                    "ops": [o.to_dict() for o in plan.ops],
+                    "ops": [{**o.to_dict(),
+                             "kind": _classify_op(o, _src_lang)}
+                            for o in plan.ops],
                     "result": res.to_jsonable()}, indent=2, ensure_ascii=False))
     # The EDITED document, not just the request that produced it.
     # `edit_NNN.json` records what was asked and what the handlers reported;
@@ -1698,7 +1890,7 @@ def _build_parser() -> argparse.ArgumentParser:
                          "round trip; prints no secrets")
     ap.add_argument("--llm-model", default=None,
                     help="OpenRouter model slug (default: $OPENROUTER_MODEL "
-                         "or google/gemma-3-12b-it)")
+                         "or google/gemini-2.5-flash)")
     ap.add_argument("--no-llm", action="store_true",
                     help="never call the LLM; use the regex parser only")
     ap.add_argument("--device", default=None, help="cuda | cpu")
@@ -1858,8 +2050,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 2
 
     if args.json:
+        from .edits import classify_op as _classify_op
+        _src_lang = plan.ctx.source_language
         print(json.dumps({"nlq": nlq, "parsed_by": plan.source,
-                          "ops": [o.to_dict() for o in plan.ops],
+                          "ops": [{**o.to_dict(),
+                                   "kind": _classify_op(o, _src_lang)}
+                                  for o in plan.ops],
                           "result": plan.result.to_jsonable()},
                          indent=2, ensure_ascii=False))
     else:

@@ -1,19 +1,13 @@
-"""Shared types + abstract base for forced-alignment adapters.
+"""Shared types and abstract base for forced-alignment adapters.
 
-A forced aligner takes an audio clip plus the text that was spoken, and
-returns per-word (start, end) time boundaries. It does NOT recognise speech
-from scratch; it refines boundaries using text that an ASR already produced.
+An aligner takes audio plus the text that was spoken and returns per-word
+(start, end) boundaries; it does not recognise speech, it refines boundaries
+for text an ASR already produced. This is what turns a text-only transcript
+into the word-timed segments the duration and lip-sync stages need.
 
-The pipeline uses it to turn Bodhan's text-only transcript into the
-word-timed segments the duration-adjustment and lip-sync stages need
-(plan §3 `words`, §7).
-
-Input shape: a list of `AlignRequest`, one per diarized/ASR segment:
-    (id, start_s, end_s, text, language?)
-
-Output: a list of `AlignedSegment` in the same order, carrying either the
-word boundaries the aligner produced, or an empty `words` list when the
-aligner declined that segment (empty text, unsupported language, too short).
+Takes one `AlignRequest` per segment and returns `AlignedSegment`s in the same
+order, with an empty `words` list where the aligner declined (empty text,
+unsupported language, too short).
 """
 from __future__ import annotations
 
@@ -100,7 +94,8 @@ class BaseAligner(ABC):
         *,
         language: Optional[str] = None,
     ) -> AlignResult:
-        """Return word-level timings for each request. The returned list is
-        parallel to `requests`; a segment the aligner declined gets an empty
+        """Return word-level timings for each request.
+
+        The result is parallel to `requests`; a declined segment gets an empty
         `words` list rather than being dropped.
         """

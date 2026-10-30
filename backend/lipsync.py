@@ -68,7 +68,7 @@ def run_lipsync(
     num_gpus: Optional[int] = None,
     window: Optional[tuple] = None,
     coord_list: Optional[list] = None,
-    max_segment_s: float = 60.0,
+    max_segment_s: Optional[float] = None,
     targets_npz: Optional[Path] = None,
 ) -> LipSyncOutput:
     """Lip-sync a video to dubbed audio, optionally rendering a window or splitting work across GPUs/segments. Supports per-frame face targets and records the result in the manifest."""
@@ -77,6 +77,9 @@ def run_lipsync(
             f"Unknown lip-sync model {model!r}. "
             f"Available: {', '.join(available_models())}"
         )
+    if max_segment_s is None:
+        from .scaling import lipsync_segment_s_default
+        max_segment_s = lipsync_segment_s_default()
     out_dir = Path(out_dir); out_dir.mkdir(parents=True, exist_ok=True)
     _archive_previous_renders(out_dir, model)
     source_video = Path(source_video)
@@ -182,7 +185,6 @@ def run_lipsync(
                    f"itself; waiting is safer than sharing one."),
             extra={"gpu_free_mib": free, "gpu_busy_pids": busy},
         )
-    # Sharding and segmenting both used to be DISABLED whenever targets were supplied, because each cuts the clip and renumbers frames from zero, so a whole-video list landed on the wrong frames in every piece but the first.
     from .memguard import breach as _mem_breach, memory_snapshot
     _mem_why = _mem_breach()
     if _mem_why:

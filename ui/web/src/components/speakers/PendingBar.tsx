@@ -4,16 +4,6 @@ import { useStore, selectStagedCount } from '../../store/useStore';
 import { Button, DemoChip } from '../ui/Button';
 import { MOCKED } from '../../api';
 
-/**
- * The staged-edits bar. Sticky at the bottom of the stage column.
- *
- * It exists because voice and delivery edits are staged rather than live:
- * an operator recasting three speakers should pay the re-render cost once,
- * after seeing what it costs, not three times by accident.
- *
- * The dialog it opens is loaded on demand — it is the only screen in the
- * app most sessions never reach.
- */
 const ApplyDialog = lazy(() =>
   import('./ApplyDialog').then((m) => ({ default: m.ApplyDialog })),
 );

@@ -1,27 +1,15 @@
 """Per-frame face-box cache, shared by the lip-sync adapters.
 
-Face detection is the expensive preprocessing step: MuseTalk runs DWPose
-landmarks plus S3FD over every frame before a single mouth is generated, and
-Wav2Lip runs S3FD over every frame too. Both recompute it on every run, so
-re-rendering the same clip -- which is what iterating on a voice, a tone or a
-batch size actually does -- pays for it again each time.
+Face detection is the expensive preprocessing step and every adapter redoes it
+on each run, so re-rendering the same clip pays for it again. MuseTalk's own
+`--saved_coord` writes into a TemporaryDirectory that is destroyed with it;
+Wav2Lip has no caching at all.
 
-MuseTalk already supports `--use_saved_coord` / `--saved_coord`, but writes
-the pickle to `<result_dir>/../<basename>.pkl`, which for us is inside a
-`TemporaryDirectory` and is destroyed with it. Wav2Lip has no caching at all.
-
-WHY THE KEY IS NOT THE FILENAME
--------------------------------
-The obvious key -- the video's basename -- is actively dangerous here. Every
-sharded run writes `part00.mp4` and `part01.mp4`, so a basename key would
-serve one job's boxes to a different job's frames. The boxes would be
-plausible, the render would succeed, and the mouths would be drawn in the
-wrong places: the same shape as the voice-reference trap in CLAUDE.md, where
-a clip filed under the wrong name produced a confident, wrong answer.
-
-So the key is content-ish (size + mtime_ns) plus every parameter that moves a
-box. A hit is additionally validated against the frame count before use, and
-a mismatch recomputes rather than guessing.
+The key is NOT the filename: every sharded run writes `part00.mp4`, so a
+basename key would serve one job's boxes for another job's frames and draw
+plausible mouths in the wrong places. It is size + mtime_ns plus every
+parameter that moves a box, and a hit is validated against the frame count
+before use.
 """
 from __future__ import annotations
 
@@ -35,8 +23,8 @@ from typing import Any, Optional
 
 log = logging.getLogger(__name__)
 
-#: Cache root. Inside `data/` so it is covered by the repo's own layout
-#: conventions and can be deleted wholesale without touching a job folder.
+#: Cache root. Inside `data/` so it can be deleted wholesale without touching
+#: a job folder.
 DEFAULT_CACHE_DIR = Path("data/cache/lipsync_coords")
 
 
@@ -54,11 +42,10 @@ def enabled() -> bool:
 def key_for(video: Path, model: str, params: dict) -> str:
     """Stable id for (this exact file, these box-affecting parameters).
 
-    size + mtime_ns rather than a content hash: the inputs here are hundreds
-    of megabytes and are written once by our own ffmpeg cut, so a full read
-    on every run would cost more than the detection it saves. The trade-off
-    is that a file rewritten with an identical size AND identical mtime would
-    hit a stale entry; the frame-count check below is the backstop.
+    size + mtime_ns rather than a content hash: the inputs run to hundreds of
+    megabytes, so a full read would cost more than the detection it saves. A
+    file rewritten with identical size and mtime would hit a stale entry; the
+    frame-count check in `load` is the backstop.
     """
     try:
         st = Path(video).stat()
@@ -93,8 +80,8 @@ def load(video: Path, model: str, params: dict,
         return None
     n = meta.get("frames")
     if expect_frames is not None and n is not None and n != expect_frames:
-        # Never silently reuse boxes computed for a different frame count:
-        # that is how one clip's boxes end up drawn on another clip's frames.
+        # Never reuse boxes computed for a different frame count — that is
+        # how one clip's boxes end up on another clip's frames.
         log.warning("coord cache: %s holds %s frames but this clip has %d; "
                     "recomputing", pkl.name, n, expect_frames)
         return None

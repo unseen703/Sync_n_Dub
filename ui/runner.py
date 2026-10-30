@@ -501,8 +501,15 @@ def _clear_awaiting_cast(job_root: Path) -> None:
         doc = _json.loads(mani.read_text())
     except (OSError, ValueError):
         return
+    changed = False
     if doc.get("awaiting_cast"):
         doc["awaiting_cast"] = False
+        changed = True
+    res = doc.get("result")
+    if isinstance(res, dict) and res.get("awaiting_cast"):
+        res["awaiting_cast"] = False
+        changed = True
+    if changed:
         try:
             mani.write_text(_json.dumps(doc, indent=2))
         except OSError:
@@ -533,8 +540,7 @@ def _run_cast(job_id: str, job_root: Path, jobs_dir: Path) -> int:
     view = edit_agent.open_job(job_id, data_dir=DATA_DIR)
     ns = edit_agent.recover_args(view)
     ctx = edit_agent.build_context(view, rewriter=None, ns=ns)
-    res = _edits.apply_edits(view.merged_json, [], ctx=ctx, nlq="(cast)",
-                             dry_run=True)
+    res = _edits.EditResult(merged_json=view.merged_json)
     # The whole post-MT chain is "dirty" -- none of it has run. Lip-sync stays
     # out; it is a separate submission with its own GPU pre-flight.
     res.dirty_stages = [s for s in _edits.STAGE_ORDER if s != "lipsync"]

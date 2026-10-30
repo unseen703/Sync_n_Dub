@@ -1,13 +1,6 @@
 import { cn } from '../../lib/cn';
 import { normalizeState } from '../../lib/format';
 
-/**
- * One definition of what each job state looks like and is called.
- *
- * Every text colour here is a palette ink token, so each measures at least
- * 9:1 against its own tinted pill — the old badges used `text-slate-300`
- * class colours against 10 %-opacity fills and several landed near 3:1.
- */
 const STYLES: Record<string, string> = {
   done: 'border-ok/35 bg-ok/10 text-ok',
   running: 'border-brand-ink/40 bg-brand/15 text-brand-ink',

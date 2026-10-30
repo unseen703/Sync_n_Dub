@@ -1,25 +1,15 @@
 """Cut the chosen part of a video out, before the pipeline sees it.
 
-There is no clip-window flag anywhere in `backend/` (CLAUDE.md section 2), and
-adding one would mean editing the file the CLI, the sweep, `experiment.py` and
-`edit_agent.rerun` all share. So the window is a UI-side concern: the server
-cuts the clip into `<job>/videos/` and hands the pipeline a local file.
-`_adopt_into_job` returns a path unchanged when it is already inside
-`<job>/videos/`, so this needs no backend change at all.
+There is no clip-window flag in `backend/`, so the window is a UI concern: the
+server cuts into `<job>/videos/` and hands the pipeline a local file.
 
-Two things about the ffmpeg call are load-bearing:
+Two things about the ffmpeg call are load-bearing. `-ss` goes BEFORE `-i`, or
+it becomes a decode-and-discard seek that costs minutes on a long source. And
+it re-encodes: `-c copy` starts the file at the preceding keyframe and leaves
+the first frames undecodable, so the clip would not begin where asked.
 
-  * **`-ss` goes before `-i`.** After `-i` it is a decode-and-discard seek:
-    correct, and minutes slower on a long source. Before `-i` it seeks the
-    container first.
-  * **It re-encodes.** `-c copy` would start the file at the keyframe *before*
-    the requested time and leave the first frames undecodable, so the clip
-    would not start where the operator asked. Modelled on
-    `scripts/clip_asd_musetalk_run.py::phase_cut`, which re-encodes for the
-    same reason; the audio comes along because every downstream stage wants it.
-
-There is no system ffmpeg on this host, so the binary always comes from
-`backend.media_io._ffmpeg_bin()` (CLAUDE.md section 1).
+There is no system ffmpeg on this host, so the binary comes from
+`backend.media_io._ffmpeg_bin()`.
 """
 from __future__ import annotations
 
@@ -33,8 +23,8 @@ from ._io import env_int as _env_int
 
 log = logging.getLogger("ui.clip")
 
-#: Long enough that a stuck ffmpeg surfaces, short enough that it is not the
-#: thing holding a 20-minute render hostage.
+#: Long enough that a stuck ffmpeg surfaces, short enough that it never holds
+#: a long render hostage.
 CUT_TIMEOUT_S = _env_int("DUBBING_UI_CUT_TIMEOUT_S", 2 * 60 * 60)
 
 
@@ -70,9 +60,8 @@ def cut_window(src: Path, out: Path, start_s: float, end_s: float,
             f"ffmpeg cut failed (rc={proc.returncode}): "
             f"{(proc.stderr or '').strip()[-800:]}"
         )
-    # A zero exit with no file is the repo's recurring ffmpeg failure mode
-    # (CLAUDE.md section 1 — Wav2Lip's mux loses the render and exits 0), so
-    # the artifact is checked rather than the return code.
+    # A zero exit with no file is a recurring ffmpeg failure mode here, so the
+    # artifact is the arbiter, not the return code.
     if not out.is_file() or out.stat().st_size == 0:
         raise RuntimeError(
             f"ffmpeg reported success but wrote nothing to {out}. "
@@ -84,10 +73,9 @@ def cut_window(src: Path, out: Path, start_s: float, end_s: float,
 def adopt_whole(src: Path, out: Path) -> Path:
     """Place the whole video at `out` without a second copy on disk.
 
-    A whole-video job has no window to cut, and re-encoding it to say so
-    would cost minutes and lose quality for nothing. Hardlink when the source
-    and the job folder are on the same filesystem; fall back to a copy when
-    they are not.
+    A whole-video job has nothing to cut, and re-encoding would cost minutes
+    and quality for nothing. Hardlinks when source and job folder share a
+    filesystem, copies when they do not.
     """
     src, out = Path(src), Path(out)
     if not src.is_file():

@@ -1,35 +1,18 @@
-"""emotion2vec+ speech-emotion adapter (ddlBoJack / FunASR).
-
-Model: `iic/emotion2vec_plus_large` by default -- the largest of the
-emotion2vec+ series, a self-supervised speech-emotion representation model
-fine-tuned for utterance-level classification (emotion2vec, ACL Findings
-2024).
+"""emotion2vec+ speech-emotion adapter, via FunASR.
 
 Env:
   EMOTION2VEC_MODEL   model id (default: iic/emotion2vec_plus_large)
   EMOTION2VEC_HUB     "hf" (default) or "ms" for ModelScope
 
-Install: `pip install funasr` -- it pulls modelscope and is import-light
-until a model is actually loaded. Weights download on first use.
+Needs `pip install funasr`; weights download on first use.
 
-Two traps, both load-bearing:
+Two traps. The published label set is inconsistent (the HF card lists 5
+classes, the README 9), so no vocabulary is hardcoded — labels are read at
+runtime and reported in `EmotionBatch.labels`. And FunASR returns labels as
+`<zh>/<en>`, so `_norm_label` keeps the English side.
 
-**The documented label set is wrong, or at least inconsistent.** The HF card
-for `emotion2vec_plus_large` lists 5 classes (angry/happy/neutral/sad/
-unknown); the GitHub README advertises 9 (adding disgusted, fearful,
-surprised, other). We therefore never hardcode a vocabulary -- the labels
-are read off `res["labels"]` at runtime and reported in `EmotionBatch.labels`
-so a run records what the model actually offered. Mapping to TTS styles
-happens by name in `backend.emotion`, so a 5-class model simply never emits
-the four it does not have.
-
-**FunASR returns labels in `<zh>/<en>` form**, e.g. `生气/angry`,
-`<unk>/unknown`. `_norm_label` keeps the trailing English side; matching the
-raw string would miss every class.
-
-The model is utterance-level. Feeding it a 20-minute lecture returns one
-label for the whole thing, which is useless -- `backend.emotion` cuts
-per-segment clips first and scores those.
+The model is utterance-level: `backend.emotion` cuts per-segment clips first,
+since a whole lecture returns one useless label.
 """
 from __future__ import annotations
 
@@ -46,7 +29,7 @@ DEFAULT_MODEL = "iic/emotion2vec_plus_large"
 
 
 def _norm_label(raw: str) -> str:
-    """`'生气/angry'` -> `'angry'`; `'<unk>/unknown'` -> `'unknown'`."""
+    """`'angry'` -> `'angry'`; `'<unk>/unknown'` -> `'unknown'`."""
     s = (raw or "").strip()
     if "/" in s:
         s = s.rsplit("/", 1)[-1]
@@ -81,16 +64,14 @@ class Emotion2VecEmotion(BaseEmotion):
             from funasr import AutoModel
         except ImportError as e:
             raise ImportError(
-                "emotion2vec needs FunASR. `pip install funasr` into the "
-                "dubbing env (checked 2026-10-17: pulls 17 packages, "
-                "upgrades none of torch/transformers/tokenizers)."
+                "emotion2vec needs FunASR. `pip install funasr` into the env"
             ) from e
         kwargs = {"model": self.model_id, "hub": self.hub}
         if self.device:
             kwargs["device"] = self.device
         if self.disable_update:
-            # FunASR otherwise phones home on every construction and can
-            # block for a long time on a slow link.
+            # FunASR otherwise phones home on every construction and blocks
+            # for a long time on a slow link.
             kwargs["disable_update"] = True
         log.info("emotion2vec: loading %s (hub=%s, device=%s)",
                  self.model_id, self.hub, self.device or "auto")
@@ -128,7 +109,7 @@ class Emotion2VecEmotion(BaseEmotion):
                     clip_id, best, float(dist[best]), scores=dist,
                 ))
             except Exception as e:                   # noqa: BLE001
-                # One bad clip must not lose the other N-1 predictions.
+                # One bad clip must not lose the other predictions.
                 log.warning("emotion2vec: %s failed: %s", clip_id, e)
                 results.append(EmotionResult(clip_id, "unknown", 0.0,
                                              error=str(e)))

@@ -1,8 +1,7 @@
-"""Media I/O: demux + audio extraction, thin wrapper around ffmpeg.
+"""Media I/O: demux, audio extraction and probes, wrapping ffmpeg.
 
-Diarization and Bodhan ASR both want mono 16 kHz WAV, so that is the default.
-Change `sample_rate` / `mono` to keep the source characteristics for stem
-separation, which prefers 44.1 kHz stereo.
+Defaults to mono 16 kHz WAV, which diarization and ASR both want; change
+`sample_rate` / `mono` for stem separation, which prefers 44.1 kHz stereo.
 """
 from __future__ import annotations
 
@@ -20,11 +19,9 @@ log = logging.getLogger(__name__)
 def _interpreter_bin(name: str) -> Optional[str]:
     """`name` from the directory of the running interpreter, if it is there.
 
-    Scripts here are launched by naming the conda python outright
-    (`$PY script.py`) rather than by activating the env, so PATH often has
-    no ffmpeg or ffprobe on it at all while `envs/dubbing/bin` has both.
-    The interpreter's own directory is the one reliable pointer back to the
-    env that is actually running, so look there before giving up.
+    Scripts are launched by naming the conda python outright rather than by
+    activating the env, so PATH often has no ffmpeg or ffprobe while
+    `envs/dubbing/bin` has both.
     """
     cand = Path(sys.executable).parent / name
     return str(cand) if cand.exists() else None
@@ -33,10 +30,10 @@ def _interpreter_bin(name: str) -> Optional[str]:
 def _ffmpeg_bin() -> str:
     """Prefer system ffmpeg, then the running env's, then imageio-ffmpeg.
 
-    Note these builds differ in which *filters* they carry — the conda v7.1
-    has `atempo` but not `rubberband`, the imageio static build has both. So
-    probe per filter via `backend.stretch.available_backends()`, never by
-    assuming which binary this returned.
+    These builds carry different FILTERS — the conda 7.1 has `atempo` but not
+    `rubberband`, the imageio static build has both — so probe per filter via
+    `backend.stretch.available_backends()` rather than assuming which binary
+    this returned.
     """
     for name in ("ffmpeg",):
         found = shutil.which(name)
@@ -58,14 +55,11 @@ def _ffmpeg_bin() -> str:
 def _ffprobe_bin() -> Optional[str]:
     """System ffprobe, else the running env's, else beside our ffmpeg.
 
-    imageio-ffmpeg does not publish an ffprobe entry point, but the static
-    build it ships sometimes has one in the same directory. Returns None when
-    no ffprobe exists at all — callers fall back to the ffmpeg binary.
-
-    Returning None is a silent degradation in every caller: probes answer
-    "duration unknown" and `backend.lipsync._needs_remux` answers "no remux
-    needed" for everything. That is how Wav2Lip's 16 kHz mono AAC once
-    shipped to a player that refused to play it.
+    imageio-ffmpeg publishes no ffprobe entry point, though its static build
+    sometimes has one in the same directory. Returns None when there is none
+    at all, which degrades every caller silently: probes answer "duration
+    unknown" and `backend.lipsync._needs_remux` answers "no remux needed" for
+    everything.
     """
     found = shutil.which("ffprobe")
     if found:
@@ -92,10 +86,10 @@ def extract_audio(
     mono: bool = True,
     overwrite: bool = True,
 ) -> Path:
-    """Demux + resample the audio track of `video` to a WAV file.
+    """Demux and resample `video`'s audio track to a WAV file.
 
-    Returns the output WAV path. If `out_wav` is None, writes next to the
-    video with `.wav` suffix.
+    Returns the output path, written next to the video with a `.wav` suffix
+    when `out_wav` is None.
     """
     video = Path(video)
     if not video.exists():
@@ -145,8 +139,8 @@ _FFMPEG_DURATION = re.compile(
 def _duration_via_ffmpeg(media: Path) -> float:
     """Read the container `Duration:` line ffmpeg prints on stderr.
 
-    ffmpeg exits non-zero when no output file is given, so the return code is
-    ignored — only the banner matters.
+    ffmpeg exits non-zero with no output file given, so the return code is
+    ignored and only the banner matters.
     """
     cmd = [_ffmpeg_bin(), "-hide_banner", "-i", str(media)]
     proc = subprocess.run(cmd, capture_output=True, text=True)
@@ -162,11 +156,10 @@ def _duration_via_ffmpeg(media: Path) -> float:
 
 
 def probe_duration(media: Path) -> float:
-    """Return duration in seconds via ffprobe, or ffmpeg when none is installed.
+    """Duration in seconds via ffprobe, or ffmpeg when none is installed.
 
-    Callers (notably `backend.mix`) treat a failure here as "unknown" and
-    substitute a guess, which silently poisons tempo maths — so exhaust every
-    binary we can reach before giving up.
+    Callers treat a failure as "unknown" and substitute a guess, which poisons
+    tempo maths, so exhaust every reachable binary before giving up.
     """
     media = Path(media)
     if not media.exists():
@@ -195,18 +188,12 @@ def probe_duration(media: Path) -> float:
 
 
 def probe_video(path: Path) -> tuple[float, float]:
-    """Return (fps, duration_s) using ffprobe when available, else zeros.
+    """Return `(fps, duration_s)` via ffprobe, else zeros.
 
-    Lived as four byte-identical private copies, one per lip-sync adapter,
-    each of which already imported `_ffprobe_bin` from this module to get the
-    binary. Consolidated 2026-10-23; the adapters import it now.
-
-    The zeros are a deliberate best-effort answer, NOT the policy
-    `probe_duration` above follows. Every caller is an adapter reporting the
-    fps and length of a render it has just finished, for the manifest — a
-    probe that fails there should not take down a render that succeeded.
-    `_needs_remux` is the one reader that acts on the number, and it treats
-    0.0 as "cannot tell" (CLAUDE.md §1).
+    The zeros are a deliberate best-effort answer, unlike `probe_duration`
+    above: callers are adapters reporting on a render they just finished, and
+    a failed probe should not take down a render that worked. `_needs_remux`
+    is the one reader that acts on the number and treats 0.0 as "cannot tell".
     """
     ffprobe = _ffprobe_bin()
     if not ffprobe or not Path(path).exists():

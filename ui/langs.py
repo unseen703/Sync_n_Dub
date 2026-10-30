@@ -1,15 +1,8 @@
 """Which languages this install can actually dub into.
 
-There is no authoritative list in the repo — `--mt-target-language` is a
-free-form string with no `choices=`, and two partially-overlapping tables
-exist (`voices.DEFAULT_INDIC_SPEAK`, `jobs._LANG_RE`). A dropdown built from
-a hand-copied third list would drift the first time an adapter gained a
-voice.
-
-So this builds the list **from the adapters at import time**. A language is
-offered only when the chosen TTS engine can actually speak it, because the
-failure mode otherwise is a job that runs for minutes and then cannot
-synthesise a word.
+Built from the voice catalog at call time rather than a hand-kept list, so a
+language is offered only when the chosen TTS engine can speak it — otherwise
+a job runs for minutes and then cannot synthesise a word.
 """
 from __future__ import annotations
 
@@ -18,9 +11,8 @@ from typing import Any, Dict, List, Optional
 
 log = logging.getLogger("ui.langs")
 
-#: Display names. English first because that is what the operator reads; the
-#: native name is shown beside it because that is what the output will be.
-#: Scripts drive the font the UI loads for each language.
+#: Display names, English first with the native name beside it. `script`
+#: drives which font the UI loads.
 LANGUAGES: Dict[str, Dict[str, str]] = {
     "as":  {"english": "Assamese",  "native": "অসমীয়া",      "script": "beng"},
     "bn":  {"english": "Bengali",   "native": "বাংলা",        "script": "beng"},
@@ -47,8 +39,7 @@ LANGUAGES: Dict[str, Dict[str, str]] = {
     "ur":  {"english": "Urdu",      "native": "اردو",         "script": "arab"},
 }
 
-#: Font family per script, matching the `.lang-*` rules of the old
-#: (removed) inspector UI, which were correct and simply never applied.
+#: Font family per script.
 SCRIPT_FONTS: Dict[str, str] = {
     "deva": "Noto Sans Devanagari",
     "beng": "Noto Sans Bengali",
@@ -82,8 +73,8 @@ def languages_for(tts: Optional[str]) -> List[str]:
     eng = (tts or "").strip().lower()
     if eng in ("bodhan", "indic-speak", ""):
         return _catalog_languages("indic-speak")
-    # A retired engine named by a job on disk (`edge`, `indicf5`). No catalog
-    # to narrow by, so offer everything rather than an empty dropdown.
+    # An engine with no catalog to narrow by: offer everything rather than an
+    # empty dropdown.
     return _catalog_languages(eng) or sorted(LANGUAGES)
 
 
@@ -93,8 +84,8 @@ def options(tts: Optional[str] = None) -> List[Dict[str, Any]]:
     for code in languages_for(tts):
         meta = LANGUAGES.get(code)
         if meta is None:
-            # An adapter knows a language this table does not. Show it rather
-            # than hiding a capability; the code is better than nothing.
+            # An adapter knows a language this table does not. Show the code
+            # rather than hide a capability.
             out.append({"code": code, "english": code.upper(), "native": "",
                         "script": "latn", "font": ""})
             continue
@@ -113,6 +104,20 @@ def describe(code: Optional[str]) -> str:
     if meta is None:
         return code
     return f"{meta['english']} ({meta['native']})" if meta["native"] else meta["english"]
+
+
+def english_name(code: Optional[str],
+                 default: str = "the source language") -> str:
+    """`hi` -> `Hindi`, for a prompt that has to name the language in words.
+
+    An unknown code is returned as it stands rather than replaced by the
+    default: a prompt naming `yue` is wrong in a way someone can see, one
+    silently saying "the source language" is not.
+    """
+    if not code:
+        return default
+    meta = LANGUAGES.get(code.split("-")[0].lower())
+    return meta["english"] if meta else code
 
 
 def script_of(code: Optional[str]) -> str:

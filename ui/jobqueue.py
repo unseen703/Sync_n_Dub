@@ -28,7 +28,7 @@ from .progress import PROGRESS_FILE, write_atomic
 log = logging.getLogger("ui.jobqueue")
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-RUNNER_SH = REPO_ROOT / "scripts" / "ui_run_job.sh"
+RUNNER_SH = REPO_ROOT / "ui_run_job.sh"
 
 #: One tmux session for detached jobs, so a human can attach to a running
 #: render. See `.claude/skills/long-run`.

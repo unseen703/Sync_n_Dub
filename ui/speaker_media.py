@@ -1,22 +1,8 @@
-"""Face crop and dubbed-voice sample for the speaker review card.
+"""Face crop and voice samples for the speaker review card.
 
-The review screen asks a human "is this the right voice for this person?",
-which needs both halves on screen: the FACE the pipeline attributed to that
-speaker, and the dub it will actually read in. `/api/jobs/{id}/speakers`
-already carried the detected gender, tone, assigned voice and the speaker's
-ORIGINAL reference clip; these two were the gap.
-
-Both are derived on demand and cached in the job folder, because both are
-cheap to recompute and expensive to carry around:
-
-  * the crop is one decoded frame out of a video already on disk
-  * the dub sample is a clip the TTS stage already wrote -- this picks one,
-    it does not synthesise anything
-
-NO MODEL RUNS HERE. The face a speaker owns was decided by stage 6 and read
-back by `backend.assign_faces.speaker_face_tracks`; re-deciding it inside a
-GET would mean a second, differently-wrong answer to a question the pipeline
-already answered.
+Cuts a face crop from a frame the pipeline already attributed to each speaker,
+picks a representative dubbed clip, and cuts a pre-cast preview from the source
+audio. Caches all three in the job folder. No model runs here.
 """
 from __future__ import annotations
 
@@ -33,8 +19,7 @@ log = logging.getLogger(__name__)
 CROP_SUBDIR = "faces/crops"
 
 #: Padding around the face box, as a fraction of its size. A tight crop of a
-#: detector box reads as a mugshot and makes two speakers hard to tell apart;
-#: some surrounding context is what makes the thumbnail recognisable.
+#: detector box makes two speakers hard to tell apart.
 CROP_MARGIN = 0.35
 
 #: A dub sample shorter than this is a breath or a filler word and tells the
@@ -52,8 +37,7 @@ def _read(p: Path) -> Any:
 def dub_sample_paths(merged: Dict[str, Any]) -> Dict[str, str]:
     """`{speaker: path}` — one representative dubbed clip each.
 
-    The LONGEST clip, not the first: an opening cue is often a one-word
-    answer, and the point of the sample is to judge a voice.
+    The LONGEST clip, not the first: an opening cue is often a one-word answer.
     """
     best: Dict[str, tuple] = {}
     for seg in merged.get("segments") or []:
@@ -75,11 +59,9 @@ def face_crop_paths(job_root: Path, *, video: Optional[Path] = None,
                     regenerate: bool = False) -> Dict[str, Path]:
     """`{speaker: crop.jpg}`, writing any that are missing.
 
-    Returns only what exists on disk afterwards, so a speaker with no face
-    evidence is simply absent rather than pointing at a file that is not
-    there. That distinction matters: stage 6 deliberately omits a speaker
-    whose on-screen total is too short to trust, and inventing a crop for
-    them would assert evidence the pipeline refused to assert.
+    Returns only what exists on disk afterwards. Stage 6 omits a speaker whose
+    on-screen total is too short to trust, so inventing a crop would assert
+    evidence the pipeline refused to.
     """
     out_dir = job_root / CROP_SUBDIR
     existing = {}
@@ -119,8 +101,8 @@ def face_crop_paths(job_root: Path, *, video: Optional[Path] = None,
         bboxes = np.asarray(bboxes)
         if frames.size == 0:
             continue
-        # The MIDDLE of the track, not its first frame: a track usually
-        # begins mid-pan or mid-cut, where the face is most likely blurred.
+        # The middle of the track: it usually starts mid-pan or mid-cut,
+        # where the face is most likely blurred.
         k = len(frames) // 2
         cap.set(cv2.CAP_PROP_POS_FRAMES, int(frames[k]))
         ok, frame = cap.read()
@@ -142,9 +124,9 @@ def face_crop_paths(job_root: Path, *, video: Optional[Path] = None,
     return existing
 
 
-#: Where the pre-cast preview clips land. NOT `voices/<stem>.refs/`: that glob
-#: is how `ui.speakers._reference_clips` (and the voices stage) recognise the
-#: references the pipeline itself wrote, and a preview must never pass for one.
+#: Where pre-cast preview clips land. NOT `voices/<stem>.refs/` — that glob is
+#: how the voices stage recognises its own references, and a preview must never
+#: pass for one.
 PREVIEW_SUBDIR = "voices/previews"
 
 #: Longest preview. Long enough to judge a voice, short enough to stay a clip.
@@ -157,8 +139,8 @@ _RTTM_LINE = re.compile(r"^SPEAKER\s+\S+\s+\S+\s+([\d.]+)\s+([\d.]+)\s+"
 def _turns(job_root: Path) -> List[tuple]:
     """`(start, end, speaker)` from the first RTTM in `diarization/`.
 
-    Same pick as `ui.speakers._from_rttm`, so the preview and the speech
-    totals on the row describe the same turns.
+    Same pick as `ui.speakers._from_rttm`, so the preview and the row's speech
+    totals describe the same turns.
     """
     d = job_root / "diarization"
     for p in sorted(d.glob("*.rttm")) if d.is_dir() else []:
@@ -213,12 +195,11 @@ def speaker_preview_paths(job_root: Path, *,
                           regenerate: bool = False) -> Dict[str, Path]:
     """`{speaker: clip.wav}` — the speaker's own voice, cut from the source.
 
-    This exists because the voices stage only writes its reference clips
-    AFTER the cast is chosen, and the operator needs to hear a speaker to
-    choose their gender. Picks the longest stretch of that speaker talking
-    alone, capped at `PREVIEW_MAX_S`. No model runs. Returns only what
-    exists afterwards; a speaker with no solo stretch of `MIN_SAMPLE_S` is
-    absent rather than given a link to nothing.
+    The voices stage only writes reference clips after the cast is chosen, but
+    the operator needs to hear a speaker to pick their gender. Takes the
+    longest stretch of that speaker talking alone, capped at `PREVIEW_MAX_S`.
+    A speaker with no solo stretch of `MIN_SAMPLE_S` is absent rather than
+    linked to nothing.
     """
     out_dir = job_root / PREVIEW_SUBDIR
     existing = {p.stem: p for p in sorted(out_dir.glob("*.wav"))} \

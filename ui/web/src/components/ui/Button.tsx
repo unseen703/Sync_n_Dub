@@ -11,17 +11,6 @@ export interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
   busy?: boolean;
 }
 
-/*
-  Contrast notes, measured rather than eyeballed:
-
-    primary   white on #4F46E5 .......... 6.29:1   (AA for all text sizes)
-    danger    #FCA5A5 on canvas ......... 10.25:1
-    outline   #C7D1DF on surface ........ 11.62:1, boundary #5C6A84 at 3.2:1
-    ghost     #9FACBF on canvas ......... 8.45:1
-
-  The old primary used #6366F1, where white measures 4.47:1 — under AA. One
-  step down the indigo ramp fixes it and looks the same at a glance.
-*/
 const VARIANTS: Record<Variant, string> = {
   primary:
     'bg-brand-fill text-white shadow-lg shadow-brand/25 '
@@ -63,12 +52,6 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
   );
 });
 
-/**
- * The amber chip on any control whose endpoint is still `src/api/mock.ts`.
- * Without it an Apply button reports success while nothing re-rendered,
- * which is the exact failure mode CLAUDE.md §3 is about. `VITE_MOCK`
- * defaults to `off`, so in a normal build none of these render.
- */
 export function DemoChip({ title }: { title?: string }) {
   return (
     <span

@@ -792,7 +792,7 @@ holds the incident history.
 
   Face restoration was removed on 2026-10-17 (CodeFormer,
   `--restore codeformer`) and **is back, now as GFPGAN** in
-  `models/restore/`, with `scripts/face_enhance.py` and the UI's enhance
+  `models/restore/`, with `backend/face_enhance.py` and the UI's enhance
   routes (`ui/enhance.py`, `ui/routes_enhance.py`). For reference, the old
   CodeFormer pass measured 386 s on 30 s / 747 frames of 720p (~13×
   realtime, ~770 MiB VRAM), roughly doubling a Wav2Lip run, and raised

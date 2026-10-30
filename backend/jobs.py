@@ -10,13 +10,9 @@ Every end-to-end run owns a self-contained tree under `data/jobs/<job_id>/`:
 Nothing a run produces escapes its job folder, so a job can be inspected,
 moved, tarred or deleted on its own without disturbing any other run.
 
-History, because it explains the version number: layout v1 was a manifest that
-only *referenced* artifacts living in shared `data/<stage>/` folders. Those
-folders were archived on 2026-10-11 and the v1 half of this module -- filename
-parsing (`parse_mt_filename`), id synthesis (`job_id_for`), artifact collection
-and `backfill` -- was removed on 2026-10-17, having had no caller outside its
-own `main()` since the archive. `JOB_LAYOUT_VERSION` stays at 2 so a v1
-manifest found in an old tarball is still identifiable.
+`JOB_LAYOUT_VERSION` stays at 2 so a v1 manifest — one that only referenced
+artifacts in the shared `data/<stage>/` folders, since archived — is still
+identifiable in an old tarball.
 
 Reading a run:
 
@@ -112,9 +108,8 @@ def main() -> None:
 
 JOB_LAYOUT_VERSION = 2
 
-#: Per-stage subdirectories created inside every job folder. These mirror the
-#: old `data/<stage>/` names so stage code needs no path rewriting — only the
-#: root it is handed changes.
+#: Per-stage subdirectories created inside every job folder, named after the
+#: old shared `data/<stage>/` folders so stage code needs no path rewriting.
 STAGE_DIRS: tuple[str, ...] = (
     "videos", "audio", "stems", "diarization", "faces", "asd",
     "asr", "align", "mt", "eval", "voices", "tts", "mix",
@@ -131,10 +126,9 @@ _YT_ID = re.compile(
 def slug_for_input(input_: str, *, max_len: int = 48) -> str:
     """A short, filesystem-safe token identifying the run's input.
 
-    A YouTube URL yields its 11-character video id, any other URL a short
-    hash of the URL, and a local path its filename stem. The result only
-    labels the job folder — the authoritative input string is recorded in
-    the manifest.
+    A YouTube URL yields its 11-character video id, any other URL a short hash,
+    a local path its filename stem. This only labels the folder; the manifest
+    holds the authoritative input string.
     """
     text = str(input_).strip()
     m = _YT_ID.search(text)
@@ -173,9 +167,9 @@ def new_job_id(input_: str, config: dict[str, Any], *,
                now: Optional[_dt.datetime] = None) -> str:
     """`<timestamp>__<input-slug>__<config-slug>`.
 
-    The timestamp leads so that a plain `ls` sorts jobs chronologically, and
-    makes the id unique: re-running the same video with the same settings
-    produces a new job rather than overwriting the previous one.
+    The timestamp leads so `ls` sorts chronologically and so re-running the
+    same video with the same settings makes a new job instead of overwriting
+    the old one.
     """
     ts = (now or _dt.datetime.now()).strftime("%Y%m%d-%H%M%S")
     return f"{ts}__{slug_for_input(input_)}__{config_slug(config)}"
@@ -184,9 +178,9 @@ def new_job_id(input_: str, config: dict[str, Any], *,
 class Job:
     """One end-to-end run, rooted at `data/jobs/<job_id>/`.
 
-    Created by `allocate()` before stage 1 runs, so the manifest exists (with
-    `status: "running"`) even if the run later crashes. `finalize()` stamps
-    the terminal status and the inventory of what landed on disk.
+    `allocate()` creates it before stage 1, so a manifest with
+    `status: "running"` exists even if the run crashes. `finalize()` stamps the
+    terminal status and the inventory of what landed on disk.
     """
 
     def __init__(self, root: Path, job_id: str, *, data_dir: Path):
@@ -246,9 +240,8 @@ class Job:
     def inventory(self) -> dict[str, dict[str, Any]]:
         """What actually landed in each stage folder.
 
-        Built by walking the job tree rather than by guessing filenames —
-        possible only because the run is self-contained, and it cannot go
-        stale the way the v1 glob patterns did.
+        Built by walking the job tree rather than matching filename patterns,
+        so it cannot go stale.
         """
         out: dict[str, dict[str, Any]] = {}
         for name in STAGE_DIRS:
@@ -295,13 +288,12 @@ _RESULT_FIELDS = (
     "duration_model_voice", "duration_estimated_violations", "voice_engine",
     "tts_model", "tts_budget_violations", "tts_errors",
     "lipsync_model", "lipsync_error",
-    # Stage 9b1's answer and the tier that produced it. `PipelineResult` has
-    # carried these as named fields since 2026-10-17, but this allow-list is
-    # what the manifest actually serialises -- so a finished run recorded no
-    # register at all while the log showed 9b1 choosing one and the style
-    # reaching the engine. The field exists to make a surprising dub
-    # traceable to the signal behind it, which needs it on disk.
+    # Stage 9b1's answer and the tier that produced it. This allow-list is what
+    # the manifest serialises, so a field missing here is absent from disk even
+    # though `PipelineResult` carries it.
     "content_register", "content_register_tier",
+    # The MT gate flag — ui/progress.py reads it back to show the cast banner.
+    "awaiting_cast",
 )
 
 #: Result fields that are paths; recorded relative to the job root.
@@ -326,10 +318,9 @@ def _result_summary(result: Any, job: "Job") -> dict[str, Any]:
     return out
 
 
-#: The job allocated by the run in progress. The pipeline handles exactly one
-#: input at a time (the CLI enforces it), so "the current job" is unambiguous
-#: and lets the crash handler close out a manifest it never received a handle
-#: to.
+#: The job allocated by the run in progress. The pipeline handles one input at
+#: a time, so this is unambiguous and lets the crash handler close out a
+#: manifest it was never handed.
 _CURRENT: Optional["Job"] = None
 
 

@@ -1,3 +1,4 @@
+import { useCallback } from 'react';
 import { useStore } from '../../store/useStore';
 import { DualVideoPlayer } from './DualVideoPlayer';
 import { TrackToggle } from './TrackToggle';
@@ -6,17 +7,26 @@ import { Skeleton } from '../ui/Card';
 import { IconDownload } from '../ui/Icons';
 import { lipsyncToggleState } from '../../lib/centre';
 import { fmtBytes } from '../../lib/format';
+import type { VideoTrack } from '../../api/types';
 
-/**
- * The centre column's media block: toggle, player, then the two audio
- * tracks directly beneath it.
- *
- * Mounted from `video_ready`, which lands several stages before diarization
- * — the cut clip exists long before we know who is speaking, so holding the
- * player back until diarization would be withholding something we already
- * have.
- */
+/** Media stage. It reads available job media and renders the selected video track with its audio controls. */
 export function VideoStage() {
+  const setVideoPlayerHeight = useStore((s) => s.setVideoPlayerHeight);
+  const playerRef = useCallback(
+    (el: HTMLDivElement | null) => {
+      if (!el || typeof ResizeObserver === 'undefined') {
+        setVideoPlayerHeight(null);
+        return;
+      }
+      const ro = new ResizeObserver(([entry]) => {
+        setVideoPlayerHeight(entry.contentRect.height);
+      });
+      ro.observe(el);
+      setVideoPlayerHeight(el.getBoundingClientRect().height);
+      (el as HTMLDivElement & { __ro?: ResizeObserver }).__ro = ro;
+    },
+    [setVideoPlayerHeight],
+  );
   const media = useStore((s) => s.media);
   const progress = useStore((s) => s.progress);
   const track = useStore((s) => s.videoTrack);
@@ -26,34 +36,37 @@ export function VideoStage() {
 
   const lip = lipsyncToggleState(progress, media);
 
-  // Which track actually plays, in two steps.
-  //
-  //  1. `track === null` means nobody has chosen, so follow the DEFAULT:
-  //     lip-synced wherever one has been rendered, original until then.
-  //  2. Whatever came out of step 1, a lip-synced track that is not ready
-  //     falls back to the original — a re-render can take it away again
-  //     mid-session, and a dead player is worse than the source video.
-  //
-  // Step 2 is a derivation, deliberately NOT a `setTrack('original')` in an
-  // effect the way it used to be. Writing the fallback back into the store
-  // destroyed the user's choice: once a re-render had bounced them to the
-  // original, the finished render could not return them to the lip-synced
-  // track, because the store now said they had picked the original.
-  const wanted = track ?? (lip.ready ? 'lipsync' : 'original');
-  const active = wanted === 'lipsync' && !lip.ready ? 'original' : wanted;
+  const enhancedReady = Boolean(media?.video.enhanced);
+
+  const best: VideoTrack = enhancedReady ? 'enhanced' : lip.ready ? 'lipsync' : 'original';
+  const wanted = track ?? best;
+  const available: Record<VideoTrack, boolean> = {
+    enhanced: enhancedReady,
+    lipsync: lip.ready,
+    original: true,
+  };
+  const active: VideoTrack = available[wanted] ? wanted : best;
 
   if (!media) return <Skeleton className="aspect-video w-full" />;
 
-  const current = active === 'lipsync' ? media.video.lipsync : media.video.original;
+  const current = media.video[active];
+
+  const warning =
+    active === 'enhanced'
+      ? media.video.enhanced_warning
+      : active === 'lipsync'
+        ? media.video.lipsync_warning
+        : null;
 
   return (
     <section className="space-y-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        {lip.configured ? (
+        {lip.configured || enhancedReady ? (
           <TrackToggle
             value={active}
             onChange={setTrack}
             lipsyncReady={lip.ready}
+            enhancedReady={enhancedReady}
             pct={lip.pct}
             running={lip.running || progress?.state === 'running'}
           />
@@ -91,22 +104,27 @@ export function VideoStage() {
         </div>
       </div>
 
-      {media.video.lipsync_warning && active === 'lipsync' ? (
+      {warning ? (
         <div className="mx-auto max-w-4xl rounded-lg border border-amber-400/40 bg-amber-50 px-3 py-2
                         text-[13px] text-amber-800 dark:border-amber-500/30 dark:bg-amber-950/40 dark:text-amber-300">
-          {media.video.lipsync_warning}
+          {warning}
         </div>
       ) : null}
 
-      <DualVideoPlayer
-        original={media.video.original}
-        lipsync={media.video.lipsync}
-        active={active}
-        poster={media.poster_url}
-        onTime={setVideoTime}
-        seekTo={videoSeek}
-        className="mx-auto max-h-[56vh] max-w-4xl"
-      />
+      <div ref={playerRef} className="mx-auto max-w-4xl">
+        <DualVideoPlayer
+          tracks={{
+            enhanced: media.video.enhanced,
+            lipsync: media.video.lipsync,
+            original: media.video.original,
+          }}
+          active={active}
+          poster={media.poster_url}
+          onTime={setVideoTime}
+          seekTo={videoSeek}
+          className="max-h-[56vh] w-full"
+        />
+      </div>
 
       <div className="mx-auto max-w-4xl">
         <AudioBar

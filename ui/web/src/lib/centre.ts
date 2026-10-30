@@ -1,18 +1,4 @@
-/**
- * What the centre column is showing right now.
- *
- * One function, so the reveal order is stated once instead of being spread
- * across six `progress.milestones.x && media.y` conditions that drift.
- *
- * Two rules worth keeping explicit:
- *
- *  - `failed` is checked FIRST and unconditionally, but the player stays
- *    mounted below the banner. A job that dies at lip-sync still has a
- *    perfectly good original video and the user should see both.
- *  - The player appears at `video_ready`, which lands several stages before
- *    diarization — the cut clip exists long before we know who is speaking.
- *    The speaker table is the thing gated on `diarization_done`.
- */
+/** Derives the main job-panel state. Inputs are progress and media payloads; outputs are display-ready status values. */
 import type { Media, Progress } from '../api/types';
 
 export type CentreState =
@@ -37,17 +23,6 @@ export function deriveCentreState(
   return 'source-only';
 }
 
-/**
- * Whether the Original ⇄ Lip-synced toggle exists at all, and if so whether
- * its second segment is live.
- *
- * `configured: false` means the job has no lip-sync stage — the toggle is
- * ABSENT, not disabled. A permanently dead control is noise.
- *
- * When it is configured but not finished, the segment renders disabled with
- * its own progress. It never falls back to playing the original under a
- * "Lip-synced" label; that would defeat the whole point of an A/B toggle.
- */
 export function lipsyncToggleState(progress: Progress | null, media: Media | null): {
   configured: boolean;
   ready: boolean;
@@ -59,17 +34,16 @@ export function lipsyncToggleState(progress: Progress | null, media: Media | nul
   const configured = lip.length > 0 || Boolean(media?.video.lipsync);
   const ready = Boolean(progress?.milestones?.lipsync_ready && media?.video.lipsync);
   const running = lip.some((s) => s.state === 'running');
-  // Stage 9h shells into the musetalk/latentsync conda envs, so its internal
-  // progress reaches no logger of ours. The only honest number here is the
-  // overall job percentage; the ribbon and the log tail carry the detail.
+
   return { configured, ready, pct: progress?.pct ?? 0, running };
 }
 
-// ---------------------------------------------------------------------------
-// The product-level outcome: is the result usable, and what is the next step.
-// ---------------------------------------------------------------------------
-
-export type OutcomeKind = 'processing' | 'dub-ready' | 'lipsync-ready' | 'failed';
+export type OutcomeKind =
+  | 'processing'
+  | 'dub-ready'
+  | 'lipsync-ready'
+  | 'enhanced-ready'
+  | 'failed';
 export type OutcomeTone = 'ok' | 'progress' | 'bad';
 
 export interface OutcomeAction {
@@ -80,29 +54,17 @@ export interface OutcomeAction {
 
 export interface Outcome {
   kind: OutcomeKind;
-  /** The headline, e.g. "Dubbed video ready". */
+
   status: string;
-  /** A second line, e.g. "Lip-sync hasn't been run yet." Null when the
-      headline says it all. */
+
   sub: string | null;
-  /** Drives the icon AND the colour, so the state never rests on colour alone. */
+
   tone: OutcomeTone;
   action: OutcomeAction | null;
-  /** The dub download, offered as a secondary link when the headline action
-      is sync-lips — the dub is the deliverable even then. */
+
   dubDownloadUrl: string | null;
 }
 
-/**
- * The PRODUCT-level outcome, as opposed to `deriveCentreState`'s pipeline view.
- *
- * The distinction is the whole point: a finished dub with no lip-sync is a
- * usable result, not an incomplete pipeline. This says "Dubbed video ready"
- * where the stage ribbon would say "Lip sync not started".
- *
- * `failed` carries no action — `FailureCard` owns the explanation and the
- * "Start it again" button, and two retry controls on one screen is one too many.
- */
 export function deriveOutcome(progress: Progress | null, media: Media | null): Outcome {
   const centre = deriveCentreState(progress, media);
   const lip = lipsyncToggleState(progress, media);
@@ -121,12 +83,24 @@ export function deriveOutcome(progress: Progress | null, media: Media | null): O
   }
 
   if (centre === 'dub-ready') {
+
+    const enh = media?.video.enhanced ?? null;
+    if (lip.ready && enh && !media?.video.enhanced_warning) {
+      return {
+        kind: 'enhanced-ready',
+        status: 'Enhanced video ready',
+        sub: 'Face restoration has been applied to the lip-synced render.',
+        tone: 'ok',
+        action: { kind: 'download', label: 'Download video', href: enh.download_url },
+        dubDownloadUrl: dubUrl,
+      };
+    }
     if (lip.ready) {
       const url = media?.video.lipsync?.download_url ?? null;
       return {
         kind: 'lipsync-ready',
         status: 'Lip-synced video ready',
-        sub: null,
+        sub: enh ? 'The enhanced version has no audio — its remux failed.' : null,
         tone: 'ok',
         action: url ? { kind: 'download', label: 'Download video', href: url } : null,
         dubDownloadUrl: dubUrl,
@@ -142,7 +116,6 @@ export function deriveOutcome(progress: Progress | null, media: Media | null): O
     };
   }
 
-  // queued / preparing / source-only — the dub is not usable yet.
   return {
     kind: 'processing',
     status: progress?.state === 'queued' ? 'Queued' : 'Processing…',

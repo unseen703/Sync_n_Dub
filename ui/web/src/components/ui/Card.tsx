@@ -5,7 +5,6 @@ export function Card({ className, ...rest }: HTMLAttributes<HTMLDivElement>) {
   return <div className={cn('card', className)} {...rest} />;
 }
 
-/** Small-caps section label. 11px / #7E8CA0 — 5.7:1 on the canvas. */
 export function Eyebrow({ children, className }: { children: ReactNode; className?: string }) {
   return <div className={cn('eyebrow', className)}>{children}</div>;
 }
@@ -14,11 +13,6 @@ export function Skeleton({ className }: { className?: string }) {
   return <div className={cn('sk', className)} aria-hidden="true" />;
 }
 
-/**
- * The one empty state. Every panel that can be empty uses it, so "nothing
- * here" always reads the same way and always says what to do about it — a
- * blank area is indistinguishable from a bug.
- */
 export function EmptyState({
   icon,
   title,

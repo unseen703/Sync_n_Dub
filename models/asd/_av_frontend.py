@@ -1,19 +1,11 @@
-"""Shared face-crop + VRAM-windowing front end for the ASD adapters.
+"""Shared face-crop and VRAM-windowing front end for the ASD adapters.
 
-An ASD adapter needs 112x112 grayscale face crops at the track frame rate,
-decoded once for every track in the video, and a way to cut a long video
-into windows that fit the card. Both live here so an adapter does not
-re-derive them.
+Decodes 112x112 grayscale face crops once per video for every track, and cuts
+a long track into windows that fit the card.
 
-**The MFCC half was removed on 2026-10-28**, with the three MFCC-based
-adapters (talknet, light_asd, lr_asd). LoCoNet takes VGGish audio, not MFCC,
-so it shares only the crop half. If an MFCC adapter ever comes back, the
-rule that made it work is worth repeating: the audio must stay on the
-**int16 value scale**. Those upstreams read their wav with
-`scipy.io.wavfile.read` (int16 for 16-bit PCM) and pass it straight to
-`python_speech_features.mfcc`; read the same file as floats in [-1, 1] and
-every score collapses toward zero without raising -- measured mean 0.044 vs
-0.411 on the same clip. See docs/ROUGH_EDGES.md.
+Any adapter added here must keep its audio on the INT16 value scale. Reading
+the same wav as floats in [-1, 1] collapses every score toward zero without
+raising — see docs/ROUGH_EDGES.md.
 """
 from __future__ import annotations
 
@@ -30,12 +22,7 @@ def window_bounds(n_frames: int, window_frames: int,
                   *, min_tail: int = 8) -> List[Tuple[int, int]]:
     """Split a track into `[start, stop)` slices of at most `window_frames`.
 
-    `window_frames <= 0` means one pass over the whole track. A tail shorter
-    than `min_tail` is merged backwards.
-
-    Windowing is a VRAM bound, not a tuning knob: the visual frontend holds
-    ~0.77 MiB per frame, so a 10575-frame track asks for 7.91 GiB in one
-    `batch_norm` and OOMs.
+    `window_frames <= 0` means one pass over the whole track, prevents OOMs of VRAM.
     """
     if window_frames <= 0 or n_frames <= window_frames:
         return [(0, n_frames)]
@@ -55,12 +42,10 @@ def crop_all_tracks(
 ) -> Dict[str, np.ndarray]:
     """Sweep the video once and crop every frame each track needs.
 
-    Returns {track_id: (N, size, size) uint8 grayscale}, in the same frame
-    order as the track's `.frames`. A frame the decoder skipped is dropped;
-    the caller trims scores to `min(len(crops), track.num_frames)`.
-
-    One sweep for all tracks, not one per track -- the per-track shape is
-    O(N * video_len) decode and ran for hours on 262-track footage.
+    Returns `{track_id: (N, size, size) uint8 grayscale}` in the track's own
+    frame order; a frame the decoder skipped is dropped, so the caller trims
+    scores to `min(len(crops), track.num_frames)`. One sweep for all tracks —
+    per-track decoding is O(N * video_len) and runs for hours on busy footage.
     """
     buckets: Dict[int, list] = defaultdict(list)
     out: Dict[str, List[Optional[np.ndarray]]] = {}
@@ -101,7 +86,7 @@ def crop_all_tracks(
 def crop_one(frame: np.ndarray, bb, size: int, cv2) -> np.ndarray:
     """One grayscale face patch, expanded 1.4x around the box.
 
-    Both upstream encoders are trained on loose crops, so a tight box is a
+    The upstream encoders are trained on loose crops, so a tight box is a
     different input distribution.
     """
     x1, y1, x2, y2 = bb

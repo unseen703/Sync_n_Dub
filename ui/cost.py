@@ -1,38 +1,10 @@
-"""What a staged edit will cost to re-render, in terms a user can consent to.
+"""Turn an edit's dirty stages into a cost preview the user can consent to.
 
-`backend.edits` answers "which stages are dirty" in pipeline vocabulary —
-`["voices", "tts", "mix", "lipsync"]`. That is the right answer and the wrong
-words: nobody approves "voices", and nobody can tell from that list whether
-the hour of diarization, ASR and translation that produced the transcript is
-about to be thrown away. It is not — `run_pipeline(post_mt_only_from=…)`
-replays stages 9b..9h and nothing above them — but the list does not say so.
-
-So this module turns `EditResult.dirty_stages` into three things:
-
-  `stages`             what re-runs, labelled in the UI's own words, with a
-                       `gpu` flag on the lines that are minutes rather than
-                       seconds and an `est_s` where a rate has been measured;
-  `unaffected_labels`  what does NOT re-run — the part the user is actually
-                       afraid of losing, and the reason the dialog is safe to
-                       confirm;
-  `total_est_s`        the sum of the estimates that exist.
-
-The labels come from `ui.progress.STAGE_LABELS` wherever the keys line up.
-They do not line up directly — `backend.edits.STAGE_ORDER` names the stages
-`codemix, duration, voices, tts, timing, mix, lipsync` while the progress
-table keys them by the pipeline's own marker ids (`9b`, `9c`, `9d`, …) — so
-`_PROGRESS_KEY` maps one onto the other and the label is read from the single
-table rather than written out a second time here. One table, two spellings.
-
-Where the numbers come from
----------------------------
-`.claude/skills/clip-run`, measured on this host's 2x16 GiB Blackwell cards,
-as multiples of clip length: wav2lip 3–5x, musetalk 8–21x. latentsync15 has
-no measured band on this host and says so rather than guessing. TTS is
-roughly 0.6 s per segment.
-The midpoint of each range is used, and an estimate is omitted (`None`)
-rather than invented for a stage with no measured rate — a made-up number in
-a consent dialog is worse than a blank, because the user will plan around it.
+Produces `stages` (what re-runs, labelled, GPU-flagged, with an estimate where
+a rate is known), `unaffected_labels` (what does not) and `total_est_s`.
+Labels come from `ui.progress.STAGE_LABELS` via `_PROGRESS_KEY`, which joins
+the two stage vocabularies. A stage with no measured rate gets `None`, not a
+guess.
 """
 from __future__ import annotations
 
@@ -53,31 +25,33 @@ _PROGRESS_KEY: Dict[str, str] = {
     "lipsync":  "9h",
 }
 
-#: Stages that hold a GPU for minutes. Lip-sync is the only one left: every
-#: other post-MT stage is either a network call or ffmpeg.
+#: Stages that hold a GPU for minutes. Only lip-sync: every other post-MT
+#: stage is a network call or ffmpeg.
 _GPU_STAGES = frozenset({"lipsync"})
 
 #: Upstream of the merged JSON. `run_post_mt_stages` never touches these, so
-#: they are listed verbatim as the things the edit cannot put at risk.
+#: they are what the edit cannot put at risk.
 _UPSTREAM_KEYS: Sequence[str] = ("1", "2", "3", "4", "5", "6", "7", "8", "9")
 
-#: Lip-sync wall time as a multiple of clip length, measured 2026-10-12.
-#: Midpoints of the bands in `ui/lipsync_models.py`.
-#:
-#: Derived, not written out again. `wav2lip_hd` was once missing here — the
-#: line below this table was an orphan comment with no entry after it, which
-#: is what a dropped row looks like. Deriving from FACTS is what stops that
-#: recurring; a model with no band is absent on purpose and reads as
+#: Lip-sync wall time as a multiple of clip length: midpoints of the bands in
+#: `ui/lipsync_models.py`. Derived rather than written out again, so a row
+#: cannot go missing; a model with no band is absent here and reads as
 #: "not measured".
 LIPSYNC_RATES: Dict[str, float] = {
     k: (v["rate"][0] + v["rate"][1]) / 2.0
     for k, v in _ls_models.FACTS.items() if v.get("rate")
 }
 
-#: Seconds of TTS per segment, measured over the Edge and Bodhan paths.
+#: Speech generation wall time as a multiple of clip length. Bodhan is
+#: hosted, so one request per cue plus upload/download dominates; measured
+#: at ~3× the clip's duration end-to-end.
+TTS_RATE = 3.0
+
+#: Seconds of TTS per segment, kept as a floor for very short clips where
+#: 3× clip time underestimates per-cue request overhead.
 TTS_S_PER_SEGMENT = 0.6
 
-#: The mix is one ffmpeg pass: fast, but not free on a long video.
+#: The mix is one ffmpeg pass — fast, but not free on a long video.
 MIX_RATE = 0.05
 MIX_FLOOR_S = 5.0
 
@@ -94,8 +68,8 @@ def label_for(stage: str) -> str:
 
 
 def _lipsync_rate(model: Optional[str]) -> Optional[float]:
-    # Through `normalise`, so a recorded variant (`musetalk-v15`,
-    # `wav2lip-hd`) resolves instead of falling through to "no measured rate".
+    # Through `normalise`, so a recorded variant resolves instead of falling
+    # through to "no measured rate".
     key = _ls_models.normalise(model)
     return LIPSYNC_RATES.get(key) if key else None
 
@@ -105,9 +79,12 @@ def _estimate(stage: str, *, clip_s: Optional[float],
               config: Dict[str, Any]) -> Optional[float]:
     """Seconds, or None when this host has no measured rate for the stage."""
     if stage == "tts":
-        if not n_segments:
-            return None
-        return round(n_segments * TTS_S_PER_SEGMENT, 1)
+        if clip_s is None:
+            if not n_segments:
+                return None
+            return round(n_segments * TTS_S_PER_SEGMENT, 1)
+        floor = (n_segments or 0) * TTS_S_PER_SEGMENT
+        return round(max(clip_s * TTS_RATE, floor), 1)
     if stage == "voices":
         return VOICES_FLAT_S
     if stage == "mix":
@@ -120,8 +97,8 @@ def _estimate(stage: str, *, clip_s: Optional[float],
             return None
         total = clip_s * rate
         return round(total, 1)
-    # codemix (one network call per cue), duration, timing: no rate has been
-    # measured on this host. Say so by omission.
+    # codemix, duration and timing have no measured rate on this host. Say so
+    # by omission.
     return None
 
 
@@ -133,21 +110,17 @@ def estimate(dirty_stages: Sequence[str], *,
              warnings: Iterable[str] = ()) -> Dict[str, Any]:
     """Cost preview for a set of dirty stages.
 
-    `available` is `backend.edit_agent.available_stages(...)` — the post-MT
-    stages this job can actually replay. Anything in it that is not dirty is
-    named as unaffected too, so "voice conversion is NOT re-run" is visible
-    on a job that has voice conversion.
+    `available` is the post-MT stages this job can replay
+    (`backend.edit_agent.available_stages`). Anything in it that is not dirty
+    is listed as unaffected too, so the user sees it named rather than absent.
     """
     config = dict(config or {})
     dirty = [s for s in dirty_stages]
     warns: List[str] = list(warnings)
 
     rows: List[Dict[str, Any]] = []
-    missing: List[str] = []
     for s in dirty:
         est = _estimate(s, clip_s=clip_s, n_segments=n_segments, config=config)
-        if est is None:
-            missing.append(label_for(s))
         rows.append({
             "id": s,
             "label": label_for(s),
@@ -164,9 +137,6 @@ def estimate(dirty_stages: Sequence[str], *,
 
     known = [r["est_s"] for r in rows if r["est_s"] is not None]
     total = round(sum(known), 1) if known else None
-    if total is not None and missing:
-        warns.append("estimate excludes " + ", ".join(missing)
-                     + " (no measured rate on this host)")
 
     unaffected = [_PROGRESS_LABELS[k] for k in _UPSTREAM_KEYS
                   if k in _PROGRESS_LABELS]

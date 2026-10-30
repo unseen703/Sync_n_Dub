@@ -1,8 +1,7 @@
 """Backend-facing ASR entry point.
 
-Mirrors `backend.diarize` — one call site for the CLI/pipeline. The adapter
-registry lives under `models.asr`; this file only wires it to our Pathy
-inputs and routes diarized turns into per-segment windows when provided.
+One call site for the CLI and pipeline over the `models.asr` registry,
+turning diarized turns into per-segment windows when they are given.
 """
 from __future__ import annotations
 
@@ -26,8 +25,8 @@ def transcribe(
 ) -> ASRResult:
     """Transcribe `audio` with `model`, optionally sliced to diarized turns.
 
-    When `turns` is given, each turn becomes one `ASRSegment` with id
-    `SEG_NNNN`; this is the shape the manifest's `segments[]` key expects.
+    With `turns`, each turn becomes one `ASRSegment` id'd `SEG_NNNN`, which is
+    the shape the manifest's `segments[]` expects.
     """
     audio = Path(audio)
     if not audio.exists():

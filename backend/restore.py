@@ -1,31 +1,8 @@
 """Stage 9i — face restoration over a finished lip-sync render.
 
-Runs AFTER 9h and is never part of a submission, because there is nothing to
-restore until a render exists. On the CLI that is `--restore gfpgan`; in the
-UI it is `POST /api/jobs/{id}/enhance`, the same shape as `POST .../lipsync`
-on a draft run.
-
-Why it is its own stage rather than a lip-sync model's second half:
-
-  * It is orthogonal. It takes a video and returns a video and does not care
-    which adapter drew the mouths, so `--lipsync X --restore gfpgan` is 5 + 2
-    rather than the 5 x 2 that `wav2lip_hd` implied.
-  * It is expensive in its own right. Measured 2026-10-22 on job
-    20261022-070010: 1156 s against the MuseTalk render's 447 s -- 2.6x the
-    cost of what it cleans. Bundling it meant every restoration tweak paid
-    for a re-render it had no reason to.
-  * It is iterative by nature. Strength, gating and the output size are
-    things an operator looks at and adjusts; that only works against a fixed
-    render.
-
-**The audio is carried across here, not by the restorer.** The enhancer
-writes video only (`-an` on its encoder), and the 2026-10-22 failure was a
-remux fired against a still-being-written file: `-c:v copy` took a stream
-with no finalised moov atom, returned 0, and the `&&` deleted the good
-intermediate. So the remux is sequenced after a verified render, uses
-`-c:a copy` (the render's audio is already AAC 48k -- re-encoding it plus
-`-shortest` is what cost two frames), and the result is decode-checked
-before anything is removed.
+Runs after 9h, never as part of a submission: `--restore gfpgan` on the CLI,
+`POST /api/jobs/{id}/enhance` in the UI. The restorer writes video only, so
+the render's audio is remuxed here after the output is decode-checked.
 """
 from __future__ import annotations
 
@@ -43,11 +20,9 @@ STAGE_MARKER = "=== stage 9i: face restoration (%s) ==="
 def list_renders(job_root: Path) -> list:
     """Every lip-sync render in this job, newest first.
 
-    Restoration is orthogonal to lip-sync -- it takes a video and returns a
-    video -- so the operator picks which render to clean rather than
-    inheriting a guess. A job can genuinely hold several: `lipsync/` from
-    the pipeline, `lipsync_asd/` from the ASD-gated script, and in an A/B
-    both at once (job 20261022-070010 has exactly that).
+    A job can hold several — `lipsync/` from the pipeline, `lipsync_asd/` from
+    the gated script, or both during an A/B — so the operator picks which one
+    to clean rather than inheriting a guess.
     """
     out = []
     for sub in ("lipsync_asd", "lipsync"):
@@ -64,10 +39,9 @@ def list_renders(job_root: Path) -> list:
 def find_render(job_root: Path) -> Optional[Path]:
     """The lip-sync render this job produced, newest first.
 
-    `lipsync_asd/` is preferred over `lipsync/` when both exist: the gated
-    render is the better one to restore, and `scripts/lipsync_asd_gated.py`
-    writes there specifically so it cannot overwrite the ungated render it
-    is being compared against.
+    `lipsync_asd/` wins over `lipsync/` when both exist: the gated render is
+    the better one to restore, and the gated script writes there so it cannot
+    overwrite the ungated render it is compared against.
     """
     for sub in ("lipsync_asd", "lipsync"):
         d = job_root / sub
@@ -81,11 +55,10 @@ def find_render(job_root: Path) -> Optional[Path]:
 
 
 def find_source(job_root: Path) -> Optional[Path]:
-    """The video the lip-sync model was GIVEN, for the frame diff.
+    """The video the lip-sync model was given, for the frame diff.
 
-    `mix/<stem>.dubbed.mp4` is what `run_lipsync` passes as
-    `pre_muxed_video`. Without it the mask cannot be built and every frame
-    is restored -- slower, still correct.
+    This is what `run_lipsync` passes as `pre_muxed_video`. Without it no mask
+    can be built and every frame is restored — slower, still correct.
     """
     d = job_root / "mix"
     if not d.is_dir():
@@ -133,8 +106,8 @@ def _carry_audio(silent: Path, from_video: Path, out: Path) -> Optional[str]:
         [ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
          "-i", str(silent), "-i", str(from_video),
          "-map", "0:v:0", "-map", "1:a:0?",
-         # `-c:a copy`, not aac: the render's audio is already AAC 48k, and
-         # re-encoding plus `-shortest` trimmed two frames on 2026-10-22.
+         # `-c:a copy`, not aac: the audio is already AAC 48k, and re-encoding
+         # it plus `-shortest` trims frames.
          "-c:v", "copy", "-c:a", "copy", str(out)],
         capture_output=True, text=True)
     if p.returncode != 0 or not out.is_file():
@@ -158,15 +131,13 @@ def run_restore(
 ) -> Dict[str, Any]:
     """Restore a job's render. Returns a JSON-able summary, never raises.
 
-    `scale` is "same" (default) or "2x". Anything larger than the input also
-    turns on `--bg-upsample`, because at `upscale > 1` GFPGAN gives the face
-    real detail while the background is only LANCZOS-interpolated to meet it
-    -- invisible at a same-size target, obvious on a 512p source doubled.
+    `scale` is "same" (default) or "2x"; anything above 1x also turns on
+    `--bg-upsample`, since GFPGAN gives the face real detail while the
+    background is only LANCZOS-interpolated to meet it.
 
-    `workers_per_gpu` splits each card further. None is the script's default
-    of one worker per card, which is what every run did before this existed;
-    the measured idle (33.9% mean utilisation, 1691 MiB of 16311) is the
-    argument for raising it, and CPU contention is the thing that caps it.
+    `workers_per_gpu` splits each card further; None means one worker per card.
+    A single worker leaves the GPU largely idle, and CPU contention is what
+    caps how far this can be raised.
     """
     from models.restore import get_restore
     from models.restore.base import RestoreRequest
@@ -210,8 +181,8 @@ def run_restore(
     want = _decoded_frames(render)
     err = _carry_audio(silent, render, final)
     if err:
-        # The silent render is real work; keep it and say so rather than
-        # losing the pass over a mux.
+        # The silent render is real work; keep it rather than lose the pass
+        # over a mux.
         log.warning("restore: %s; keeping the silent render at %s", err, silent)
         final = silent
     else:
@@ -232,10 +203,9 @@ def run_restore(
             "changed_frames": res.extra.get("changed_frames"),
             "gated": bool(res.extra.get("mask")),
             "strength": strength,
-            # What actually ran, not what was asked for: the script collapses
-            # to fewer workers when a shard would fall under
-            # MIN_FRAMES_PER_SHARD, and a wall time is only comparable
-            # against the split that produced it.
+            # What actually ran: the script collapses to fewer workers when a
+            # shard would fall under MIN_FRAMES_PER_SHARD, and a wall time only
+            # compares against the split that produced it.
             "workers": res.extra.get("workers"),
             "workers_per_gpu": workers_per_gpu,
             "scale_to": list(scale_to) if scale_to else None,

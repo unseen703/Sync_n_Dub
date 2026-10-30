@@ -1,42 +1,8 @@
-"""One index that says which files belong to which version of a job.
+"""Index mapping each version of a job to the files that belong to it.
 
-`mt_versions` and `mix_versions` already keep every transcript and every mix
-on disk, each numbered on its own. Neither says which edit produced a file,
-and nothing ties a transcript to the mix rendered from it. This module is that
-map, and only that: it LINKS to the snapshots those two write (relative path
-plus sha256) and copies nothing.
-
-    <job>/versions/index.json
-
-    {"schema": 1, "current": 7, "versions": [
-        {"v": 7, "parent": 6, "kind": "edit", "edit_id": "edit_003",
-         "nlq": "...", "ops": [...], "dirty_stages": ["tts", "mix"],
-         "status": "rendered",
-         "artifacts": {"transcript": {"path": "mt/versions/...", "sha256": "..."},
-                       "mix_wav": {...}, "mix_mp4": {...}, "lipsync_mp4": {...}},
-         "created_at": "..."}]}
-
-`current` is the only thing a reader may use for "latest" -- use `latest()`
-instead of globbing a folder by mtime. Older versions stay on disk and in the
-index; the live paths the UI reads are untouched.
-
-Rules each of which is load-bearing:
-
-1. **A version number is never reused.** `v` is one past the highest in the
-   index, under a lock, so the UI server and the detached runner (two
-   processes) cannot both take the same one.
-2. **Revert is a new version**, not a deletion. `restore()` appends a
-   `kind=revert` row and rewrites the live transcript; the version it undid
-   stays.
-3. **A revert leaves the mix alone.** The audio on disk still carries the
-   undone edit until a re-render, so a revert row records only a transcript.
-   `latest("mix_mp4")` therefore walks `parent` back to the version whose mix
-   is actually on disk.
-4. **Never a dependency.** Every writer here is called from a pipeline path,
-   so each one is wrapped by its caller and logs instead of raising.
-
-Per-cue TTS clips are not versioned: they are a hash cache that is rebuilt
-from the transcript.
+Links to the snapshots `mt_versions` and `mix_versions` write (relative path
+plus sha256) and copies nothing. `<job>/versions/index.json` holds the rows;
+read "latest" through `latest()`, never by globbing a folder by mtime.
 """
 from __future__ import annotations
 
@@ -265,10 +231,8 @@ def find_by_edit_id(job_root: Path, edit_id: str) -> Optional[int]:
 
 
 def begin_render(job_root: Path, *, edit_id: str, kind: str = "edit") -> int:
-    """Mark the version for `edit_id` as rendering, creating it if it has no row.
-
-    A cast has no `commit()` behind it, so it is created here.
-    """
+    """Mark the version for `edit_id` as rendering, creating the row if there
+    is none — a cast has no `commit()` behind it."""
     v = find_by_edit_id(job_root, edit_id)
     if v is None:
         return append(job_root, kind, edit_id=edit_id, status="rendering",
@@ -305,10 +269,9 @@ def _current_transcript(job_root: Path) -> Dict[str, Any]:
 def stash_lipsync(job_root: Path) -> List[Dict[str, str]]:
     """Move the live render into `lipsync/versions/` before a new one writes.
 
-    A rename, not a copy: the adapter overwrites `lipsync/*.mp4` in place, so
-    without this the previous render is gone. No extra disk. The version that
-    owned the file is re-pointed at its new path. Returns the moves, for
-    `unstash_lipsync` if the render then fails.
+    A rename, not a copy — the adapter overwrites `lipsync/*.mp4` in place, so
+    without this the previous render is gone. The version that owned the file
+    is re-pointed at its new path. Returns the moves for `unstash_lipsync`.
     """
     moves: List[Dict[str, str]] = []
     live = _live_lipsync(job_root)
@@ -362,9 +325,9 @@ def unstash_lipsync(job_root: Path, moves: Sequence[Dict[str, str]]) -> None:
 def latest(job_root: Path, key: str) -> Optional[Path]:
     """The file for `key` that belongs to the current version.
 
-    Walks `parent` from `current` to the first version that has `key`, so a
-    revert (which records only a transcript) still resolves the mix that is
-    actually on disk. Keys: transcript, mix_wav, mix_mp4, lipsync_mp4.
+    Walks `parent` from `current` to the first version holding `key`, so a
+    revert still resolves a mix that exists. Keys: transcript, mix_wav,
+    mix_mp4, lipsync_mp4.
     """
     doc = read(job_root)
     by_v = {r["v"]: r for r in doc["versions"]}
@@ -386,11 +349,11 @@ def latest(job_root: Path, key: str) -> Optional[Path]:
 # ---------------------------------------------------------------------------
 
 def restore(job_root: Path, v: int) -> int:
-    """Make version `v`'s transcript the live one, as a NEW version.
+    """Make version `v`'s transcript the live one, as a new version.
 
-    The undone versions stay in the index. The live file is replaced through a
-    temp file that does not end in `.mt.json`, so it can never be globbed as
-    the document (`edit_agent._find_merged_json`).
+    Undone versions stay in the index. The temp file deliberately does not end
+    in `.mt.json`, or `edit_agent._find_merged_json` could glob it as the
+    document.
     """
     root = Path(job_root)
     doc = read(root)
@@ -425,9 +388,9 @@ def record_revert(job_root: Path, merged_json: Path,
                   segments: Optional[Sequence[str]] = None) -> Optional[int]:
     """Log a per-segment `edits.revert()` that already rewrote the live file.
 
-    That revert restores `edit_backup` in place and records nothing. This
-    snapshots the result and appends a `revert` row, so the undo is a version
-    like any other. Returns the new `v`, or None if it could not be recorded.
+    That revert restores `edit_backup` in place and records nothing, so this
+    snapshots the result and appends a `revert` row. Returns the new `v`, or
+    None if it could not be recorded.
     """
     try:
         read(job_root)
@@ -448,12 +411,11 @@ def record_revert(job_root: Path, merged_json: Path,
 # ---------------------------------------------------------------------------
 
 def backfill(job_root: Path) -> int:
-    """Build an index from what an older job already left on disk.
+    """Build an index from what an older job left on disk.
 
-    Order: original, cast, then every `edits/edit_NNN.json`. Read-only against
-    the old files; the only thing it creates is `versions/index.json`.
-    Returns how many versions it recorded. A job with no history gets an empty
-    index so this is not repeated.
+    Order: original, cast, then every `edits/edit_NNN.json`. Read-only apart
+    from `versions/index.json`. A job with no history still gets an empty index
+    so this does not run twice. Returns how many versions it recorded.
     """
     root = Path(job_root)
     with _locked(root):

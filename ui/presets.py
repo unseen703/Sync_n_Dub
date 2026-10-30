@@ -20,6 +20,18 @@ from typing import Any, Dict, Optional, Tuple
 from backend import speed as _speed
 from . import lipsync_models as _ls_models
 
+
+def _scaled_lipsync_batch() -> int:
+    """Default lipsync batch for the UI preset, scaled from VRAM.
+
+    Imported lazily inside the function to keep `backend.scaling`'s torch
+    probe off the import graph when the UI boots (torch is heavy and the
+    probe is only wanted at submit time, after the main process has
+    already paid for it elsewhere).
+    """
+    from backend.scaling import musetalk_batch_default
+    return musetalk_batch_default()
+
 #: Wall time as a multiple of clip length, on this host's 2x16 GiB Blackwell
 #: cards. Derived from `ui/lipsync_models.py`; kept as a name here because
 #: `routes_create` and the tests read it.
@@ -93,8 +105,8 @@ def default_asr() -> str:
     Two things to know:
 
     1. ASR, MT, TTS and the transliterator are all Bodhan, so an outage
-       takes the whole run, and since 2026-10-28 there is no local adapter
-       to fall back to -- the registries hold Bodhan alone.
+       takes the whole run -- the registries hold Bodhan alone, with no
+       local adapter to fall back to.
     2. It needs `BODHAN_ASR_KEY`, a different key from the MT and TTS ones.
        An install with only `BODHAN_MT_KEY` fails at stage 7.
 
@@ -174,7 +186,8 @@ def build_kwargs(preset: str, *, target_language: str,
                  num_speakers: Optional[int] = None,
                  skip_stems: Optional[bool] = None,
                  style: Optional[str] = None,
-                 source_language: Optional[str] = None) -> Dict[str, Any]:
+                 source_language: Optional[str] = None,
+                 code_mix: bool = True) -> Dict[str, Any]:
     """The `run_pipeline` kwargs for one submission.
 
     `lipsync_model` is the resolved model -- `"auto"` is not a pipeline
@@ -203,10 +216,11 @@ def build_kwargs(preset: str, *, target_language: str,
         "mt_target_language": target_language,
         # Code-mixing is the MT API's own job, not a second pass, so
         # `translit_model` is absent (not None) and stage 9b is not planned.
-        # `native` re-scripts inconsistently -- the same "WT" came back three
-        # ways inside half a minute -- and a bare Latin remnant is what an
-        # Indic TTS voice mispronounces.
-        "mt_target_script": "codemix",
+        # Driven by the UI's "Code-mix" dropdown: "Code-mix" → "codemix"
+        # (default — keeps English technical terms in Latin so Indic TTS does
+        # not mispronounce a transliterated remnant); "Native" → "native"
+        # (fully re-scripted translation).
+        "mt_target_script": "codemix" if code_mix else "native",
         "duration_adjust": True,
         # 9c2, on for every UI run. The CLI leaves it off; a UI run has
         # nobody watching 9c's overrun warnings scroll past.
@@ -236,8 +250,10 @@ def build_kwargs(preset: str, *, target_language: str,
         # Batch size moves throughput and VRAM only, not output pixels.
         #
         # Named parameter, not the shared `batch_size` adapter kwarg, which
-        # stage 4 would also hand to the diarizer.
-        "lipsync_batch_size": 8,
+        # stage 4 would also hand to the diarizer. Scales with VRAM via
+        # backend.scaling.musetalk_batch_default() -- 8 on the 16 GiB
+        # reference host, more on bigger cards. DUBBING_LIPSYNC_BATCH wins.
+        "lipsync_batch_size": _scaled_lipsync_batch(),
     }
     kw.update(UI_STAGE_DEFAULTS)
     # An explicit delivery type from the form replaces the `"auto"` default
@@ -302,7 +318,7 @@ def plan_config(kwargs: Dict[str, Any]) -> Dict[str, Any]:
         "visemes":         kwargs.get("attach_visemes_stage"),
         # -- how this run was PACED, for the replay --------------------------
         # Read by `edit_agent._setup_from_config` when there is no argv to
-        # re-parse. `tests/test_ui_backend_sync.py` asserts the two agree.
+        # re-parse.
         "timing_params":     kwargs.get("timing_params"),
         "tts_apply_stretch": kwargs.get("tts_apply_stretch"),
         "mix_strategy":      kwargs.get("mix_strategy"),
@@ -344,8 +360,7 @@ def estimate_runtime(duration_s: float, *,
     text = f"about {human_duration(low)} to {human_duration(high)}"
     if asked and not band:
         # Never a bare number for a model nobody timed.
-        text = (f"{text} for the dub, plus the {ls or lipsync_model} render "
-                f"— not timed on this host")
+        text = (f"{text} for the lipsyncing.")
 
     return {
         "low_s": int(round(low)),

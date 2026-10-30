@@ -7,18 +7,7 @@ import { IconAlert, IconFilm, IconMenu, IconSearch } from '../ui/Icons';
 import { Tooltip } from '../ui/Tooltip';
 import { normalizeState } from '../../lib/format';
 
-/**
- * The job rail — the LEFT column, and the one you navigate from.
- *
- * Most recently RUN first, which is the order `_list_jobs` already returns —
- * it sorts on `last_activity`, the newest of the progress, status and
- * manifest stamps plus the folder mtime. This component must not re-sort:
- * the server has evidence the client does not (a re-run leaves the job id's
- * timestamp untouched), and sorting here on `timestamp` would undo it.
- *
- * Arrow keys move between cards once one has focus, so a long list is
- * walkable without the mouse; `/` from anywhere focuses the search box.
- */
+/** Job navigation list. Input: optional navigation callback. Output: searchable, keyboard-accessible job cards. */
 export function JobRail({ onNavigate }: { onNavigate?: () => void }) {
   const allJobs = useStore((s) => s.jobs);
   const loaded = useStore((s) => s.jobsLoaded);
@@ -30,9 +19,7 @@ export function JobRail({ onNavigate }: { onNavigate?: () => void }) {
   const refreshJobs = useStore((s) => s.refreshJobs);
   const setNewJobOpen = useStore((s) => s.setNewJobOpen);
   const setRailOpen = useStore((s) => s.setRailOpen);
-  // Only the selected job has live progress; every other card shows its
-  // last known state. Polling 54 jobs to animate 53 idle bars is not worth
-  // the requests.
+
   const livePct = useStore((s) => (s.progress?.job_id === s.selected ? s.progress?.pct : null));
 
   const listRef = useRef<HTMLDivElement>(null);
@@ -44,7 +31,6 @@ export function JobRail({ onNavigate }: { onNavigate?: () => void }) {
     return s === 'running' || s === 'queued';
   }).length;
 
-  /** Roving focus with ↑/↓ once a card has it. */
   const onListKeyDown = (e: React.KeyboardEvent) => {
     if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
     const cards = Array.from(
@@ -58,10 +44,7 @@ export function JobRail({ onNavigate }: { onNavigate?: () => void }) {
 
   return (
     <div className="flex h-full w-full flex-col">
-      {/* The collapse control sits ABOVE the list it collapses, not across
-          the header on the far side of the screen. A toggle belongs next to
-          the thing it acts on; in the brand bar it read as a global menu
-          and gave no hint which column it would move. */}
+
       <div className="flex items-center gap-2 px-3 pb-2.5 pt-4">
         <Tooltip label="Hide the job list">
           <button

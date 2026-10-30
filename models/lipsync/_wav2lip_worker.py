@@ -1,18 +1,11 @@
 """Warm-model Wav2Lip driver: load the net once, render many pieces.
 
-Run UNDER the env the `Wav2LipSync` adapter resolves, with `--repo` pointing at
-the vendored clone. The vendored `inference.py` parses its args at IMPORT time
-and only builds the model inside the per-clip render loop (`if i == 0:
-model = load_model(...)`), so a segmented render reloaded it per piece. Wav2Lip's
-net is the cheap one of the three, so the win here is the smallest -- this exists
-mostly so the warm-model path is uniform across adapters.
-
-The driver imports the vendored module's internals rather than editing the clone:
-it sets a minimal valid `sys.argv` so the module's import-time `parse_args()`
-succeeds, loads the net ONCE, then per piece overrides `inference.args.*` and
-runs the same render body the vendor's `main()` runs (reusing its `datagen`,
-`audio`, `mel_step_size` and `device`). Only the per-piece frame list cycles; the
-weights stay resident.
+Runs under the env `Wav2LipSync` resolves, with `--repo` at the vendored clone.
+The vendored `inference.py` parses argv at IMPORT and builds the model inside
+its render loop, so a segmented render reloads it per piece. This imports the
+module's internals instead of editing the clone: a minimal `sys.argv` lets the
+import-time `parse_args()` succeed, the net loads once, then each piece
+overrides `inference.args.*` and runs the same render body.
 
 Manifest: a JSON list of objects
   {"face": ..., "audio": ..., "out": ...,
@@ -35,11 +28,10 @@ import traceback
 def _render_piece(inference, w2l_audio, model, device, scratch, p) -> None:
     """One (face, audio) -> out render reusing the already-loaded `model`.
 
-    A faithful copy of the vendored `inference.main()` body (frame read, mel
-    chunking, datagen, batch inference, mux), with the model hoisted out so it
-    is not reloaded, and the hardcoded `temp/...` paths moved into `scratch` so
-    sequential pieces cannot collide. Reads the same `inference.args` the vendor
-    does -- the caller sets them per piece before calling.
+    A faithful copy of the vendored `inference.main()` body, with the model
+    hoisted out and the hardcoded `temp/...` paths moved into `scratch` so
+    sequential pieces cannot collide. Reads `inference.args`, which the caller
+    sets per piece.
     """
     import cv2
     import numpy as np
@@ -50,7 +42,7 @@ def _render_piece(inference, w2l_audio, model, device, scratch, p) -> None:
     audio_path = p["audio"]
     outfile = p["out"]
 
-    # ---- read frames (vendor main: lines reading full_frames) --------------
+    # ---- read frames ------------------------------------------------------
     if face.split(".")[-1].lower() in ("jpg", "png", "jpeg"):
         full_frames = [cv2.imread(face)]
         fps = args.fps
@@ -103,7 +95,7 @@ def _render_piece(inference, w2l_audio, model, device, scratch, p) -> None:
 
     full_frames = full_frames[:len(mel_chunks)]
 
-    # ---- batch inference (vendor main: the datagen loop) -------------------
+    # ---- batch inference --------------------------------------------------
     batch_size = args.wav2lip_batch_size
     gen = inference.datagen(full_frames.copy(), mel_chunks)
     avi = os.path.join(scratch, "result.avi")
@@ -153,8 +145,8 @@ def main() -> int:
     with open(args.manifest) as fh:
         pieces = json.load(fh)
 
-    # The vendored module parses argv AT IMPORT. Hand it a minimal valid set so
-    # the import succeeds; every real value is set on `inference.args` per piece.
+    # The vendored module parses argv AT IMPORT, so hand it a minimal valid
+    # set; every real value is set on `inference.args` per piece.
     saved_argv = sys.argv
     sys.argv = ["inference.py",
                 "--checkpoint_path", args.checkpoint_path,

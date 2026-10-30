@@ -41,7 +41,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional
 
-from .media_io import _ffmpeg_bin, probe_duration
+from backend.common.media_io import _ffmpeg_bin, probe_duration
 
 log = logging.getLogger(__name__)
 

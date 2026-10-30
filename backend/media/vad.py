@@ -12,8 +12,8 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from .media_io import probe_duration
-from .transcripts import _require
+from backend.common.media_io import probe_duration
+from backend.asr.transcripts import _require
 
 log = logging.getLogger(__name__)
 

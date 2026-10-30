@@ -19,13 +19,13 @@ from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
-from backend.tts.tts import TTSRequest, available_models, get_tts, resolve_style
+from backend.tts import TTSRequest, available_models, get_tts, resolve_style
 
-from .stretch import wsola_stretch_cap
-from .sanitize import sanitize_for_tts
+from backend.media.stretch import wsola_stretch_cap
+from backend.translate.sanitize import sanitize_for_tts
 
 if TYPE_CHECKING:                       # heavy-ish import; only needed for the hint
-    from .duration import DurationModel
+    from backend.media.duration import DurationModel
 
 log = logging.getLogger(__name__)
 
@@ -127,7 +127,7 @@ def synthesize_segments(
     # Resolve up front so the manifest records the backend even when no
     # segment needs a stretch.
     if apply_stretch:
-        from .stretch import resolve_backend
+        from backend.media.stretch import resolve_backend
         resolved_backend = resolve_backend(stretch_backend)
         log.info("tts: stretch backend %r -> %r", stretch_backend, resolved_backend)
     else:
@@ -400,7 +400,7 @@ def synthesize_segments(
     dest = Path(out_json) if out_json else merged_json
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_text(json.dumps(data, indent=2, ensure_ascii=False))
-    from .mt_versions import snapshot as _mt_snapshot
+    from backend.mt_versions import snapshot as _mt_snapshot
     _mt_snapshot(dest, "tts", data=data)
     log.info("tts: wrote %s (errors=%d, cap_violations=%d)",
              dest, errors, violations)
@@ -448,7 +448,7 @@ def _resolve_duration_model(
     Tries each configured voice before the generic "default" slot, so a run
     with a calibrated voice does not fall back to hand-guessed constants.
     """
-    from .duration import DEFAULT_MODEL, load_or_default_model
+    from backend.media.duration import DEFAULT_MODEL, load_or_default_model
     primary = (language or "hi").split("-")[0].lower()
     voices: List[str] = []
     for info in (speaker_voice_map or {}).values():

@@ -46,7 +46,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from . import jobs as _jobs
-from .align import (align_asr, align_tts_segments, apply_alignment_to_asr,
+from backend.media.align.align import (align_asr, align_tts_segments, apply_alignment_to_asr,
                     attach_visemes)
 from .asd import (SCORES_SUFFIX as ASD_SCORES_SUFFIX, assign_faces_to_turns,
                   assignments_to_jsonable, find_scores_npz, save_scores_npz,
@@ -54,20 +54,20 @@ from .asd import (SCORES_SUFFIX as ASD_SCORES_SUFFIX, assign_faces_to_turns,
 from .asr import transcribe as asr_transcribe
 from .translate import codemix_segments
 from .diarize import diarize as diarize_stage
-from .segment import resegment
+from backend.media.segment import resegment
 from .diarize import refine_speakers as _refine_speaker_labels
-from .downloader import resolve_input
-from .duration import plan_segment_durations
+from backend.media.downloader import resolve_input
+from backend.media.duration import plan_segment_durations
 from .faces import detect_and_track
 from .lipsync import run_lipsync
-from .media_io import extract_audio
-from .mix import mix_dubbed_audio
-from .stem_separation import separate_stems
-from .transcripts import evaluate_asr, evaluate_mt, write_report
+from backend.common.media_io import extract_audio
+from backend.media.mix import mix_dubbed_audio
+from backend.media.stem_separation import separate_stems
+from backend.asr.transcripts import evaluate_asr, evaluate_mt, write_report
 from .translate import translate_asr, write_mt_outputs
 from .tts import synthesize_segments
-from .gender import predict_genders
-from .voices import (
+from backend.asd.gender import predict_genders
+from backend.tts.voices import (
     assign_voices,
     assignments_to_jsonable as voice_assignments_to_jsonable,
     extract_speaker_references,
@@ -934,7 +934,7 @@ def run_post_mt_stages(
             if condense_overlong_text:
                 log.info("=== stage 9c2: shortening over-long lines ===")
                 try:
-                    from .condense import condense_overlong
+                    from backend.media.condense import condense_overlong
                     c = condense_overlong(
                         mt_json,
                         language=target_language,

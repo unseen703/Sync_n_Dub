@@ -53,7 +53,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from . import jobs as _jobs
-from . import tracing as _tracing
+from backend.common import tracing as _tracing
 from .edits import (STAGE_ORDER, sample_prompts_text, EditContext, EditError, EditOp, EditResult,
                     _lipsync_model_ids, _tone_style_ids,
                     OP_SPECS, OPS, Scope, apply_edits, rerun_stages, revert,
@@ -1980,7 +1980,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             load_dotenv()
         except ImportError:
             pass
-        from .llm import LLMUnavailable, OpenRouterClient, extract_json
+        from backend.common.llm import LLMUnavailable, OpenRouterClient, extract_json
         client = OpenRouterClient(model=args.llm_model)
         print(f"endpoint  {client.describe()}")
         if not client.available():
@@ -2035,7 +2035,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     client = None
     if not args.no_llm:
-        from .llm import OpenRouterClient
+        from backend.common.llm import OpenRouterClient
         client = OpenRouterClient(model=args.llm_model)
         if not client.available():
             log.warning("OPENROUTER_API_KEY unset — using the regex parser. "

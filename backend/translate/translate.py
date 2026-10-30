@@ -283,7 +283,7 @@ def from_llm(transcript: str, client=None, *, max_chars: int = 4000) -> Optional
             # deleted its target as unreferenced, and the only symptom was
             # this `except` logging "no LLM client" while 9b1 silently
             # degraded to an unset register on every run.
-            from .llm import OpenRouterClient
+            from backend.common.llm import OpenRouterClient
             client = OpenRouterClient()
         except Exception as e:                      # noqa: BLE001
             log.info("classify: no LLM client (%s)", e)
@@ -579,7 +579,7 @@ def codemix_segments(
     dest = Path(out_json) if out_json else merged_mt_json
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_text(json.dumps(data, indent=2, ensure_ascii=False))
-    from .mt_versions import snapshot as _mt_snapshot
+    from backend.mt_versions import snapshot as _mt_snapshot
     _mt_snapshot(dest, "codemix", data=data)
     log.info("codemix: wrote %s (retained=%d, substituted=%d segs)",
              dest, retained_total, substituted_total)

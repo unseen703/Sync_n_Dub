@@ -172,7 +172,7 @@ def build_coord_list(
     import cv2
     import numpy as np
 
-    from .gpu import ensure_onnxruntime_cuda
+    from backend.common.gpu import ensure_onnxruntime_cuda
 
     video = Path(video)
     speaking = speaking_track_per_frame(
@@ -366,7 +366,7 @@ def build_targets(
     import cv2
     import numpy as np
 
-    from .gpu import ensure_onnxruntime_cuda
+    from backend.common.gpu import ensure_onnxruntime_cuda
 
     video = Path(video)
     speaking = speaking_track_per_frame(

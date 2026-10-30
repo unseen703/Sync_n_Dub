@@ -8,7 +8,7 @@ list the registry.
 """
 from __future__ import annotations
 
-from ..._registry import make_registry
+from backend.common.registry import make_registry
 from ..base import BaseFaceDetector, FaceBox, FaceDetections
 
 _REGISTRY_SPEC: dict[str, tuple[str, str]] = {

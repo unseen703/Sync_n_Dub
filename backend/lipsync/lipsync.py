@@ -10,11 +10,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-from backend.lipsync.lipsync import LipSyncRequest, available_models, get_lipsync
+from backend.lipsync import LipSyncRequest, available_models, get_lipsync
 
-from .gpu import (concat_videos, gpu_busy_pids, gpu_free_memory, gpu_load,
+from backend.common.gpu import (concat_videos, gpu_busy_pids, gpu_free_memory, gpu_load,
                   pick_devices, split_video_audio, visible_cuda_devices)
-from .media_io import _ffmpeg_bin, probe_duration
+from backend.common.media_io import _ffmpeg_bin, probe_duration
 
 # Patterns that identify lipsync render outputs (not intermediates like shards).
 _RENDER_GLOBS = ("*.lipsync.mp4", "*.lipsync.remux.mp4",
@@ -78,7 +78,7 @@ def run_lipsync(
             f"Available: {', '.join(available_models())}"
         )
     if max_segment_s is None:
-        from .scaling import lipsync_segment_s_default
+        from backend.media.scaling import lipsync_segment_s_default
         max_segment_s = lipsync_segment_s_default()
     out_dir = Path(out_dir); out_dir.mkdir(parents=True, exist_ok=True)
     _archive_previous_renders(out_dir, model)
@@ -185,7 +185,7 @@ def run_lipsync(
                    f"itself; waiting is safer than sharing one."),
             extra={"gpu_free_mib": free, "gpu_busy_pids": busy},
         )
-    from .memguard import breach as _mem_breach, memory_snapshot
+    from backend.common.memguard import breach as _mem_breach, memory_snapshot
     _mem_why = _mem_breach()
     if _mem_why:
         return LipSyncOutput(
@@ -384,7 +384,7 @@ def _slice_targets_to_window(targets_npz: Path, window_video: Path,
                              w_start: float, w_end: float, fps: float,
                              *, out_dir: Path, model: str) -> Optional[Path]:
     """The slice of `targets_npz` covering the cut window clip."""
-    from .lipsync_targets import load_targets_payload, save_targets, slice_targets
+    from backend.asd.lipsync_targets import load_targets_payload, save_targets, slice_targets
 
     payload = load_targets_payload(Path(targets_npz))
     if payload is None:
@@ -495,7 +495,7 @@ def _split_targets(targets_npz: Optional[Path], pairs: list, out_dir: Path,
     if not targets_npz:
         return [None] * len(pairs)
 
-    from .lipsync_targets import load_targets_payload, save_targets, slice_targets
+    from backend.asd.lipsync_targets import load_targets_payload, save_targets, slice_targets
 
     payload = load_targets_payload(Path(targets_npz))
     if payload is None:
@@ -593,7 +593,7 @@ def _splice_window(full: Path, rendered: Path, start: float, end: float,
 def _frame_count(video: Path) -> int:
     """Exact frame count, or 0 when ffprobe cannot answer."""
     # Imported here, as elsewhere: there is no ffprobe on this host's PATH and media_io resolves the one in the running env.
-    from .media_io import _ffprobe_bin
+    from backend.common.media_io import _ffprobe_bin
     ffprobe = _ffprobe_bin()
     if not ffprobe:
         return 0
@@ -768,7 +768,7 @@ def _concat_shards_verified(parts: list, out: Path, *, expected: int,
 
 def _frame_rate(video: Path):
     """`r_frame_rate` as ffmpeg writes it, e.g. "24000/1001", or None."""
-    from .media_io import _ffprobe_bin
+    from backend.common.media_io import _ffprobe_bin
     ffprobe = _ffprobe_bin()
     if not ffprobe:
         return None
@@ -785,7 +785,7 @@ def _frame_rate(video: Path):
 
 def _video_dims(video: Path):
     """(width, height) or None. Needed because a renderer may rescale."""
-    from .media_io import _ffprobe_bin
+    from backend.common.media_io import _ffprobe_bin
     ffprobe = _ffprobe_bin()
     if not ffprobe:
         return None
@@ -802,7 +802,7 @@ def _video_dims(video: Path):
 
 def _stream_durations(video: Path) -> tuple:
     """(video_duration, audio_duration) in seconds; 0.0 where unknown."""
-    from .media_io import _ffprobe_bin
+    from backend.common.media_io import _ffprobe_bin
     ffprobe = _ffprobe_bin()
     if not ffprobe:
         return 0.0, 0.0
@@ -823,7 +823,7 @@ def _stream_durations(video: Path) -> tuple:
 def _needs_remux(video: Path) -> bool:
     """Return whether the audio track needs remuxing."""
     # media_io._ffprobe_bin() rather than shutil.which: there is no ffprobe on this host's PATH, so which() returns None and this answers "no remux needed" for every video.
-    from .media_io import _ffprobe_bin
+    from backend.common.media_io import _ffprobe_bin
     ffprobe = _ffprobe_bin()
     if not ffprobe:
         return False      # best-effort; skip if ffprobe is unavailable
@@ -901,7 +901,7 @@ def _run_lipsync_segmented(
 ):
     """Render a long clip in segments, reusing one model per GPU, then join the pieces."""
     import math
-    from backend.lipsync.lipsync import LipSyncRequest, LipSyncResult
+    from backend.lipsync import LipSyncRequest, LipSyncResult
 
     # Devices to spread pieces over.
     devices = list(gpus) if gpus else [None]
@@ -938,7 +938,7 @@ def _run_lipsync_segmented(
              "model loaded once per GPU (peak RAM tracks ~%.0fs of frames)",
              model, duration_s, len(pairs), piece_s, len(devices), seg_s)
 
-    from .memguard import breach as _mem_breach
+    from backend.common.memguard import breach as _mem_breach
 
     # Refuse up front if the host is ALREADY out of memory; the per-batch watchdog inside each worker covers growth DURING the run.
     why = _mem_breach()
@@ -1039,7 +1039,7 @@ def _run_lipsync_sharded(
     targets_npz: Optional[Path] = None,
 ):
     """Split a clip across GPUs, render shards in parallel, then join them."""
-    from backend.lipsync.lipsync import LipSyncResult
+    from backend.lipsync import LipSyncResult
     n = len(gpus)
     shard_dir = out_dir / f"{out_video.stem}.shards"
     shard_dir.mkdir(parents=True, exist_ok=True)
@@ -1136,7 +1136,7 @@ def _run_lipsync_sharded(
 def _probe_video_fps_dur(path: Path) -> tuple:
     """(fps, duration_s) via ffprobe; (0.0, 0.0) when unavailable."""
     # media_io._ffprobe_bin() rather than shutil.which: there is no ffprobe on this host's PATH, and which() returning None degrades silently to "unknown".
-    from .media_io import _ffprobe_bin
+    from backend.common.media_io import _ffprobe_bin
     ffprobe = _ffprobe_bin()
     if not ffprobe or not Path(path).exists():
         return (0.0, 0.0)

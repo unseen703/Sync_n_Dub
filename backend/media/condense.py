@@ -369,7 +369,7 @@ def condense_overlong(
 
     if client is None:
         try:
-            from .llm import OpenRouterClient
+            from backend.common.llm import OpenRouterClient
             client = OpenRouterClient(model=model or DEFAULT_MODEL)
         except Exception as e:                           # noqa: BLE001
             log.warning("condense: no LLM client (%s); leaving the text as is", e)
@@ -535,7 +535,7 @@ def condense_overlong(
     summary["saved_s"] = round(summary["saved_s"], 2)
     data.setdefault("extra", {})["condense"] = summary
     mt_json.write_text(json.dumps(data, indent=2, ensure_ascii=False))
-    from .mt_versions import snapshot as _mt_snapshot
+    from backend.mt_versions import snapshot as _mt_snapshot
     _mt_snapshot(mt_json, "condense", data=data)
     log.info("condense: rewrote %d/%d segment(s), saved %.1fs of speech "
              "in %d call(s)", summary["rewritten"], summary["considered"],

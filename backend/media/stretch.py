@@ -93,7 +93,7 @@ def _candidate_ffmpeg_bins() -> List[str]:
     _add(str(Path(__file__).resolve().parent.parent / ".venv-diarization" / "bin" / "ffmpeg"))
     _add(shutil.which("ffmpeg"))
     try:
-        from .media_io import _ffmpeg_bin
+        from backend.common.media_io import _ffmpeg_bin
         _add(_ffmpeg_bin())
     except Exception as e:
         log.debug("media_io._ffmpeg_bin unavailable: %s", e)

@@ -18,7 +18,7 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
-from backend.faces.faces import FaceDetections, FaceTracks
+from backend.faces import FaceDetections, FaceTracks
 from backend.faces.detect import available_detectors, get_detector
 from backend.faces.track import available_trackers, get_tracker
 

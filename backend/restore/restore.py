@@ -68,7 +68,7 @@ def find_source(job_root: Path) -> Optional[Path]:
 
 
 def _dims(path: Path) -> Optional[Tuple[int, int]]:
-    from .media_io import _ffprobe_bin
+    from backend.common.media_io import _ffprobe_bin
     ffprobe = _ffprobe_bin()
     if not ffprobe:
         return None
@@ -84,7 +84,7 @@ def _dims(path: Path) -> Optional[Tuple[int, int]]:
 
 
 def _decoded_frames(path: Path) -> int:
-    from .media_io import _ffprobe_bin
+    from backend.common.media_io import _ffprobe_bin
     ffprobe = _ffprobe_bin()
     if not ffprobe:
         return -1
@@ -100,7 +100,7 @@ def _decoded_frames(path: Path) -> int:
 
 def _carry_audio(silent: Path, from_video: Path, out: Path) -> Optional[str]:
     """Mux the render's audio onto the restored video. Error string or None."""
-    from .media_io import _ffmpeg_bin
+    from backend.common.media_io import _ffmpeg_bin
     ffmpeg = _ffmpeg_bin() or "ffmpeg"
     p = subprocess.run(
         [ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
@@ -139,7 +139,7 @@ def run_restore(
     A single worker leaves the GPU largely idle, and CPU contention is what
     caps how far this can be raised.
     """
-    from backend.restore.restore import get_restore
+    from backend.restore import get_restore
     from backend.restore.base import RestoreRequest
 
     t0 = time.time()

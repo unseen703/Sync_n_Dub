@@ -902,7 +902,7 @@ def voice_for_gender(
     eng = (engine or "").strip().lower()
     prim = (language or "hi").split("-")[0].lower()
 
-    from .voices import load_voice_catalog
+    from backend.tts.voices import load_voice_catalog
     cat_engine = "indic-speak" if eng in ("", "bodhan", "indic-speak") else eng
     catalog = load_voice_catalog(cat_engine, language=prim,
                                  catalog_json=catalog_json)
@@ -1722,7 +1722,7 @@ def _voice_catalog_lookup(
     """
     eng = (engine or "").lower()
     try:
-        from .voices import load_voice_catalog
+        from backend.tts.voices import load_voice_catalog
         cat = load_voice_catalog(
             "indic-speak" if eng in ("", "bodhan", "indic-speak") else eng,
             language=language, catalog_json=catalog_json)
@@ -1870,7 +1870,7 @@ def _known_voice(voice: str, *, engine: Optional[str],
     """
     eng = (engine or "").lower()
     try:
-        from .voices import load_voice_catalog
+        from backend.tts.voices import load_voice_catalog
         cat = load_voice_catalog(
             "indic-speak" if eng in ("", "bodhan", "indic-speak") else eng,
             language=language, catalog_json=catalog_json)

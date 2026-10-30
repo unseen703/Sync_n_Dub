@@ -139,8 +139,8 @@ def run_restore(
     A single worker leaves the GPU largely idle, and CPU contention is what
     caps how far this can be raised.
     """
-    from models.restore import get_restore
-    from models.restore.base import RestoreRequest
+    from backend.restore.restore import get_restore
+    from backend.restore.base import RestoreRequest
 
     t0 = time.time()
     job_root = Path(job_root)

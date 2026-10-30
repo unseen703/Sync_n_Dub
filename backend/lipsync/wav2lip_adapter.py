@@ -89,7 +89,7 @@ def resolve_resize_factor(
     """
     if explicit is not None:
         return int(explicit), f"explicit resize_factor={int(explicit)}"
-    from backend.lipsync import _video_dims
+    from backend.lipsync.lipsync import _video_dims
     dims = _video_dims(Path(video))
     if not dims:
         return 2, (f"could not probe {Path(video).name}; kept the safe "

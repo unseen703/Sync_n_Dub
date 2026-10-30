@@ -64,7 +64,7 @@ def _lipsync_model_ids() -> str:
     has nothing to do with lip-sync.
     """
     try:
-        from models.lipsync import available_models
+        from backend.lipsync.lipsync import available_models
         return " | ".join(available_models())
     except Exception:                               # noqa: BLE001
         return "wav2lip | musetalk | latentsync15"
@@ -1946,7 +1946,7 @@ def _h_lipsync_window(data, seg_ids, op, applied, ctx, res):
         # replay has been committed and launched — so a typo or an invented
         # model (a 12B model writing structured output does invent them)
         # surfaced as a failed background job rather than a refused edit.
-        from models.lipsync import available_models
+        from backend.lipsync.lipsync import available_models
         known = available_models()
         if str(model) not in known:
             raise EditError(

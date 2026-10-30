@@ -982,7 +982,7 @@ def _rule_parse(nlq: str, *,
     # so "run musetalk on the last 20 seconds" — an advertised example —
     # matched nothing. LONGEST first, so "wav2lip_hd" is not read as the
     # plain model: that silent downgrade is what this loop exists to stop.
-    from models.lipsync import available_models
+    from backend.lipsync.lipsync import available_models
     probe = low.replace("-", "_").replace(" ", "_")
     ls_model = None
     for name in sorted(available_models(), key=len, reverse=True):

@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-from models.lipsync import LipSyncRequest, available_models, get_lipsync
+from backend.lipsync.lipsync import LipSyncRequest, available_models, get_lipsync
 
 from .gpu import (concat_videos, gpu_busy_pids, gpu_free_memory, gpu_load,
                   pick_devices, split_video_audio, visible_cuda_devices)
@@ -146,7 +146,7 @@ def run_lipsync(
     _MAX_RENDER_HEIGHT = 1080
     dims = _video_dims(face_video)
     if dims and dims[1] > _MAX_RENDER_HEIGHT:
-        from models.lipsync.wav2lip_adapter import cap_dims
+        from backend.lipsync.wav2lip_adapter import cap_dims
         capped = cap_dims(dims, _MAX_RENDER_HEIGHT)
         cap_out = out_dir / f"{face_video.stem}.{capped[1]}p.mp4"
         if not cap_out.is_file():
@@ -901,7 +901,7 @@ def _run_lipsync_segmented(
 ):
     """Render a long clip in segments, reusing one model per GPU, then join the pieces."""
     import math
-    from models.lipsync import LipSyncRequest, LipSyncResult
+    from backend.lipsync.lipsync import LipSyncRequest, LipSyncResult
 
     # Devices to spread pieces over.
     devices = list(gpus) if gpus else [None]
@@ -1039,7 +1039,7 @@ def _run_lipsync_sharded(
     targets_npz: Optional[Path] = None,
 ):
     """Split a clip across GPUs, render shards in parallel, then join them."""
-    from models.lipsync import LipSyncResult
+    from backend.lipsync.lipsync import LipSyncResult
     n = len(gpus)
     shard_dir = out_dir / f"{out_video.stem}.shards"
     shard_dir.mkdir(parents=True, exist_ok=True)

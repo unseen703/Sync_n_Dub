@@ -16,7 +16,7 @@ _log = logging.getLogger(__name__)
 
 #: Where a lip-sync adapter's vendored upstream lives, relative to the repo
 #: root, so nothing under `models/` reaches outside it.
-VENDOR_ROOT = "models/lipsync/vendor"
+VENDOR_ROOT = "backend/lipsync/vendor"
 
 
 def resolve_vendor_repo(name: str, env_var: str,

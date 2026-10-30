@@ -77,9 +77,9 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:                      # pragma: no cover
     sys.path.insert(0, str(REPO_ROOT))
 
-from backend import tracing as _tracing
-from backend import edits as E                          # noqa: E402
-from backend import edit_agent as A                     # noqa: E402
+from backend.common import tracing as _tracing
+from backend.pipeline import edits as E                          # noqa: E402
+from backend.pipeline import edit_agent as A                     # noqa: E402
 
 from .cost import estimate as cost_estimate             # noqa: E402
 from .speakers import TONE_ENGINES, supports_tone        # noqa: E402
@@ -1316,7 +1316,7 @@ def revert_edits(job_id: str,
     if segments is not None and not isinstance(segments, list):
         raise HTTPException(422, "segments must be a list of segment ids")
     try:
-        from backend import job_versions as _jv
+        from backend.pipeline import job_versions as _jv
         _jv.read(view.root)               # back-fill before the file changes
     except Exception as e:                                  # noqa: BLE001
         log.warning("versions: index unavailable (%s)", e)
@@ -1445,7 +1445,7 @@ def get_versions(job_id: str) -> Dict[str, Any]:
     root = DATA_DIR / "jobs" / job_id.strip("/")
     if not root.is_dir():
         raise HTTPException(404, f"Job not found: {job_id}")
-    from backend import job_versions as _jv
+    from backend.pipeline import job_versions as _jv
     try:
         doc = _jv.read(root)
     except OSError as e:

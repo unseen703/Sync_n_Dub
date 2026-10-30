@@ -17,7 +17,7 @@ from __future__ import annotations
 import os
 from typing import Any, Dict, Optional, Tuple
 
-from backend import speed as _speed
+from backend.media import speed as _speed
 from . import lipsync_models as _ls_models
 
 

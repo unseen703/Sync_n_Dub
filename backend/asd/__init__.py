@@ -37,10 +37,32 @@ _registry = make_registry(
 available_models = _registry.available
 get_asd = _registry.get
 
+_STAGE_EXPORTS = {
+    "ASD_MODEL_PREFERENCE", "SCORES_SUFFIX", "SegmentAssignment",
+    "assign_faces_to_turns", "assignments_to_jsonable",
+    "find_scores_npz", "load_scores_npz", "save_scores_npz", "score_asd",
+}
+
+
+def __getattr__(name):
+    if name in _STAGE_EXPORTS:
+        import importlib
+        return getattr(importlib.import_module(".asd", __name__), name)
+    raise AttributeError(name)
+
 __all__ = [
+    "ASD_MODEL_PREFERENCE",
     "ASDResult",
     "ASDScore",
     "BaseASD",
+    "SCORES_SUFFIX",
+    "SegmentAssignment",
+    "assign_faces_to_turns",
+    "assignments_to_jsonable",
     "available_models",
+    "find_scores_npz",
     "get_asd",
+    "load_scores_npz",
+    "save_scores_npz",
+    "score_asd",
 ]

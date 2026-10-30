@@ -34,6 +34,12 @@ _registry = make_registry(
 available_models = _registry.available
 get_diarizer = _registry.get
 
+def __getattr__(name):
+    if name in {"diarize", "refine_speakers"}:
+        import importlib
+        return getattr(importlib.import_module(".diarize", __name__), name)
+    raise AttributeError(name)
+
 __all__ = [
     "BaseDiarizer",
     "DiarizationResult",

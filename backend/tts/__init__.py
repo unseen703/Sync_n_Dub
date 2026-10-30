@@ -31,6 +31,12 @@ _registry = make_registry(
 available_models = _registry.available
 get_tts = _registry.get
 
+def __getattr__(name):
+    if name in {"synthesize_segments", "resolve_style"}:
+        import importlib
+        return getattr(importlib.import_module(".tts", __name__), name)
+    raise AttributeError(name)
+
 
 def resolve_style(segment_style: Optional[str],
                   document_style: Optional[str]) -> Optional[str]:

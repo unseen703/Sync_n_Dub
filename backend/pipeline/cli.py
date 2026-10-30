@@ -21,7 +21,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from backend import speed as _speed
+from backend.media import speed as _speed
 
 from backend.media.align import available_models as _align_models
 from backend.asd import available_models as _asd_models

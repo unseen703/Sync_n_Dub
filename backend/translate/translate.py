@@ -579,7 +579,7 @@ def codemix_segments(
     dest = Path(out_json) if out_json else merged_mt_json
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_text(json.dumps(data, indent=2, ensure_ascii=False))
-    from backend.mt_versions import snapshot as _mt_snapshot
+    from backend.pipeline.mt_versions import snapshot as _mt_snapshot
     _mt_snapshot(dest, "codemix", data=data)
     log.info("codemix: wrote %s (retained=%d, substituted=%d segs)",
              dest, retained_total, substituted_total)

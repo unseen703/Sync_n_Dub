@@ -24,6 +24,12 @@ _registry = make_registry(
 
 get_asr = _registry.get
 
+def __getattr__(name):  # PEP 562 lazy re-export; breaks __init__/<pkg>.py cycle
+    if name == "transcribe":
+        import importlib
+        return getattr(importlib.import_module(".asr", __name__), "transcribe")
+    raise AttributeError(name)
+
 
 def available_models(language: Optional[str] = None) -> list[str]:
     """Registered ASR adapter names.

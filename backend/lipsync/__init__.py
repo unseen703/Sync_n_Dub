@@ -34,6 +34,12 @@ _registry = make_registry(
 available_models = _registry.available
 get_lipsync = _registry.get
 
+def __getattr__(name):
+    if name == "run_lipsync":
+        import importlib
+        return getattr(importlib.import_module(".lipsync", __name__), "run_lipsync")
+    raise AttributeError(name)
+
 __all__ = [
     "BaseLipSync",
     "LipSyncRequest",

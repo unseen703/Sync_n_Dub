@@ -22,6 +22,12 @@ _registry = make_registry(
 available_models = _registry.available
 get_mt = _registry.get
 
+def __getattr__(name):
+    if name in {"codemix_segments", "translate_asr", "write_mt_outputs"}:
+        import importlib
+        return getattr(importlib.import_module(".translate", __name__), name)
+    raise AttributeError(name)
+
 __all__ = [
     "BaseMT",
     "MTRequest",

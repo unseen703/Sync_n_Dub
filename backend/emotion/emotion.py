@@ -169,7 +169,7 @@ def annotate_segments_with_emotion(
         applied += 1
 
     merged_json.write_text(json.dumps(data, indent=2, ensure_ascii=False))
-    from backend.mt_versions import snapshot as _mt_snapshot
+    from backend.pipeline.mt_versions import snapshot as _mt_snapshot
     _mt_snapshot(merged_json, "emotion", data=data)
 
     hist = Counter(l for l in raw_labels if l)

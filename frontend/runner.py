@@ -336,7 +336,7 @@ def _run_rerun(job_id: str, job_root: Path, jobs_dir: Path) -> int:
     exact job, and a second derivation from different inputs could promise a
     different set of stages than the one that runs.
     """
-    from backend import edit_agent, edits as _edits
+    from backend.pipeline import edit_agent, edits as _edits
 
     record = latest_edit_record(job_root)
     # `edit_NNN.json` → `edit_NNN`, which lands in
@@ -454,7 +454,7 @@ def _jv_begin(job_root: Path, edit_id: str, kind: str, will_lipsync: bool):
     logged and the render runs without one.
     """
     try:
-        from backend import job_versions as jv
+        from backend.pipeline import job_versions as jv
         v = jv.begin_render(job_root, edit_id=edit_id, kind=kind)
         moves = jv.stash_lipsync(job_root) if will_lipsync else []
         return v, moves
@@ -469,7 +469,7 @@ def _jv_end(job_root: Path, v, moves, state: str, error) -> None:
     if v is None:
         return
     try:
-        from backend import job_versions as jv
+        from backend.pipeline import job_versions as jv
         if state != "done" and moves:
             jv.unstash_lipsync(job_root, moves)
         jv.finish_render(job_root, v, state, error)
@@ -480,7 +480,7 @@ def _jv_end(job_root: Path, v, moves, state: str, error) -> None:
 def _jv_original(job_root: Path) -> None:
     """Record phase one (everything up to the MT gate) as version 0."""
     try:
-        from backend import job_versions as jv
+        from backend.pipeline import job_versions as jv
         if jv.find_by_edit_id(job_root, "original") is None:
             jv.append(job_root, "original", edit_id="original",
                       status="applied",
@@ -529,7 +529,7 @@ def _run_cast(job_id: str, job_root: Path, jobs_dir: Path) -> int:
     `POST /api/jobs/{id}/cast`.
     """
     import json as _json
-    from backend import edit_agent, edits as _edits
+    from backend.pipeline import edit_agent, edits as _edits
 
     cast_path = job_root / "cast.json"
     try:

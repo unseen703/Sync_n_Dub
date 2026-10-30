@@ -48,24 +48,24 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 from . import jobs as _jobs
 from backend.media.align.align import (align_asr, align_tts_segments, apply_alignment_to_asr,
                     attach_visemes)
-from .asd import (SCORES_SUFFIX as ASD_SCORES_SUFFIX, assign_faces_to_turns,
+from backend.asd import (SCORES_SUFFIX as ASD_SCORES_SUFFIX, assign_faces_to_turns,
                   assignments_to_jsonable, find_scores_npz, save_scores_npz,
                   score_asd)
-from .asr import transcribe as asr_transcribe
-from .translate import codemix_segments
-from .diarize import diarize as diarize_stage
+from backend.asr import transcribe as asr_transcribe
+from backend.translate import codemix_segments
+from backend.diarize import diarize as diarize_stage
 from backend.media.segment import resegment
-from .diarize import refine_speakers as _refine_speaker_labels
+from backend.diarize import refine_speakers as _refine_speaker_labels
 from backend.media.downloader import resolve_input
 from backend.media.duration import plan_segment_durations
-from .faces import detect_and_track
-from .lipsync import run_lipsync
+from backend.faces import detect_and_track
+from backend.lipsync import run_lipsync
 from backend.common.media_io import extract_audio
 from backend.media.mix import mix_dubbed_audio
 from backend.media.stem_separation import separate_stems
 from backend.asr.transcripts import evaluate_asr, evaluate_mt, write_report
-from .translate import translate_asr, write_mt_outputs
-from .tts import synthesize_segments
+from backend.translate import translate_asr, write_mt_outputs
+from backend.tts import synthesize_segments
 from backend.asd.gender import predict_genders
 from backend.tts.voices import (
     assign_voices,

@@ -16,16 +16,18 @@ from .base import (
     FaceTracks,
     tracks_from_detections_array,
 )
-from .faces import (
-    SegmentAssignment,
-    assign_faces_to_turns,
-    assignments_to_jsonable,
-    detect_and_track,
-    detect_faces,
-    preimport_face_stack,
-    speaker_face_tracks,
-    track_faces,
-)
+_STAGE_EXPORTS = {
+    "SegmentAssignment", "assign_faces_to_turns", "assignments_to_jsonable",
+    "detect_and_track", "detect_faces", "preimport_face_stack",
+    "speaker_face_tracks", "track_faces",
+}
+
+
+def __getattr__(name):
+    if name in _STAGE_EXPORTS:
+        import importlib
+        return getattr(importlib.import_module(".faces", __name__), name)
+    raise AttributeError(name)
 
 __all__ = [
     "BaseFaceDetector",

@@ -53,7 +53,7 @@ from backend.asd import (SCORES_SUFFIX as ASD_SCORES_SUFFIX, assign_faces_to_tur
                   score_asd)
 from backend.asr import transcribe as asr_transcribe
 from backend.translate import codemix_segments
-from backend.diarize import diarize as diarize_stage
+from backend.diarize.diarize import diarize as diarize_stage
 from backend.media.segment import resegment
 from backend.diarize import refine_speakers as _refine_speaker_labels
 from backend.media.downloader import resolve_input
@@ -324,7 +324,7 @@ def _speaker_face_tracks(out_root: Path, video: Path) -> Dict[str, tuple]:
                      "votes on audio alone", out_root.name)
             return {}
         from backend.faces.base import FaceTracks
-        from .faces import speaker_face_tracks
+        from backend.faces import speaker_face_tracks
         tracks = FaceTracks.load_npz(npz[0])
         assignments = json.loads(js[0].read_text())
         return speaker_face_tracks(assignments, tracks)
@@ -384,8 +384,8 @@ def _asd_coord_list(out_root: Path, video: Path, model: str, *,
             return None
 
         from backend.faces.base import FaceTracks
-        from .asd import load_scores_npz
-        from .lipsync_targets import build_coord_list
+        from backend.asd import load_scores_npz
+        from backend.asd.lipsync_targets import build_coord_list
 
         tracks = FaceTracks.load_npz(npz[0])
         asd = load_scores_npz(scores_pick)
@@ -439,8 +439,8 @@ def _asd_targets_npz(out_root: Path, video: Path, model: str, *,
             return None
 
         from backend.faces.base import FaceTracks
-        from .asd import load_scores_npz
-        from .lipsync_targets import build_targets, save_targets
+        from backend.asd import load_scores_npz
+        from backend.asd.lipsync_targets import build_targets, save_targets
 
         tracks = FaceTracks.load_npz(npz[0])
         asd = load_scores_npz(scores_pick)
@@ -965,7 +965,7 @@ def run_post_mt_stages(
         else:
             log.info("=== stage 9b2: source emotion (%s) ===", emotion_model)
             try:
-                from .emotion import annotate_segments_with_emotion
+                from backend.emotion.emotion import annotate_segments_with_emotion
                 emo = annotate_segments_with_emotion(
                     mt_json,
                     source_audio=reference_audio_src,
@@ -1328,7 +1328,7 @@ def run_post_mt_stages(
                 mt_json.name)
         else:
             log.info("=== stage 9f2: timing plan (%s) ===", timing_producer)
-            from . import timing as _timing
+            from backend.media import timing as _timing
             tp = _timing.plan(timing_producer, mt_json, **(timing_params or {}))
             if timing_plan_json is not None:
                 plan_dest = Path(timing_plan_json)
@@ -1386,7 +1386,7 @@ def run_post_mt_stages(
             # wav and the mp4 are copied; neither is a dependency, so a
             # failure here is logged and the pipeline keeps going.
             if mix_producer_tag:
-                from . import mix_versions as _mix_versions
+                from backend.media import mix_versions as _mix_versions
                 _mix_versions.snapshot(
                     mr.audio_wav, mr.video_mp4, mix_producer_tag)
 
@@ -1493,7 +1493,7 @@ def run_post_mt_stages(
     if restore_model and out.lipsync_mp4:
         log.info("=== stage 9i: face restoration (%s) ===", restore_model)
         try:
-            from .restore import run_restore
+            from backend.restore.restore import run_restore
             _r = run_restore(Path(out_root), model=str(restore_model),
                              render=Path(out.lipsync_mp4),
                              num_gpus=lipsync_num_gpus)
@@ -2381,7 +2381,7 @@ def _run_pipeline(
     # "no global style", i.e. the voice's neutral reading, which is also what
     # happens when the video came from a local file with no metadata.
     if tts_style == "auto":
-        from .translate import classify_register, transcript_sample
+        from backend.translate.translate import classify_register, transcript_sample
         sample = ""
         try:
             if result.mt_json and Path(result.mt_json).exists():
@@ -2621,7 +2621,7 @@ def _captions_from(subtitles, audio_16k, diar_result, asr_full_audio,
     forcing captions onto turns there would quietly re-impose it.
     """
     try:
-        from .asr import transcript_from_captions
+        from backend.asr.asr import transcript_from_captions
     except Exception as e:                               # noqa: BLE001
         log.debug("captions: helper unavailable (%s)", e)
         return None

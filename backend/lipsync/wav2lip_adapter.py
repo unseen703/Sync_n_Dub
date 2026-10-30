@@ -147,7 +147,7 @@ class Wav2LipSync(BaseLipSync):
         self.pads = pads
         self.resize_factor = resize_factor
         if wav2lip_batch_size is None or face_det_batch_size is None:
-            from backend.scaling import (wav2lip_batch_default,
+            from backend.media.scaling import (wav2lip_batch_default,
                                          wav2lip_face_det_default)
             if wav2lip_batch_size is None:
                 wav2lip_batch_size = wav2lip_batch_default()

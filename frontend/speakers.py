@@ -256,7 +256,7 @@ def voice_options(config: Dict[str, Any]) -> List[Dict[str, Any]]:
     eng = (config.get("tts") or config.get("voice_engine") or "").lower()
     lang = (config.get("target_language") or "").split("-")[0].lower()
     try:
-        from backend.voices import load_voice_catalog
+        from backend.tts.voices import load_voice_catalog
     except Exception:                                # pragma: no cover
         return []
     cat_engine = "indic-speak" if eng in ("", "bodhan", "indic-speak") else eng
@@ -391,9 +391,9 @@ def tone_vocabulary() -> List[Dict[str, str]]:
     option in the dropdown was another register.
     `models.tts.resolve_style` is what turns it back into "no style".
     """
-    from models.tts import NEUTRAL_STYLE
+    from backend.tts.tts import NEUTRAL_STYLE
     try:
-        from models.tts.bodhan_adapter import INDIC_SPEAK_STYLES
+        from backend.tts.bodhan_adapter import INDIC_SPEAK_STYLES
     except Exception as e:                               # pragma: no cover
         log.warning("bodhan style list unavailable: %s", e)
         return []
@@ -436,9 +436,9 @@ def submit_style_options() -> List[Dict[str, str]]:
     chosen, or name one, but never ask for none. A local file with no
     metadata already dubs neutral by accident; this makes it a choice.
     """
-    from models.tts import NEUTRAL_STYLE
+    from backend.tts.tts import NEUTRAL_STYLE
     try:
-        from models.tts.bodhan_adapter import INDIC_SPEAK_STYLES
+        from backend.tts.bodhan_adapter import INDIC_SPEAK_STYLES
     except Exception as e:                               # pragma: no cover
         log.warning("bodhan style list unavailable: %s", e)
         return []

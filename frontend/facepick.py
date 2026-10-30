@@ -58,7 +58,7 @@ def face_size_stats(video: Path, *, sample_frames: int = 40,
     Always returns a dict, so the caller never branches on an exception.
     `median` is None only when no sampled frame had a face.
     """
-    from backend.faces import detect_faces           # lazy: pulls in cv2/onnx
+    from backend.faces.faces import detect_faces           # lazy: pulls in cv2/onnx
 
     video = Path(video)
     total = _frame_count(video)

@@ -75,7 +75,7 @@ def load_overlay(job_root: Path, src: Path):
     import cv2
     import numpy as np
 
-    from models.faces import FaceTracks
+    from backend.faces.faces import FaceTracks
 
     job_root = Path(job_root)
     npz = next(iter(sorted(job_root.glob("faces/*.npz"))), None)

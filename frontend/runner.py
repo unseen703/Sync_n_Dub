@@ -233,7 +233,7 @@ def _fetch(url: str, job_root: Path) -> Path:
     leave two playable mp4s in the folder that every media-resolution glob
     then has to tell apart.
     """
-    from backend.downloader import resolve_input
+    from backend.media.downloader import resolve_input
 
     dest = Path(job_root) / "source"
     dest.mkdir(parents=True, exist_ok=True)

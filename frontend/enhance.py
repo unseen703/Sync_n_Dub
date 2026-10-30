@@ -141,7 +141,7 @@ def resolve_render(job_root: Path, render: Optional[str]) -> Optional[Path]:
     in both `lipsync/` and `lipsync_asd/`, and a bare name would pick an arm
     arbitrarily.
     """
-    from backend.restore import find_render, list_renders
+    from backend.restore.restore import find_render, list_renders
 
     if not render:
         return find_render(Path(job_root))
@@ -161,7 +161,7 @@ def render_id(job_root: Path, p: Path) -> str:
 
 
 def _render_facts(job_root: Path, render: Optional[str] = None) -> Dict[str, Any]:
-    from backend.restore import (_decoded_frames, _dims, find_source,
+    from backend.restore.restore import (_decoded_frames, _dims, find_source,
                                  list_renders)
 
     render_p = resolve_render(Path(job_root), render)
@@ -254,7 +254,7 @@ def readiness(job_root: Path, render: Optional[str] = None) -> Dict[str, Any]:
             pass
 
     try:
-        from models.restore import get_restore
+        from backend.restore.restore import get_restore
         blockers.extend(get_restore("gfpgan").blockers())
     except Exception as e:                                # noqa: BLE001
         blockers.append(f"restore model unavailable: {e}")
@@ -297,7 +297,7 @@ def start(job_root: Path, *, strength: float = 1.0, gated: bool = True,
 
     def _run():
         try:
-            from backend.restore import run_restore
+            from backend.restore.restore import run_restore
             res = run_restore(job_root, render=Path(facts["render"]),
                               source=Path(facts["source"]) if facts.get("source")
                               else None,

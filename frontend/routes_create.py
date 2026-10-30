@@ -180,7 +180,7 @@ def check_tts(tts: Optional[str]) -> str:
     `Unknown TTS model`. The operator saw a job card and then a dead job.
     Now it is a 400 before anything is written to disk.
     """
-    from models.tts import available_models
+    from backend.tts.tts import available_models
 
     engine = (tts or presets.default_tts()).lower()
     if engine not in available_models():
@@ -207,7 +207,7 @@ def check_style(style: Optional[str]) -> Optional[str]:
     itself, 9b1 is not planned, and `models.tts.resolve_style` drops it at
     synthesis so the engine gets no style at all.
     """
-    from models.tts import NEUTRAL_STYLE
+    from backend.tts.tts import NEUTRAL_STYLE
 
     from .speakers import SUBMIT_STYLES
 
@@ -276,7 +276,7 @@ async def youtube_probe(req: ProbeRequest) -> Dict[str, Any]:
     # differ by roughly 20x on this host (wav2lip 3-5x clip length,
     # musetalk 8-21x, latentsync ~83x) and one blended number would hide
     # exactly the difference the choice turns on.
-    from models.lipsync import available_models
+    from backend.lipsync.lipsync import available_models
     meta["lipsync_estimates"] = {
         m: presets.estimate_runtime(dur, lipsync_model=m)
         for m in available_models()}

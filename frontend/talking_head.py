@@ -347,7 +347,7 @@ def _files_url(p: Path) -> Optional[str]:
 def render(render_id: str, *, photo: Path, audio: Path,
            model: str = RENDER_MODEL) -> Dict[str, Any]:
     """Animate `photo` against `audio`. Blocking; `start_render` wraps it."""
-    from models.lipsync import LipSyncRequest, get_lipsync
+    from backend.lipsync.lipsync import LipSyncRequest, get_lipsync
 
     p = render_paths(render_id)
     p["dir"].mkdir(parents=True, exist_ok=True)

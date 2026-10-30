@@ -29,7 +29,7 @@ def _scaled_lipsync_batch() -> int:
     probe is only wanted at submit time, after the main process has
     already paid for it elsewhere).
     """
-    from backend.scaling import musetalk_batch_default
+    from backend.media.scaling import musetalk_batch_default
     return musetalk_batch_default()
 
 #: Wall time as a multiple of clip length, on this host's 2x16 GiB Blackwell

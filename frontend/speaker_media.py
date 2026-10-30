@@ -85,8 +85,8 @@ def face_crop_paths(job_root: Path, *, video: Optional[Path] = None,
         import cv2
         import numpy as np
 
-        from backend.faces import speaker_face_tracks
-        from models.faces import FaceTracks
+        from backend.faces.faces import speaker_face_tracks
+        from backend.faces.faces import FaceTracks
 
         tracks = FaceTracks.load_npz(npz)
         owned = speaker_face_tracks(_read(assign) or [], tracks)

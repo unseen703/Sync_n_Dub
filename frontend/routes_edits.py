@@ -1039,7 +1039,7 @@ def lipsync_readiness(job_id: str) -> Dict[str, Any]:
     """
     view = _open(job_id)
     cfg = _config(view)
-    from models.lipsync import available_models
+    from backend.lipsync.lipsync import available_models
 
     pending = _read_json(_pending_path(view.root))
     n_pending = len(pending.get("ops") or []) if isinstance(pending, dict) else 0
@@ -1172,7 +1172,7 @@ def run_lipsync_now(job_id: str,
     """
     view = _open(job_id)
     cfg = _config(view)
-    from models.lipsync import available_models
+    from backend.lipsync.lipsync import available_models
 
     # The operator names the model. REQUIRED, not defaulted.
     #

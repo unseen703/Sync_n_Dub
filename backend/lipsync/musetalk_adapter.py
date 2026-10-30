@@ -126,7 +126,7 @@ class MuseTalkSync(BaseLipSync):
         self.python_bin = resolve_env_python("musetalk", "musetalk", python_bin)
         self.version = (version or os.getenv("MUSETALK_VERSION") or "v15").lower()
         if batch_size is None:
-            from backend.scaling import musetalk_batch_default
+            from backend.media.scaling import musetalk_batch_default
             batch_size = musetalk_batch_default()
         self.batch_size = int(batch_size)
         self.fps = fps

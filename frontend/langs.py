@@ -59,7 +59,7 @@ SCRIPT_FONTS: Dict[str, str] = {
 
 def _catalog_languages(engine: str) -> List[str]:
     try:
-        from backend.voices import load_voice_catalog
+        from backend.tts.voices import load_voice_catalog
     except Exception as e:                       # pragma: no cover
         log.warning("voice catalog unavailable: %s", e)
         return []

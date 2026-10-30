@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Tuple
 
-from models.lipsync import available_models
+from backend.lipsync.lipsync import available_models
 
 
 class _Facts(Dict[str, Any]):

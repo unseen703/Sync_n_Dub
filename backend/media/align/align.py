@@ -16,7 +16,7 @@ import logging
 from pathlib import Path
 from typing import List, Optional
 
-from models.align import (
+from backend.media.align import (
     AlignRequest,
     AlignResult,
     available_models,
@@ -466,7 +466,7 @@ def _mms_char_spans(aligner, clip, sr: int, text: str) -> List[Tuple[str, float,
     """
     import torch
 
-    from models.align.mms_fa_adapter import _romanize_pairs, _split_words
+    from backend.media.align.mms_fa_adapter import _romanize_pairs, _split_words
 
     aligner._ensure_loaded()
     paired = _romanize_pairs(_split_words(text), aligner._get_uroman())

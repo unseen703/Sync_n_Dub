@@ -121,7 +121,7 @@ def _frame_count(video: Path) -> int:
     try:
         # Last resort: duration at an assumed 25 fps. Only the sample spacing
         # depends on it, so being wrong costs frames, not correctness.
-        from backend.media_io import probe_duration
+        from backend.common.media_io import probe_duration
         return int(round(probe_duration(video) * 25.0))
     except Exception as e:                                  # pragma: no cover
         log.warning("could not determine frame count for %s: %s", video, e)

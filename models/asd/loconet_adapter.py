@@ -69,7 +69,7 @@ class LoCoNetASD(BaseASD):
         num_speakers: int = 3,
     ):
         super().__init__(device=device)
-        from .._vendor import resolve_vendor_repo
+        from backend.common.vendor import resolve_vendor_repo
         self.repo_path = resolve_vendor_repo(
             self.vendor_name, f"{self.env_prefix}_REPO",
             str(repo_path) if repo_path else None,

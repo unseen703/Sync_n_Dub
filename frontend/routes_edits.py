@@ -464,7 +464,7 @@ def _llm_client():
     text ops refuse, and they refuse by name.
     """
     try:
-        from backend.llm import OpenRouterClient
+        from backend.common.llm import OpenRouterClient
         c = OpenRouterClient()
         return c if c.available() else None
     except Exception as e:                       # pragma: no cover

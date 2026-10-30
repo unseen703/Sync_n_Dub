@@ -14,7 +14,7 @@ own row there, or the longer id silently downgrades to it.
 """
 from __future__ import annotations
 
-from .._registry import make_registry
+from backend.common.registry import make_registry
 from .base import BaseLipSync, LipSyncRequest, LipSyncResult
 
 _REGISTRY_SPEC: dict[str, tuple[str, str]] = {

@@ -14,7 +14,7 @@ against dubbed footage, so `backend/lipsync_targets.py` gating stays.
 """
 from __future__ import annotations
 
-from .._registry import make_registry
+from backend.common.registry import make_registry
 from .base import ASDResult, ASDScore, BaseASD
 
 _REGISTRY_SPEC: dict[str, tuple[str, str]] = {

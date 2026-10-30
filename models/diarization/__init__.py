@@ -5,7 +5,7 @@ Add a model by adding it to `_REGISTRY_SPEC`. Callers only ever go through
 """
 from __future__ import annotations
 
-from .._registry import make_registry
+from backend.common.registry import make_registry
 from .base import BaseDiarizer, DiarizationResult, Turn
 
 # Imported lazily so `import models.diarization` costs nothing until a

@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from .._registry import make_registry
+from backend.common.registry import make_registry
 from .base import ASRResult, ASRSegment, BaseASR, Word, transcript_from_asr_json
 
 _REGISTRY_SPEC: dict[str, tuple[str, str]] = {

@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from .._registry import make_registry
+from backend.common.registry import make_registry
 from .base import BaseTTS, TTSRequest, TTSResult, TTSSegment
 
 #: "Read it plainly" — the one delivery value that is NOT an engine style.

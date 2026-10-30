@@ -51,7 +51,7 @@ class RetinaFaceDetector(BaseFaceDetector):
             # dlopen the CUDA runtime, then silently falls back to CPU. This
             # makes the EP genuinely loadable.
             if self.device.startswith("cuda"):
-                from backend.gpu import ensure_onnxruntime_cuda
+                from backend.common.gpu import ensure_onnxruntime_cuda
                 if not ensure_onnxruntime_cuda():
                     log.warning(
                         "retinaface: CUDA requested but onnxruntime cannot "

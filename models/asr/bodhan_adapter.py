@@ -15,7 +15,7 @@ from typing import List, Optional, Tuple
 
 import numpy as np
 
-from .._bodhan import BodhanClientMixin
+from backend.common.bodhan import BodhanClientMixin
 from .base import ASRResult, ASRSegment, BaseASR, Word
 
 log = logging.getLogger(__name__)

@@ -31,7 +31,7 @@ CUT_TIMEOUT_S = _env_int("DUBBING_UI_CUT_TIMEOUT_S", 2 * 60 * 60)
 def cut_window(src: Path, out: Path, start_s: float, end_s: float,
                *, crf: int = 18, timeout_s: Optional[int] = None) -> Path:
     """Re-encode `src[start_s:end_s]` to `out`. Returns `out`."""
-    from backend.media_io import _ffmpeg_bin
+    from backend.common.media_io import _ffmpeg_bin
 
     src, out = Path(src), Path(out)
     if not src.is_file():

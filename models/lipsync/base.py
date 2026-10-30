@@ -141,7 +141,7 @@ class BaseLipSync(ABC):
         if self.cuda_device is not None:
             env["CUDA_VISIBLE_DEVICES"] = str(self.cuda_device)
         try:
-            from backend.media_io import _ffmpeg_bin
+            from backend.common.media_io import _ffmpeg_bin
             ffdir = str(Path(_ffmpeg_bin()).parent)
             if ffdir not in env.get("PATH", "").split(os.pathsep):
                 env["PATH"] = ffdir + os.pathsep + env.get("PATH", "")
@@ -210,7 +210,7 @@ def cap_resolution(video, work, max_height: int = MAX_RENDER_HEIGHT, *,
         return video, unscaled
     max_height = int(max_height)
 
-    from backend.media_io import _ffmpeg_bin, _ffprobe_bin
+    from backend.common.media_io import _ffmpeg_bin, _ffprobe_bin
     ffprobe, ffmpeg = _ffprobe_bin(), _ffmpeg_bin()
     if not ffprobe or not ffmpeg:
         return video, unscaled
@@ -317,4 +317,4 @@ def run_streaming(cmd, *, cwd=None, env=None, log=None, tag="",
 # 2026-10-23: TalkNet (models/asd/) needs the same resolution, and importing
 # the lip-sync base from the ASD package to get it would be the wrong
 # dependency entirely. Re-exported here so existing imports keep working.
-from .._vendor import VENDOR_ROOT, resolve_vendor_repo  # noqa: E402,F401
+from backend.common.vendor import VENDOR_ROOT, resolve_vendor_repo  # noqa: E402,F401

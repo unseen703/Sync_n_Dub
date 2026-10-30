@@ -109,7 +109,7 @@ def _detector(device: str = "cpu"):
     if _APP is not None:
         return _APP
     try:
-        from backend.gpu import ensure_onnxruntime_cuda
+        from backend.common.gpu import ensure_onnxruntime_cuda
         ensure_onnxruntime_cuda()
     except Exception:                                   # noqa: BLE001
         log.debug("talking head: ort cuda preload failed", exc_info=True)

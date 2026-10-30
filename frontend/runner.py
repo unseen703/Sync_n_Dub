@@ -142,7 +142,7 @@ def _preflight_gpu() -> None:
     choice, and blocking it here would be a new restriction rather than a
     guard against a measured failure.
     """
-    from backend.gpu import (free_devices, gpu_busy_pids,
+    from backend.common.gpu import (free_devices, gpu_busy_pids,
                              visible_cuda_devices)
     visible = visible_cuda_devices()
     if not visible:

@@ -33,7 +33,7 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-from backend.media_io import probe_video as _probe_video
+from backend.common.media_io import probe_video as _probe_video
 from . import coords
 from .base import (BaseLipSync, LipSyncRequest, LipSyncResult,
                    resolve_vendor_repo, run_streaming)

@@ -212,7 +212,7 @@ def speaker_preview_paths(job_root: Path, *,
     if src is None or not spans:
         return existing
 
-    from backend.media_io import _ffmpeg_bin
+    from backend.common.media_io import _ffmpeg_bin
     out_dir.mkdir(parents=True, exist_ok=True)
     for spk, items in sorted(spans.items()):
         a, b = max(items, key=lambda ab: ab[1] - ab[0])

@@ -143,7 +143,7 @@ def _resample_16k(audio: Path, *, work_dir: Optional[Path] = None) -> Path:
     """
     import soundfile as sf
 
-    from backend.media_io import _ffmpeg_bin
+    from backend.common.media_io import _ffmpeg_bin
 
     audio = Path(audio)
     info = sf.info(str(audio))

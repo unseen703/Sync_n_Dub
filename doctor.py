@@ -92,7 +92,7 @@ def check_gpus() -> Row:
 
 
 def check_ffmpeg() -> Row:
-    from backend.media_io import _ffmpeg_bin, _ffprobe_bin
+    from backend.common.media_io import _ffmpeg_bin, _ffprobe_bin
     ff = _ffmpeg_bin()
     fp = _ffprobe_bin()
     if not ff or not fp:
@@ -110,7 +110,7 @@ def check_ffmpeg() -> Row:
 
 def check_onnxruntime_cuda() -> Row:
     try:
-        from backend.gpu import ensure_onnxruntime_cuda
+        from backend.common.gpu import ensure_onnxruntime_cuda
         ok = ensure_onnxruntime_cuda()
     except Exception as e:
         return _row(WARN, "onnxruntime CUDA EP", f"could not check: {e}")

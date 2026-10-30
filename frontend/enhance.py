@@ -61,7 +61,7 @@ def _n_gpus() -> int:
     side and honours `CUDA_VISIBLE_DEVICES` the same way, so the two agree.
     """
     try:
-        from backend.gpu import visible_cuda_devices
+        from backend.common.gpu import visible_cuda_devices
         return len(visible_cuda_devices()) or 1
     except Exception:                                     # noqa: BLE001
         return 1

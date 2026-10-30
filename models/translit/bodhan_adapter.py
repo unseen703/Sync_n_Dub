@@ -15,7 +15,7 @@ import logging
 import time
 from typing import List, Optional
 
-from .._bodhan import BodhanClientMixin
+from backend.common.bodhan import BodhanClientMixin
 from .base import BaseTransliterator, TranslitRequest, TranslitResult, TranslitSegment
 
 log = logging.getLogger(__name__)

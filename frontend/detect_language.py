@@ -53,7 +53,7 @@ def _wav_b64(src: str | Path, *, offset_s: float, duration_s: float) -> Optional
     Returns None on any failure: a too-short file, a seek past the end that
     the retry at 0 cannot save, a missing codec.
     """
-    from backend.media_io import _ffmpeg_bin
+    from backend.common.media_io import _ffmpeg_bin
 
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
         tmp_path = tmp.name
@@ -117,7 +117,7 @@ def fetch_remote_audio_clip(
     except ImportError:                                      # pragma: no cover
         return None
 
-    from backend.media_io import _ffmpeg_bin
+    from backend.common.media_io import _ffmpeg_bin
 
     try:
         ffmpeg_dir = str(Path(_ffmpeg_bin()).parent)
@@ -159,7 +159,7 @@ def detect_language_llm(audio_b64: str) -> Optional[Dict[str, str]]:
     Returns `{"language": "Hindi", "code": "hi"}`, or None on any failure
     (missing key, network, bad parse).
     """
-    from backend.llm import LLMClient
+    from backend.common.llm import LLMClient
 
     try:
         client = LLMClient(model=DETECT_MODEL, max_tokens=64)

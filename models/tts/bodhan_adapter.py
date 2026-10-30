@@ -14,7 +14,7 @@ import time
 from pathlib import Path
 from typing import List, Optional
 
-from .._bodhan import BodhanClientMixin
+from backend.common.bodhan import BodhanClientMixin
 from .base import BaseTTS, TTSRequest, TTSResult, TTSSegment
 
 log = logging.getLogger(__name__)

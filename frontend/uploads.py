@@ -64,7 +64,7 @@ def probe_file(path: Path) -> Dict[str, Any]:
     duration would bound the range picker at nothing and quote a 0-second
     render.
     """
-    from backend.media_io import _ffprobe_bin
+    from backend.common.media_io import _ffprobe_bin
 
     ff = _ffprobe_bin()
     if not ff:

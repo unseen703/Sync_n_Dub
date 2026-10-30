@@ -328,7 +328,7 @@ def _ensure_face_genderage(device: str = FACE_GENDER_DEVICE):
         providers = (["CUDAExecutionProvider"] if device.startswith("cuda")
                      else ["CPUExecutionProvider"])
         if device.startswith("cuda"):
-            from backend.gpu import ensure_onnxruntime_cuda
+            from backend.common.gpu import ensure_onnxruntime_cuda
             ensure_onnxruntime_cuda()
         app = FaceAnalysis(name="buffalo_l",
                            allowed_modules=("detection", "genderage"),

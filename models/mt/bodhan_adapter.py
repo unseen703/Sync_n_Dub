@@ -22,7 +22,7 @@ from typing import List, Optional
 
 from backend.sanitize import sanitize_mt_output
 
-from .._bodhan import BodhanClientMixin
+from backend.common.bodhan import BodhanClientMixin
 from .base import BaseMT, MTRequest, MTResult, MTSegment
 
 log = logging.getLogger(__name__)

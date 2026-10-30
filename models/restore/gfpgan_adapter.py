@@ -212,7 +212,7 @@ class GFPGANRestore(BaseRestore):
             return RestoreResult(model_name=self.name, out_video=out,
                                  error="; ".join(blockers))
 
-        from backend.media_io import _ffmpeg_bin, _ffprobe_bin
+        from backend.common.media_io import _ffmpeg_bin, _ffprobe_bin
         ffmpeg = _ffmpeg_bin() or "ffmpeg"
         ffprobe = _ffprobe_bin() or "ffprobe"
         py = self.python_bin

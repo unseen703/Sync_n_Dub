@@ -31,7 +31,7 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-from backend.media_io import probe_video as _probe_video
+from backend.common.media_io import probe_video as _probe_video
 from .base import (MAX_RENDER_HEIGHT, BaseLipSync, LipSyncRequest,
                    LipSyncResult, cap_resolution, resolve_env_python,
                    resolve_vendor_repo, run_streaming)

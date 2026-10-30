@@ -28,7 +28,7 @@ import tempfile
 from pathlib import Path
 from typing import Optional, Tuple
 
-from backend.media_io import probe_video as _probe_video
+from backend.common.media_io import probe_video as _probe_video
 from . import coords
 from .base import (MAX_RENDER_HEIGHT, BaseLipSync, LipSyncRequest,
                    LipSyncResult, cap_resolution, resolve_env_python,
@@ -366,7 +366,7 @@ def _nb_frames(path: Path) -> Optional[int]:
     the cache it validates saves. ffmpeg-re-encoded cuts carry `nb_frames`;
     when a file does not, validation is skipped rather than guessed.
     """
-    from backend.media_io import _ffprobe_bin
+    from backend.common.media_io import _ffprobe_bin
     ffprobe = _ffprobe_bin()
     if not ffprobe:
         return None

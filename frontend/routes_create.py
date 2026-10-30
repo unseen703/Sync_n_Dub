@@ -508,7 +508,7 @@ async def create_job(req: JobRequest, response: Response) -> Dict[str, Any]:
     source_input = (meta.get("source_path")
                     or meta.get("webpage_url") or req.url)
 
-    from backend.jobs import allocate, new_job_id
+    from backend.pipeline.jobs import allocate, new_job_id
     job_id = new_job_id(source_input, cfg)
     job = await run_in_threadpool(
         allocate, DATA_DIR, source_input, cfg,

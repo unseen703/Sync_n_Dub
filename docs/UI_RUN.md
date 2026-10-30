@@ -19,7 +19,7 @@ tables are the code's own output, not a transcription.
                                         │  ~30 kwargs; everything else keeps
                                         │  the pipeline's OWN default
                                         ▼
-                                  scripts/ui_run_job.sh   (DETACHED)
+                                  ui_run_job.sh   (DETACHED)
                                         │  the only launcher exporting the
                                         │  libstdc++ preload — a bare Popen
                                         │  walks stage 9h into the cv2 trap
@@ -96,7 +96,7 @@ to stage 9d rather than an addition — it would override the voice just cast.
 
 ## 4. Every setting a UI run sets
 
-Everything not listed here keeps `backend/pipeline.py`'s own default, which
+Everything not listed here keeps `backend/pipeline/pipeline.py`'s own default, which
 is deliberate: the form sets only what it means.
 
 | kwarg | stage | value | note |
@@ -162,7 +162,7 @@ succeeds. The signal is `extra.tts.errors == len(segments)`, not the exit code.
 **`asr_language` is pinned to `en`,** because this project dubs English into
 Indic languages and per-turn detection produced one lecture in four scripts.
 
-**`tts_apply_stretch=False` is not optional.** `backend/tts.py` fits each clip
+**`tts_apply_stretch=False` is not optional.** `backend/tts/tts.py` fits each clip
 to its slot and the timing plan fits it again; leaving it on stretches every
 clip twice to the same target. `mix_clip_source="raw"` is the other half.
 

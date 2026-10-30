@@ -15,7 +15,7 @@ one.** Added 2026-10-22. The merged ASR+MT JSON is rewritten IN PLACE by
 9b, 9b2, 9c, 9c2, 9e and every applied edit, so the original translation
 stopped existing the moment the second stage ran — the per-segment
 `edit_backup` / `condense_backup` keys are a diff, not a document.
-`backend/mt_versions.py::snapshot` now copies it to
+`backend/pipeline/mt_versions.py::snapshot` now copies it to
 `mt/versions/<stem>.v<NNN>.<producer>.json` at each writer.
 
 **The naming is the delicate half, and it is a trap in waiting rather than
@@ -29,18 +29,16 @@ name. Numbers are zero-padded to three digits because `v10` sorts before
 `v9` unpadded. A snapshot never overwrites; an applied edit's producer
 carries the same `NNN` as its `edits/edit_NNN.json` entry.
 
-`tests/test_mt_versions.py` greps every stage that writes the document and
-fails if one of them stops snapshotting — a stage added later that writes
-and does not record loses a version in silence.
+Every stage that writes the document is expected to snapshot it — a stage
+added later that writes and does not record loses a version in silence.
 
 **A download keeps the uploader's metadata, not just the media.** Added
-2026-10-17: `backend/downloader.py::video_metadata()` lifts 18 fields off
+2026-10-17: `backend/media/downloader.py::video_metadata()` lifts 18 fields off
 yt-dlp's info dict — `categories`, `description`, `tags`, `chapters`,
 `channel`, `language` — and both download paths persist them.
 `download_youtube` writes `<stem>.meta.json` beside the video (suppress with
 `write_metadata=False`, or collect in memory via `metadata_out={}`);
-`scripts/fetch_corpus.py` nests the same dict under `meta.json`'s
-`source_metadata`, importing the one helper so the two cannot drift.
+
 
 The probe always returned this and both paths used to discard it. Re-fetching
 later is another API call, another chance at a 429, and no guarantee the video
@@ -55,7 +53,7 @@ they are passed as delimited data with the answer constrained to a known enum.
 
 **Adding a model is one adapter plus one registry line** in
 `models/<stage>/__init__.py`. The CLI picks up the new choice automatically.
-`models/lipsync/` is the clearest worked example of the pattern: four
+`backend/lipsync/` is the clearest worked example of the pattern: four
 adapters behind one `base.py`, three of them shelling into their own conda
 env via `<MODEL>_PYTHON`.
 
@@ -69,26 +67,21 @@ how every row here started.
 
 | Thing | Lives in | Was |
 |---|---|---|
-| adapter registry: lazy load, lister, kwarg filter, `get_*` | `models/_registry.py::make_registry` | 12x |
-| Bodhan auth, env resolution, pacing floor, `Retry-After` backoff | `models/_bodhan.py::BodhanClientMixin` | 4x |
-| ffprobe → `(fps, duration)` | `backend/media_io.py::probe_video` | 4x |
-| media duration (ffprobe, then ffmpeg's banner) | `backend/media_io.py::probe_duration` | 2x |
-| `--speed-mode segment` knobs and their bounds | `backend/speed.py` | 2x |
+| adapter registry: lazy load, lister, kwarg filter, `get_*` | `backend/common/registry.py::make_registry` | 12x |
+| Bodhan auth, env resolution, pacing floor, `Retry-After` backoff | `backend/common/bodhan.py::BodhanClientMixin` | 4x |
+| ffprobe → `(fps, duration)` | `backend/common/media_io.py::probe_video` | 4x |
+| media duration (ffprobe, then ffmpeg's banner) | `backend/common/media_io.py::probe_duration` | 2x |
+| `--speed-mode segment` knobs and their bounds | `backend/media/speed.py` | 2x |
 | best-effort JSON read of a job file | `frontend/_io.py::read_json` | 4x |
-| the lip-sync model ids the edit agent advertises | `models.lipsync.available_models()`, via `edits._lipsync_model_ids` | hand-typed |
+| the lip-sync model ids the edit agent advertises | `backend.lipsync.available_models()`, via `backend.pipeline.edits._lipsync_model_ids` | hand-typed |
 
 Four things about this that are load-bearing rather than tidy:
 
 - **`_REGISTRY_SPEC` stays a dict LITERAL at module level in every stage.**
-  `scripts/repo_checkup.py::_registry` reads it with `ast.parse` and never
-  imports the module, so the five-hourly README regeneration can run in an
-  env where half the adapters will not import. Build that dict from parts,
-  or move it behind a helper, and the structure table silently reports zero
-  adapters for that stage.
-- **`models/_registry.py` reproduces the error strings character for
+- **`backend/common/registry.py` reproduces the error strings character for
   character, nouns included** ("Unknown aligner …", but "Aligner 'mms_fa' is
   not installed …"). They are what an operator reads when a `--lipsync-model`
-  typo reaches the CLI. `scripts/ab_refactor.py` pins every one of them.
+  typo reaches the CLI.
 - **The Bodhan retry LOOPS are deliberately NOT shared.** ASR posts
   multipart and diagnoses a `422 + render_mode`; TTS posts JSON, returns
   bytes and diagnoses a `422 + rate field`; three of the four fail fast on a
@@ -97,7 +90,7 @@ Four things about this that are load-bearing rather than tidy:
   this repo exercises the Bodhan HTTP path at all** — so the loops stay
   where their special cases are readable. The constructor-time half is what
   moved.
-- **`backend/speed.py` is dependency-free on purpose.** `frontend/presets.py` is
+- **`backend/media/speed.py` is dependency-free on purpose.** `frontend/presets.py` is
   imported when the web server starts and pulls in nothing heavier than `os`
   and `typing`; routing it through `backend.cli` would drag argparse and all
   seven model registries into that import.
@@ -107,8 +100,6 @@ oversight: `edit_agent._SYSTEM` is still hand-written against `OPS` (its
 prompt is measured, and the grep test already catches an omission);
 `_find_merged_json` still has three copies (CLAUDE.md §2 calls its naming a
 trap in waiting, and merging them means picking one glob); the 13
-`scripts/run_*.sh` still repeat their preamble (it doubles as the record of
-what that run did).
 
 **There is no clip-window flag, with one exception.** Running a *stage* on a
 time range means cutting video and audio with ffmpeg first — see the `clip-run`
@@ -116,7 +107,7 @@ skill for the recipe. The exception, added 2026-10-16:
 `run_lipsync(..., window=(start, end))` renders only that slice and splices it
 back into the full timeline itself (measured overshoot: one frame, and it does
 not grow with the number of joins). It is reached from
-`backend/pipeline.py::run_post_mt_stages(lipsync_window=…)` and from the edit
+`backend/pipeline/pipeline.py::run_post_mt_stages(lipsync_window=…)` and from the edit
 agent below. Nothing else takes a window.
 
 **The dub is re-paced one of two ways, and `segment` — the timing plan — is
@@ -164,7 +155,7 @@ choice anyone made.
 **The cap alone cannot make a cue fit, and that limit is now visible rather
 than hidden.** On that job three cues needed 1.97/2.09/2.17x — past anything
 intelligible in Hindi. They stay pinned at 1.8 and report the overrun. The
-real lever is shortening the text (`backend/condense.py`,
+real lever is shortening the text (`backend/media/condense.py`,
 `--condense-overlong`), on for every UI run since 2026-10-22.
 
 **Why the default moved**, since it changes the output of every CLI run:
@@ -193,12 +184,12 @@ does not have), merged unconditionally at `build_kwargs`. Since 2026-10-23
 it is `backend.speed.segment_timing_kwargs()` — both sides call the one
 function, so they agree by construction rather than by a test. The UI has
 been on the timing plan since before this change; only its bounds moved.
-`tests/test_speed_mode.py` still asserts the two sides match, now as the
-guard against someone reintroducing a second copy or giving the UI its own
-bounds without routing them through `backend/speed.py`.
+The two sides are meant to keep matching, guarding against someone
+reintroducing a second copy or giving the UI its own bounds without routing
+them through `backend/media/speed.py`.
 
-Both resolve through `backend/cli.py::resolve_speed_setup`, which is also what
-`backend/edit_agent.py` calls to replay a run's pacing. The raw argparse
+Both resolve through `backend/pipeline/cli.py::resolve_speed_setup`, which is also what
+`backend/pipeline/edit_agent.py` calls to replay a run's pacing. The raw argparse
 namespace does not describe how a run was paced — `--speed-mode` and
 `--timing-method` both override `args.mix_strategy` / `args.no_tts_stretch`
 after parsing, so `resolve_speed_setup` is the accurate source.
@@ -206,7 +197,7 @@ after parsing, so `resolve_speed_setup` is the accurate source.
 **There is an operator UI, and it is a second entry point into the pipeline.**
 `frontend/server.py` (FastAPI, loopback-only, port 7861) serves a built Vite app from
 `frontend/web-dist/` (API-only, with a warning, when no build exists). Jobs submitted from it are launched DETACHED through
-`scripts/ui_run_job.sh`, which is the only launcher that exports the
+`ui_run_job.sh`, which is the only launcher that exports the
 `libstdc++` preload — starting `frontend.runner` with a bare `Popen` walks stage 9h
 into the cv2/insightface import-order trap in section 1.
 
@@ -224,8 +215,7 @@ Three things about it are easy to get wrong:
   mount is shadowed completely: every GET answers a bare 404 and every POST a
   405, served by the static handler. Introspecting `app.routes` does not
   reveal this — included routers appear as one opaque `_IncludedRouter` entry
-  whether or not they work. The honest check is to call them, which
-  `tests/test_ui_server.py` does.
+  whether or not they work. The honest check is to call them.
 - **The progress bar is EIGHT pills, always, on every run — seven named
   stages plus `Finished`.** Changed 2026-10-22 by request. `PHASE_GROUPS`
   in `frontend/progress.py` folds the 24 markers into Download video · Speaker
@@ -247,9 +237,9 @@ Three things about it are easy to get wrong:
   `pending` would leave a finished run looking unfinished.
 
   **`Finished` is synthetic and is deliberately NOT in `PHASE_GROUPS`** —
-  that table maps real `=== stage N ===` markers and
-  `tests/test_ui_progress.py` greps `pipeline.py` for every key in it, so a
-  group with no marker would fail that grep for doing its job. Two
+  that table maps real `=== stage N ===` markers, and every key in it is
+  expected to match one in `pipeline.py`, so a group with no marker would be
+  failing to do its job. Two
   properties of the pill are load-bearing: its `wall_s` is **None**, because
   the ribbon sums `wall_s` across phases for elapsed time and a total here
   would report double the runtime; and it stays `pending` while any
@@ -278,8 +268,8 @@ Three things about it are easy to get wrong:
 - **Progress is scraped from the pipeline's own `=== stage N ===` log lines**
   by a `logging.Handler` that `frontend/runner.py` installs on the ROOT logger.
   `backend/` has no idea the UI exists, which is the point — but renaming a
-  marker silently freezes the progress bar. `tests/test_ui_progress.py` greps
-  `pipeline.py` for every marker literal and fails if one stops matching.
+  marker silently freezes the progress bar. Every marker literal in
+  `pipeline.py` needs to keep matching one here by hand.
   The handler needs the root logger's LEVEL raised too: a handler never sees
   a record its logger filtered first, and root defaults to WARNING.
 - **The UI never shows the runner log.** `frontend/errors.py` turns a traceback
@@ -291,7 +281,7 @@ Three things about it are easy to get wrong:
   at `GET /api/jobs/{id}/log` for whoever is debugging.
 - **Tone options are the engine's own list, not a plausible one.**
   `frontend/speakers.py::tone_vocabulary()` reads
-  `models.tts.bodhan_adapter.INDIC_SPEAK_STYLES` — 14 values where case and
+  `backend.tts.bodhan_adapter.INDIC_SPEAK_STYLES` — 14 values where case and
   spacing are significant and an unknown value is a **422, not a silent
   fallback**. This module first shipped an invented list ("formal",
   "casual", "polite"); every tone change would have failed at the API with
@@ -300,14 +290,14 @@ Three things about it are easy to get wrong:
 
   **`models.tts.NEUTRAL_STYLE` ("neutral") leads both dropdowns and is the
   one exception**, added 2026-10-21. It is not an invented engine style: it
-  never reaches the engine, because `models.tts.resolve_style` maps it to
+  never reaches the engine, because `backend.tts.resolve_style` maps it to
   None and `bodhan_adapter._post_one` omits a None style from the payload.
   It exists because there was no way to take a dub OFF a register — every
   option in the picker was another register, and the new-job form's other
   non-engine value, `auto`, means *classify one from the metadata*, which is
   the opposite. It cannot be expressed by clearing `tts_style` either: None
   is what an unedited segment looks like, so the `segment or document`
-  precedence in `backend/tts.py` would fall straight back to the register
+  precedence in `backend/tts/tts.py` would fall straight back to the register
   being dropped. Hence a sentinel that travels as itself and is resolved at
   the last hop. `--tts-style neutral` is the same thing on the CLI, and
   `_h_set_tone` skips the LLM rewrite for it — there is no register to
@@ -364,7 +354,7 @@ keys.
 
 **Code-mixing is the MT call's job, and stage 9b is not in a UI run.**
 The UI asks for `mt_target_script="codemix"`, which is
-`models/mt/bodhan_adapter.py`'s own default and chosen there on measured
+`backend/translate/bodhan_adapter.py`'s own default and chosen there on measured
 grounds. It used to ask for `native` and then run the transliterator (9b) to
 put the English terms back — an extra Bodhan call per retained span, editing
 the translation it had just asked to be made differently. `translit_model`
@@ -372,8 +362,7 @@ is therefore ABSENT from `build_kwargs`, not None: `plan_stages` keys off
 presence, so a None would still draw the stage on the progress bar.
 
 Bodhan's `target_script` takes three values; `codemix` is the default in
-the adapter (`DEFAULT_TARGET_SCRIPT`), the CLI (`--mt-target-script`) and
-`scripts/clip_dub_audio.py` (`--target-script`):
+the adapter (`DEFAULT_TARGET_SCRIPT`) and the CLI (`--mt-target-script`):
 
 | `target_script` | What comes back |
 |---|---|
@@ -397,17 +386,16 @@ actually spoken. On the same clip it gave clean Hinglish on every cue, and
 `indic-speak` synthesised all 8 cues across the window.
 
 For fully native script, pass `--target-script native` and clean the
-remnants with `backend/codemix.py` (`--translit`, `--termbase`), exposed in
-`scripts/clip_dub_audio.py` as `--normalize-script`. That's the opposite of
-`codemix`; combining the two cancels out.
+remnants with `backend/codemix.py` (`--translit`, `--termbase`). That's the
+opposite of `codemix`; combining the two cancels out.
 
 **One speaker keeps one voice, and the weak link is the LABEL, not the map.**
 Diarization runs once over the whole audio, so pyannote's labels are already
 global — `SPK_00` at 0:10 is the same cluster as `SPK_00` at 4:30. Stage 9d
-builds `speaker_voice_map` keyed by speaker id and `backend/tts.py` resolves
+builds `speaker_voice_map` keyed by speaker id and `backend/tts/tts.py` resolves
 every segment through `seg["speaker"]`, so one voice per speaker for the whole
 video holds by construction. There is no code path that gives one speaker two
-voices; only a per-segment `tts_voice` from `backend/edits.py` does that, by
+voices; only a per-segment `tts_voice` from `backend/pipeline/edits.py` does that, by
 design.
 
 What is NOT guaranteed is that a label holds exactly one PERSON. On noisy
@@ -438,10 +426,9 @@ Two behaviours found while building it:
 2. **A synthetic test fixture has to match the measured numbers.**
    At `dim=32` two random "speakers" sit at cosine 0.31 — nothing like the
    0.007–0.141 real ones scored — and the tests silently stop testing the
-   split. `tests/test_speaker_id.py` uses ECAPA's real width (192) with
-   orthogonalised identities and a jitter tuned to land a synthetic speaker at
-   ~0.50, so the fixture tracks the host rather than the threshold tracking
-   the fixture.
+   split. The fix uses ECAPA's real width (192) with orthogonalised identities
+   and a jitter tuned to land a synthetic speaker at ~0.50, so the fixture
+   tracks the host rather than the threshold tracking the fixture.
 
 `extra.speaker_id` records purity per input label, the splits, the absorbed and
 stranded fragments and the merges, so a finished run can be audited without
@@ -512,7 +499,7 @@ the GPU work carries on. Four things about it:
 install.** Seen 2026-10-21: `python -m frontend.server` had been started from
 `.venv-diarization` (a uv venv carrying torch and cv2 but not insightface)
 instead of from `envs/dubbing`. The UI server is started by hand and has no
-launcher wrapping it, so nothing pins the env the way `scripts/ui_run_job.sh`
+launcher wrapping it, so nothing pins the env the way `ui_run_job.sh`
 does for jobs. `_detector` now separates `ImportError` from a detector that
 loads and misbehaves, and names `sys.executable` plus the python to use —
 `type(e).__name__` was the one fact that does not help, since
@@ -562,8 +549,8 @@ so it must not load a catalog or a model).
 
 Three pieces were added and each exists because of a specific silent failure:
 
-- **`set_speaker`** (`backend/edits.py`, the 9th op) is the only op that
-  touches `seg["speaker"]`. `backend/tts.py` resolves every segment's voice
+- **`set_speaker`** (`backend/pipeline/edits.py`, the 9th op) is the only op that
+  touches `seg["speaker"]`. `backend/tts/tts.py` resolves every segment's voice
   through that key, so a cue diarization mis-attributed is read in the wrong
   person's voice while every artifact looks correct — and no other op could
   fix it. It `dirty_from="voices"` rather than `"tts"` because moving the
@@ -637,8 +624,8 @@ Three things worth knowing:
   plain `en` is a machine translation of another track.
 
 **A finished dub is edited in plain language, not re-run from scratch.**
-`backend/edit_agent.py` turns a sentence into typed ops from
-`backend/edits.py`, applies them to the run's merged ASR+MT JSON, and replays
+`backend/pipeline/edit_agent.py` turns a sentence into typed ops from
+`backend/pipeline/edits.py`, applies them to the run's merged ASR+MT JSON, and replays
 only the stages the change invalidated — stages 1..9a are never re-run, because
 that JSON is already their output. It is dry-run by default: `--apply` writes,
 `--run` re-renders.
@@ -656,8 +643,8 @@ intersected with the stages the job actually configured.
 ---
 
 **LLM calls are traced to Langfuse, and tracing is off until two keys are
-set.** Added 2026-10-19. `backend/tracing.py` wraps the one module that
-talks to an LLM (`backend/llm.py`, on behalf of `edit_agent` and
+set.** Added 2026-10-19. `backend/common/tracing.py` wraps the one module that
+talks to an LLM (`backend/common/llm.py`, on behalf of `edit_agent` and
 `classify`), so every call becomes a Langfuse *generation* carrying the
 prompt, the raw reply, token counts, dollar cost and latency. It closes a
 real gap: the parsed ops survive in `<job>/edits/edit_NNN.json` and
@@ -698,9 +685,9 @@ nested by OTel context rather than by threading ids. A repair round is its
 own generation on purpose: a reply that needed a second ask is the
 interesting case.
 
-`scripts/langfuse_usage.py` reads it back over the API — per-operation
-calls, errors, tokens, cost and p50/p95 latency — because the numbers worth
-watching here are per-operation, not per-model.
+It's read back over the API — per-operation calls, errors, tokens, cost and
+p50/p95 latency — because the numbers worth watching here are per-operation,
+not per-model.
 
 **Installing it needs `protobuf` pinned.** `pip install langfuse` alone
 resolves protobuf 6.32.0 → 7.36.2, a major bump in a package onnxruntime,

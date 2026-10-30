@@ -12,7 +12,7 @@ holds the incident history.
   the long-standing "only two commits; everything lives on this disk" warning
   no longer applies. `git status` is still busy — `data/` and a number of
   `scripts/` remain untracked — so check it rather than assuming either way.
-- `extra_margin` is not plumbed through `models/lipsync/musetalk_adapter.py` —
+- `extra_margin` is not plumbed through `backend/lipsync/musetalk_adapter.py` —
   that is the knob controlling the bottom of the face crop, and `bbox_shift`
   (which is exposed) only moves the top edge.
 - `data/jobs/` was emptied by the 2026-10-11 archive, which deleted the bulk
@@ -72,9 +72,7 @@ holds the incident history.
 
   **The prompt is `translate_agetn.prompt.txt`, read from disk, not a copy
   in the module.** The author wrote it; `_system_prompt()` fills in
-  `{{target_language}}` and sends it verbatim, and
-  `tests/test_condense.py` asserts distinctive lines from both halves of
-  the file still appear, so the two cannot drift. A short fallback exists
+  `{{target_language}}` and sends it verbatim. A short fallback exists
   only for a checkout that lost the file. It takes `{"segments": [...]}`
   and answers in the same shape — **always an array, even for one
   segment**, because a request whose shape changes with the batch size is
@@ -123,7 +121,7 @@ holds the incident history.
   rows. A wrong slug degrades to "no shortening", so it cannot break a run
   — which is exactly why it can stay wrong unnoticed. `extra.condense.error`
   and the Langfuse trace are where it shows. Confirm once with the curl in
-  `backend/condense.py`'s header before trusting a dub's timing to it.
+  `backend/media/condense.py`'s header before trusting a dub's timing to it.
 
 - **The stretch cap is ±0.20 (0.8x-1.2x) and widening it widened the
   DOUBLE-fit too.** Raised from 0.10 on 2026-10-20 by request. It is a
@@ -134,22 +132,22 @@ holds the incident history.
   meet a timing plan that fits it again.
 
 - **Two layers can fit the same clip to the same slot, and both default on
-  is a double stretch.** `backend/tts.py` stretches each clip to
+  is a double stretch.** `backend/tts/tts.py` stretches each clip to
   `target_duration_s` (±`--tts-max-stretch`, **default 0.20 since
   2026-10-20** — a ± FRACTION, so 0.20 clamps every clip to 0.8x-1.2x speed
-  via `backend/stretch.py:378`'s `max(1-cap, min(1+cap, ratio))`; it was 0.10
+  via `backend/media/stretch.py:378`'s `max(1-cap, min(1+cap, ratio))`; it was 0.10
   and was widened by request), and a timing plan
   fits it again in the mix. `--speed-mode segment` and `--timing-method`
   therefore both set `tts_apply_stretch=False` and `mix_clip_source=raw`.
   The default `global` path has its own version of this: `global_tempo` +
   `clip_source=auto` reads the already-stretched `tts_audio` and then applies
   a global `atempo` on top. That is long-standing behaviour, documented in
-  `backend/mix.py`'s docstring, and `--mix-clip-source raw` is the way out.
+  `backend/media/mix.py`'s docstring, and `--mix-clip-source raw` is the way out.
 - **Per-segment TTS overrides exist now, and only some engines honour them.**
-  `backend/edits.py` writes `tts_voice`, `tts_style`, `tts_rate_override`,
+  `backend/pipeline/edits.py` writes `tts_voice`, `tts_style`, `tts_rate_override`,
   `tts_max_stretch` and `tts_reference_audio` onto individual segments, and
-  `backend/tts.py` reads all five. But `style` reaches only the Bodhan adapter
-  (`models/tts/bodhan_adapter.py` puts it in `instructions`), and `rate` only
+  `backend/tts/tts.py` reads all five. But `style` reaches only the Bodhan adapter
+  (`backend/tts/bodhan_adapter.py` puts it in `instructions`), and `rate` only
   engines with `supports_rate = True` — since Edge was removed on 2026-10-17
   that is Bodhan alone. IndicF5 read neither and was removed on 2026-10-28,
   so a tone edit now reaches the delivery on every live engine — but a job on
@@ -187,9 +185,9 @@ holds the incident history.
   the residual within `--tts-max-stretch`. `--no-tts-stretch` gives a clean
   method-1-vs-method-2 comparison, and the agent says so in its plan rather
   than letting it pass silently.
-  `tests/test_edit_agent.py` asserts `backend/tts.py` still reads every key
-  `backend/edits.py` writes — the cheap guard against this pair drifting
-  back into the dead-code shape that put a female voice on a male lecture.
+  Keeping `backend/tts/tts.py` reading every key `backend/pipeline/edits.py` writes is a
+  manual check now — it's the cheap guard against this pair drifting back
+  into the dead-code shape that put a female voice on a male lecture.
 - **The default output resolution is 1080p, and `resize_factor` is resolved
   per source rather than fixed.** Changed 2026-10-22 by request, from the
   flat `resize_factor=2` of 2026-10-18. The rule, in
@@ -235,7 +233,7 @@ holds the incident history.
 
   Still no CLI flag; it travels as an adapter kwarg, so the adapter default
   is the only place that reaches the CLI, the UI runner, the edit agent and
-  `experiment.py` at once. `backend/cli.py` only ever puts `batch_size` and
+  `experiment.py` at once. `backend/pipeline/cli.py` only ever puts `batch_size` and
   `inference_steps` into `adapter_kwargs`, and the UI's replay
   (`edit_agent._rerun_lipsync_only`) only `batch_size` — so **every UI render
   takes the ceiling**. An explicit `resize_factor=N` still wins untouched;
@@ -285,8 +283,8 @@ holds the incident history.
   `frontend/lipsync_models.py` is now the single source: labels, measured bands,
   per-model caveats, and one `normalise()` (longest key first) replacing all
   three loops. `presets.LIPSYNC_FACTORS`, `cost.LIPSYNC_RATES`,
-  `spec.LIPSYNC_WORDS` and `/api/options` all derive from it, and
-  `tests/test_ui_lipsync_models.py` fails on drift in either direction.
+  `spec.LIPSYNC_WORDS` and `/api/options` all derive from it, and need to be
+  kept in step with it by hand.
   Note `lipgan`'s cost midpoint moved 4.0 → 10.0: `cost.py` and `presets.py`
   had carried two different guesses for it, and deriving one from the other
   had to pick the band.
@@ -343,15 +341,15 @@ holds the incident history.
   `latentsync_unet.pt`, because a vendor checkout from before the removal
   may still hold 1.6's weights under that name.
 
-- **The lip-sync upstreams live under `models/lipsync/vendor/`, not
+- **The lip-sync upstreams live under `backend/lipsync/vendor/`, not
   `third_party/`.** Moved 2026-10-23 by request — ~21 GB (LatentSync 12G,
   MuseTalk 8.7G, Wav2Lip 517M) — so nothing under `models/` reaches outside
-  it. `scripts/move_lipsync_vendor.sh` performs it; `--dry-run` reports
-  without touching anything.
+  it. A one-off move script performed it, supporting `--dry-run` to report
+  without touching anything; the script is no longer in the repo.
 
   **The code resolves either location, by EXISTENCE rather than
-  preference** (`models/lipsync/base.py::resolve_vendor_repo`: explicit →
-  env → `models/lipsync/vendor/<name>` → `third_party/<Name>`). That is
+  preference** (`backend/lipsync/base.py::resolve_vendor_repo`: explicit →
+  env → `backend/lipsync/vendor/<name>` → `third_party/<Name>`). That is
   deliberate rather than transitional tidiness: the move is a shell command
   an operator runs, so between the code change and the move — and on any
   checkout where it never happened — the old path is still the right
@@ -364,7 +362,7 @@ holds the incident history.
      LatentSync's 4.7 GB `latentsync_unet.pt` escaped git by location, not
      by pattern. Under `models/` it became trackable for the first time —
      one `git add -A` from a 4.7 GB blob that cannot be removed without
-     rewriting history. `*.pt` and `models/lipsync/vendor/` were added to
+     rewriting history. `*.pt` and `backend/lipsync/vendor/` were added to
      `.gitignore` first, and the move script **refuses to run** if that
      ignore is not live.
   2. **Wav2Lip's checkpoint was a second hardcoded path.** `DEFAULT_CKPT`
@@ -384,7 +382,7 @@ holds the incident history.
   adapters" and listed two), so the adapters fell back to `sys.executable` —
   the `dubbing` env, where `import diffusers` fails. A blank looks harmless
   because `LIPGAN_PYTHON` / `WAV2LIP_PYTHON` legitimately are: those two DO
-  run in `dubbing`. `models/lipsync/base.py::resolve_env_python` now tries the
+  run in `dubbing`. `backend/lipsync/base.py::resolve_env_python` now tries the
   explicit argument, then `<MODEL>_PYTHON`, then the **sibling conda env**
   (`<prefix>/envs/<name>/bin/python`, derived from `sys.executable` the same
   way `media_io._ffmpeg_bin()` finds the running env), then `sys.executable`
@@ -419,7 +417,7 @@ holds the incident history.
   people.
 
   **`run_lipsync(..., coord_list=…)` is the fix, added 2026-10-19 — and
-  NOTHING CALLED IT until 2026-10-22.** `backend/lipsync_targets.py::
+  NOTHING CALLED IT until 2026-10-22.** `backend/asd/lipsync_targets.py::
   build_coord_list` turns the tracker's face tracks plus TalkNet's per-frame
   scores into one box per frame and reaches MuseTalk through its own
   `--use_saved_coord` pickle, so nothing upstream is forked. Measured on the
@@ -427,19 +425,19 @@ holds the incident history.
   confirmed speaker across **three different tracks**, all 37 landmarked with
   no fallback, 88 left untouched.
 
-  That measurement came from the tests and `scripts/lipsync_asd_gated.py`,
-  never from a pipeline run, and this entry used to stop at the paragraph
-  above — which read as "solved". Two things kept it unwired: the script
-  says it was "kept as a script rather than wired into the pipeline **so the
+  That measurement came from the tests and a standalone ASD-scoring script
+  (since removed), never from a pipeline run, and this entry used to stop at
+  the paragraph above — which read as "solved". Two things kept it unwired:
+  the script said it was "kept as a script rather than wired into the pipeline **so the
   comparison can be made before the default changes**" and that comparison
   was never acted on; and **stage 6 persisted the wrong shape**, since
   `assignments.json` is the Hungarian output (one mean score per diarized
   turn) while the coord list needs per track, per FRAME.
 
   Now: stage 6 writes `asd/<stem>.<model>.scores.npz`
-  (`backend/asd.py::save_scores_npz`) and `pipeline._asd_coord_list` reads
+  (`backend/asd/asd.py::save_scores_npz`) and `pipeline._asd_coord_list` reads
   it. A job with no npz logs a warning and degrades to the adapter's own
-  choice; `scripts/lipsync_asd_gated.py` re-scores for those.
+  choice; a standalone script used to re-score for those.
 
   **Two call sites, not one.** Stage 9h in `run_post_mt_stages`, and
   `edit_agent._rerun_lipsync_only` — which bypasses the post-MT chain
@@ -481,8 +479,8 @@ holds the incident history.
   `bbox_shift` is a no-op on this path: it is consumed inside the detection
   function being skipped, so the shift goes into `build_coord_list`'s own
   argument instead. Wav2Lip and LatentSync ignore `coord_list` rather than
-  half-honouring it. `scripts/clip_asd_musetalk_run.py` still does the older
-  shot-boundary workaround, and that gating still lives in the script.
+  half-honouring it. A standalone clip script (since removed) still did the
+  older shot-boundary workaround, with that gating living only in the script.
 - **The manifest is the only durable record of a run, and it used to be
   incomplete.** `_run_pipeline` calls `_jobs.allocate(config=…)` at startup,
   which OVERWRITES whatever the submitter wrote — so the UI's richer config
@@ -493,9 +491,9 @@ holds the incident history.
   and `edit_agent._config` all described a run with no resegmentation, no
   speaker refinement, no register, no emotion, no visemes and no face
   detector — none of which was true. Fixed 2026-10-17: the allocate config
-  now records every switch under the key name `plan_stages` reads, and
-  `tests/test_ui_backend_sync.py` greps both sides and fails on the
-  difference, so the two cannot drift apart again in silence.
+  now records every switch under the key name `plan_stages` reads, and the
+  two sides are meant to stay matched so they can't drift apart again in
+  silence.
 
 - **An edit replay used to re-pace the dub from argparse defaults, and on a
   UI job that silently cancelled the edit.** Fixed 2026-10-22.
@@ -517,7 +515,7 @@ holds the incident history.
   `segments[].target_duration_s` and lets the timing plan fit the same clip
   into the smaller slot — and `naive_slot` reads that field only when
   `use_target_duration` is set, which **defaults to False**.
-  `backend/timing.py` says so in its own docstring. So the replay ignored
+  `backend/media/timing.py` says so in its own docstring. So the replay ignored
   the shortened slot, re-fitted every clip to its untouched `end - start`,
   and the dub came back at exactly the original speed, at exit code 0, with
   the edit journalled as applied.
@@ -534,9 +532,9 @@ holds the incident history.
   recorded there verbatim for every job this UI has ever submitted, so jobs
   that predate the fix replay correctly too. `frontend/presets.plan_config` also
   records the pacing now, for everyone else.
-  `tests/test_ui_backend_sync.py` greps `SpeedSetup._fields` against
-  `plan_config`, so a field added to one and not the other fails loudly
-  instead of becoming a default on every replay.
+  `SpeedSetup._fields` and `plan_config` are meant to stay matched by hand,
+  so a field added to one and not the other doesn't silently become a
+  default on every replay.
 
 - **A re-run used to duplicate a stage row rather than reuse it.**
   `ProgressWriter._open` matched only a **pending** entry, so a second
@@ -565,7 +563,7 @@ holds the incident history.
      dub — every speaker, every line — in one Hindi male voice, with the
      predicted genders computed and discarded. An explicit `--voice-engine`
      overrides it.
-  2. **Edge is gone, not deprecated** — `models/tts/edge_adapter.py` is
+  2. **Edge is gone, not deprecated** — `backend/tts/edge_adapter.py` is
      deleted and `edge` is out of the registry. It spoke 11 of the 23
      languages offered here and had one voice per gender per language, so it
      could neither cover the catalog nor tell two same-gender speakers
@@ -600,13 +598,13 @@ holds the incident history.
 
   All 8 `REGISTER_STYLES` are members of the engine's 14
   `INDIC_SPEAK_STYLES` — they are declared in different modules and an
-  unknown style is a 422 on every segment, so `tests/test_register_to_tts.py`
-  asserts the subset along with the whole five-hop chain from metadata to
-  payload. **`--tts-style` defaults to None on the CLI**, and 9b1 fires only
+  unknown style is a 422 on every segment, so that subset and the whole
+  five-hop chain from metadata to payload need to be kept in sync by hand.
+  **`--tts-style` defaults to None on the CLI**, and 9b1 fires only
   on the literal `"auto"`, so CLI runs do not classify unless asked.
 
 - **Gender prediction is a THREE-WAY MAJORITY VOTE as of 2026-10-18.**
-  `backend/gender.py` runs all three and takes the majority:
+  `backend/asd/gender.py` runs all three and takes the majority:
 
   1. **wav2vec2-XLSR-53** (`alefiury/wav2vec2-large-xlsr-53-gender-
      recognition-librispeech`) over the speaker's reference clip.
@@ -688,12 +686,11 @@ holds the incident history.
   fell. The win is correctness, plus a fixed prefix a cache could reuse.
 
   The cost is drift risk, since `OPS` is generated and the prompt is
-  hand-written, so `tests/test_edit_agent.py` now greps every registered op
-  out of `OPS` and fails if the prompt omits it, and fails the other way if
-  the prompt advertises an op that does not exist.
+  hand-written, so every registered op in `OPS` needs to be checked by hand
+  against the prompt, in both directions.
 
-  That guard immediately paid: `set_speaker` has been registered in
-  `backend/edits.py` all along, but `op_catalogue()` advertised only eight
+  That check immediately paid off: `set_speaker` has been registered in
+  `backend/pipeline/edits.py` all along, but `op_catalogue()` advertised only eight
   of the nine ops, so the model was never told it could reattribute a line.
 
   **The JSON-mode finding is the one worth remembering.**
@@ -716,7 +713,7 @@ holds the incident history.
   (including `set_speaker`, `code_mix` term extraction and a correct refusal
   on an unknown speaker). The eighth, "make it a little faster", returns
   `set_speed` with no `factor` where the prompt asks it to return `{"ops":
-  []}` — `backend/edits.py` rejects that with "set_speed needs a positive
+  []}` — `backend/pipeline/edits.py` rejects that with "set_speed needs a positive
   `factor`", so it fails loudly rather than guessing a speed.
 
 - **Voice assignment falls back to target language + gender, and says so.**
@@ -739,7 +736,7 @@ holds the incident history.
   match, so the table needs no maintenance, only the clips do.
 
 - **Voice reference clips are RENDERED BY THE ENGINE, never downloaded.**
-  `backend/voices.py::assign_voices` ranks candidate voices by ECAPA cosine
+  `backend/tts/voices.py::assign_voices` ranks candidate voices by ECAPA cosine
   between the real speaker's clip and the catalog voice's own clip, found by
   convention at `data/voice_refs/<engine>/<voice>.wav`. All 45 `indic-speak`
   clips were rendered on 2026-10-17 and the term is now live — verified by
@@ -752,18 +749,17 @@ holds the incident history.
   1. **A clip of some other human filed under `Amit.wav` is worse than no
      clip at all.** The cosine then compares the speaker against the wrong
      timbre and returns a confident similarity, so the log looks like the
-     feature is working. `scripts/build_voice_refs.py` re-renders them; the
-     clips are not sourced from the internet. (A zero-shot engine whose
+     feature is working. A voice-ref script re-renders them when that
+     happens; the clips are not sourced from the internet. (A zero-shot engine whose
      "voices" ARE reference clips — IndicF5 takes `ref_audio_path` +
      `ref_text` — is a different catalog with a different provenance story,
      not more files in this directory. `load_voice_catalog("indicf5")`
      returns 0 voices today.)
-  2. `scripts/build_voice_refs.py` had no `load_dotenv()` call, so run
+  2. The voice-ref script had no `load_dotenv()` call, so run
      directly it saw no `BODHAN_TTS_KEY` and every render failed on auth —
      which reads like an upstream outage rather than a missing line. Fixed
-     2026-10-17. `backend/cli.py`, `edit_agent.py` and `experiment.py` each
-     call it for themselves, and a new entry point under `scripts/` needs
-     the same.
+     2026-10-17. `backend/pipeline/cli.py`, `edit_agent.py` and `experiment.py` each
+     call it for themselves, and a new entry point needs the same.
   Expect 429s throughout a full 45-voice run; the adapter backs off and the
   script is idempotent, so a re-run fills only the gaps.
 
@@ -792,7 +788,7 @@ holds the incident history.
 
   Face restoration was removed on 2026-10-17 (CodeFormer,
   `--restore codeformer`) and **is back, now as GFPGAN** in
-  `models/restore/`, with `backend/face_enhance.py` and the UI's enhance
+  `backend/restore/`, with `backend/restore/face_enhance.py` and the UI's enhance
   routes (`frontend/enhance.py`, `frontend/routes_enhance.py`). For reference, the old
   CodeFormer pass measured 386 s on 30 s / 747 frames of 720p (~13×
   realtime, ~770 MiB VRAM), roughly doubling a Wav2Lip run, and raised
@@ -800,21 +796,21 @@ holds the incident history.
 - **The 2026-10-17 cleanup pass.** (Moved from README 2026-10-26; the Edge
   removal is its own entry above.) Each item was verified unreferenced
   before deletion, and the suite passed either side of it.
-  - **`backend/jobs.py` lost its v1 half** (812 → 387 lines). Layout v1
+  - **`backend/pipeline/jobs.py` lost its v1 half** (812 → 387 lines). Layout v1
     only referenced artifacts in shared `data/<stage>/` folders, archived
     on 2026-10-11. `python -m backend.jobs` keeps `list` and `show`;
     `backfill` went with the layout it rebuilt.
-  - **The `pause_aware` stand-in in `backend/timing_advanced.py`** was
+  - **The `pause_aware` stand-in in `backend/media/timing_advanced.py`** was
     unreachable once `timing.plan_pause_aware` landed, and was removed with
     its dead fallback branch.
   - **Dead definitions** with zero references: `align.asr_result_from_json`,
     `codemix.CodemixSegment`, `llm.get_client`, `facepick.probe_face_size`,
     `timing_advanced._percentile` and `._split_groups_at`, and three unused
-    dataclass helpers in `models/faces/base.py`.
+    dataclass helpers in `backend/faces/base.py`.
   - **Six shell scripts.** `retry_wav2lip.sh`, `retry_latentsync.sh`,
     `run_musetalk.sh` and `persistent_lipsync_runner.sh` were one script
     pinned to a stem whose media the archive deleted;
-    `scripts/run_lipsync.sh <model> <stem>` replaces them.
+    a single `run_lipsync.sh <model> <stem>` entry point replaced them.
     `restore_nag_only.sh` and `fetch_nag.sh` were finished one-offs.
   - **`attach_voice_references` cried wolf.** It logged "ECAPA similarity
     term is INACTIVE" whenever one call attached zero clips — including
@@ -824,7 +820,7 @@ holds the incident history.
     beside `onnxruntime-gpu`, the CPU build wins silently
     (`get_available_providers()` still lists CUDA): 55.9 ms/infer versus
     6.0 ms. Now `onnxruntime-gpu`.
-  - **`models/asd/ts_talknet_adapter.py` didn't import.** The 2026-10-11
+  - **`backend/asd/ts_talknet_adapter.py` didn't import.** The 2026-10-11
     TalkNet fix split `_crop_track` and never updated this sibling, so
     `get_asd("ts_talknet")` raised the misleading "clone the upstream repo"
     error. It had also missed the int16 PCM rescale (entry above). Both

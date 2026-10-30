@@ -68,7 +68,7 @@ running on CPU here is usually an environment fault rather than a deliberate
 choice.
 
 **A card is "free" when it looks IDLE, not when it is empty.** Changed
-2026-10-22. `backend/gpu.py::free_devices` used to refuse any card carrying a
+2026-10-22. `backend/common/gpu.py::free_devices` used to refuse any card carrying a
 foreign compute process at all, which refused a run for a neighbour holding
 1117 MiB of **resident but idle** CUDA context at 0% utilisation. It is now a
 load test: utilisation under `GPU_BUSY_UTIL_PCT` (10%) **and** foreign memory
@@ -80,9 +80,8 @@ Three things make it work, and each is the reason an earlier attempt failed:
 
 1. **It measures FOREIGN memory, not `memory.used`.** A plain VRAM floor was
    tried and removed before, because this process holds 1.9–4.7 GiB of its
-   own context from face detection and ASD — and
-   `scripts/lipsync_asd_gated.py` scores TalkNet on the GPU in the same
-   process *before* asking whether a card is free. A threshold over
+   own context from face detection and ASD — and TalkNet ASD scoring runs on
+   the GPU in the same process *before* asking whether a card is free. A threshold over
    `memory.used` reads our own context as a stranger and refuses every run
    that did any GPU work first. `gpu_load()` sums `--query-compute-apps`
    rows, excluding `_own_pids()`.
@@ -133,7 +132,7 @@ There is no system ffmpeg, and the two available builds differ in filters:
 - bundled `imageio_ffmpeg` static build (v7.0.2) — has both
 
 `media_io._ffmpeg_bin()` prefers `shutil.which`, so it returns the one *without*
-rubberband. `backend/stretch.py::available_backends()` probes per **filter**
+rubberband. `backend/media/stretch.py::available_backends()` probes per **filter**
 rather than per binary. yt-dlp calls take `--ffmpeg-location`, or they report
 success while silently leaving unmerged `.fNNN.` part files.
 
@@ -161,7 +160,7 @@ repeating it.
 
 The `_ffprobe_bin()` half mattered more than it looks. It used to return `None`
 here, and `None` is a *silent* answer in every caller: probes report
-`fps=0.0 dur=0.0`, and `backend/lipsync.py::_needs_remux` returns `False` for
+`fps=0.0 dur=0.0`, and `backend/lipsync/lipsync.py::_needs_remux` returns `False` for
 every video — which is how Wav2Lip's 16 kHz mono AAC shipped past the remux
 that exists to fix it. An adapter reporting `fps=0.0` on a file that plays is
 this bug, not a broken render.
@@ -176,8 +175,8 @@ documented. The live `.env` is read only by the code that needs it, not
 inspected directly, so its values stay out of transcripts and logs.
 
 `OPENROUTER_{API_KEY,URL,MODEL}` was added 2026-10-16 for LLM-side work. It is
-now read by `backend/llm.py`, the one module here that talks to an LLM, on
-behalf of `backend/edit_agent.py` (§2). The plan's "LLM with termbase" code-mix
+now read by `backend/common/llm.py`, the one module here that talks to an LLM, on
+behalf of `backend/pipeline/edit_agent.py` (§2). The plan's "LLM with termbase" code-mix
 path and LLM-judge evaluation still do not use it.
 
 **An empty value still breaks nothing**, and that is deliberate: the edit agent

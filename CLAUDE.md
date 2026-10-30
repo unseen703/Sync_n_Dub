@@ -54,9 +54,9 @@ export LD_PRELOAD=/data1/dipak_data/miniconda3/envs/dubbing/lib/libstdc++.so.6
 **GPUs.** 2 × NVIDIA RTX PRO 2000 Blackwell, 16311 MiB each (sm_120). 16 GiB ruled out LatentSync at 512
 — which is why 1.6 was removed on 2026-10-28, leaving `latentsync15` at 256 —
 and leaves MuseTalk ~100 MiB at `batch_size=20`. Pin with `CUDA_VISIBLE_DEVICES` or `DUBBING_GPUS=0,1`.
-A card is "free" when idle (`backend/gpu.py::free_devices`: util under 10% AND foreign memory under 10%);
+A card is "free" when idle (`backend/common/gpu.py::free_devices`: util under 10% AND foreign memory under 10%);
 `DUBBING_GPU_ALLOW_SHARED=1` overrides. onnxruntime silently falls back to CPU unless
-`backend.gpu.ensure_onnxruntime_cuda()` runs first.
+`backend.common.gpu.ensure_onnxruntime_cuda()` runs first.
 
 **ffmpeg is filter-specific.** `envs/dubbing/bin/ffmpeg` (7.1) has `atempo`, not `rubberband`; bundled
 `imageio_ffmpeg` (7.0.2) has both. `media_io._ffmpeg_bin()` / `_ffprobe_bin()` look in the running
@@ -73,13 +73,13 @@ interpreter's dir, and `BaseLipSync._subprocess_env()` puts it on PATH, because 
 - **One run, one job folder.** Everything goes under `data/jobs/<job_id>/` with a `manifest.json`.
   Nothing is written outside it.
 - **Merged JSON is versioned** at `mt/versions/<stem>.v<NNN>.<producer>.json`; the live file is rewritten
-  in place by 9b/9b2/9c/9c2/9e and every edit. **Trap:** `edit_agent._find_merged_json` takes the newest
+  in place by 9b/9b2/9c/9c2/9e and every edit. **Trap:** `backend.pipeline.edit_agent._find_merged_json` takes the newest
   `mt/*.mt.json` by mtime, so a snapshot placed in `mt/` or named `.mt.json` silently becomes the document.
 - **Downloads keep uploader metadata** (`<stem>.meta.json`, 18 fields via `downloader.video_metadata()`).
   `categories` drives the register classifier (9b1). `description`, `title`, `tags` are untrusted: pass
   them as delimited data with enum answers.
-- **Adding a model = one adapter + one registry line** in `models/<stage>/__init__.py`. Worked example:
-  `models/lipsync/`.
+- **Adding a model = one adapter + one registry line** in `backend/<stage>/__init__.py`. Worked example:
+  `backend/lipsync/`.
 - **No clip-window flag.** Cut with ffmpeg first (`clip-run` skill). Exception:
   `run_lipsync(..., window=(start, end))`, overshoot one frame.
 - **Speed mode `segment` is the default** (2026-10-22): per-cue fit both ways, `--speed-cap` 1.8,
@@ -90,8 +90,8 @@ interpreter's dir, and `BaseLipSync._subprocess_env()` puts it on PATH, because 
   goes in `plan_config`.
 - **Bodhan is the only adapter left in every hosted-stage registry** — ASR, MT, transliteration and
   TTS (2026-10-28). `--voice-engine` is gone: the voice catalog follows from `--tts`
-  (`pipeline._default_voice_engine`). Diarization is pyannote community-1 alone, alignment is `mms_fa`
-  alone, and `models/vc/` plus stage 9f no longer exist.
+  (`backend.pipeline.pipeline._default_voice_engine`). Diarization is pyannote community-1 alone,
+  alignment is `mms_fa` alone.
 
 ### Canonical implementations — find these, don't rewrite them
 
@@ -99,19 +99,19 @@ A new caller imports the canonical one. A new adapter inherits. A case that does
 
 | Thing | Lives in |
 |---|---|
-| adapter registry: lazy load, lister, kwarg filter, `get_*` | `models/_registry.py::make_registry` |
-| Bodhan auth, env resolution, pacing floor, `Retry-After` backoff | `models/_bodhan.py::BodhanClientMixin` |
-| ffprobe → `(fps, duration)` | `backend/media_io.py::probe_video` |
-| media duration (ffprobe → ffmpeg banner) | `backend/media_io.py::probe_duration` |
-| `--speed-mode segment` knobs | `backend/speed.py` |
+| adapter registry: lazy load, lister, kwarg filter, `get_*` | `backend/common/registry.py::make_registry` |
+| Bodhan auth, env resolution, pacing floor, `Retry-After` backoff | `backend/common/bodhan.py::BodhanClientMixin` |
+| ffprobe → `(fps, duration)` | `backend/common/media_io.py::probe_video` |
+| media duration (ffprobe → ffmpeg banner) | `backend/common/media_io.py::probe_duration` |
+| `--speed-mode segment` knobs | `backend/media/speed.py` |
 | best-effort JSON read of a job file | `frontend/_io.py::read_json` |
-| lip-sync model ids the edit agent advertises | `models.lipsync.available_models()`, via `edits._lipsync_model_ids` |
-| delivery styles the TTS engine accepts | `backend/edits.py::tone_styles` (reads `INDIC_SPEAK_STYLES`) |
-| ASD face crops, VRAM windowing | `models/asd/_av_frontend.py` |
-| where a vendored upstream lives, either side of the move | `models/_vendor.py::resolve_vendor_repo` |
+| lip-sync model ids the edit agent advertises | `backend.lipsync.available_models()`, via `backend.pipeline.edits._lipsync_model_ids` |
+| delivery styles the TTS engine accepts | `backend/pipeline/edits.py::tone_styles` (reads `INDIC_SPEAK_STYLES`) |
+| ASD face crops, VRAM windowing | `backend/asd/_av_frontend.py` |
+| where a vendored upstream lives, either side of the move | `backend/common/vendor.py::resolve_vendor_repo` |
 
 Don't break these: `_REGISTRY_SPEC` stays a module-level dict literal (tooling parses it with `ast`),
-Bodhan retry loops are deliberately not shared, and `backend/speed.py` stays dependency-free.
+Bodhan retry loops are deliberately not shared, and `backend/media/speed.py` stays dependency-free.
 Why: [docs/STAGES.md](docs/STAGES.md).
 
 ---
@@ -166,7 +166,7 @@ the fixed op catalogue in `_SYSTEM`: no speakers, no cue digest, no job state cr
 that depended on that context (unknown speaker, window landing in a silence gap) runs at apply time in the
 handlers.
 
-After parsing, each op is tagged `rule`, `script` or `llm` by `backend.edits.classify_op`, surfaced in the
+After parsing, each op is tagged `rule`, `script` or `llm` by `backend.pipeline.edits.classify_op`, surfaced in the
 plan render, `--json`, and the `/api/jobs/{id}/agent` response. `rule` means the handler mutates
 deterministically; `script` means the replay re-runs a pipeline stage via an external model (today Bodhan
 transliteration for `code_mix mode=stage`, Bodhan MT for `set_target_language`); `llm` means the handler
@@ -189,7 +189,7 @@ Three rules in the regex path (used only as the no-key fallback) that are still 
 A quick-action `fill` that carries a `<placeholder>` must also set `needs` — the workspace opens a picker
 for it and refuses to send an unfilled one.
 
-**Langfuse tracing** wraps `backend/llm.py`. Needs both `LANGFUSE_PUBLIC_KEY` and `LANGFUSE_SECRET_KEY`;
+**Langfuse tracing** wraps `backend/common/llm.py`. Needs both `LANGFUSE_PUBLIC_KEY` and `LANGFUSE_SECRET_KEY`;
 `--check-langfuse` verifies them. `DUBBING_LANGFUSE_CAPTURE_CONTENT=0` drops prompt text and keeps
 timings/tokens/cost. Pin `protobuf==6.32.0`.
 

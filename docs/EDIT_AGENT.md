@@ -1,6 +1,6 @@
 # The edit agent — what it accepts, and what it refuses
 
-Reference for anyone driving or maintaining `backend/edit_agent.py`: the nine
+Reference for anyone driving or maintaining `backend/pipeline/edit_agent.py`: the nine
 operations it can plan, the scopes they take, the stages each one invalidates,
 and — the half that usually costs the most time — every way a request gets
 rejected and what the message means.
@@ -57,12 +57,12 @@ Stage order for replay:
 `codemix → duration → voices → tts → timing → mix → lipsync`.
 
 > `vc` (stage 9f, voice conversion) was removed from the chain on
-> **2026-10-28** along with `models/vc/` and `backend/voice_convert.py`. No
+> **2026-10-28** along with `backend/vc/` and `backend/voice_convert.py`. No
 > run on disk ever set it — the registry had been empty since 2026-10-23 —
 > so a legacy `request.json` carrying `"vc": null` still replays unchanged.
 
 > **`set_speaker` was invisible until 2026-10-19.** It has been registered in
-> `backend/edits.py` all along, but the generated `op_catalogue()` advertised
+> `backend/pipeline/edits.py` all along, but the generated `op_catalogue()` advertised
 > only eight of the nine, so the model was never told it could reattribute a
 > line. The catalogue now lives in the system prompt and lists all nine, with
 > a test asserting both directions (§7).
@@ -209,7 +209,7 @@ job. 8 representative requests, **7 resolved correctly**:
 | make SPK_99 formal | `[]` — correctly refused |
 | **make it a little faster** | `set_speed` with **no `factor`** — the prompt asks for `{"ops": []}` here |
 
-The eighth fails safely: `backend/edits.py` answers *"set_speed needs a
+The eighth fails safely: `backend/pipeline/edits.py` answers *"set_speed needs a
 positive `factor`"* rather than inventing a speed.
 
 **Two traps worth carrying forward.**
@@ -226,10 +226,9 @@ The catalogue moving into the system prompt **did not reduce tokens**: input
 per parse went 1653 → 2156, up 30%, because the prompt is longer than the
 catalogue it replaced. The win is correctness.
 
-Because the prompt is hand-written while `OPS` is generated,
-`tests/test_edit_agent.py` fails if a registered op is missing from the
-prompt, and fails the other way if the prompt advertises one that does not
-exist.
+Because the prompt is hand-written while `OPS` is generated, the two must be
+kept in sync by hand — there's no automated check if a registered op goes
+missing from the prompt, or if the prompt advertises one that does not exist.
 
 ---
 
@@ -259,5 +258,4 @@ request is journalled to `extra.edits.history` and `<job>/edits/edit_NNN.json`
 anything. `pending.json` is working state and is deleted on commit.
 
 Traces of every LLM call (prompt, raw reply, tokens, cost, latency) go to
-Langfuse when configured; see `backend/tracing.py` and
-`scripts/langfuse_usage.py`.
+Langfuse when configured; see `backend/common/tracing.py`.

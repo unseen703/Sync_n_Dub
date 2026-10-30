@@ -52,10 +52,10 @@ from .asd import (SCORES_SUFFIX as ASD_SCORES_SUFFIX, assign_faces_to_turns,
                   assignments_to_jsonable, find_scores_npz, save_scores_npz,
                   score_asd)
 from .asr import transcribe as asr_transcribe
-from .codemix import codemix_segments
+from .translate import codemix_segments
 from .diarize import diarize as diarize_stage
 from .segment import resegment
-from .speaker_id import refine_speakers as _refine_speaker_labels
+from .diarize import refine_speakers as _refine_speaker_labels
 from .downloader import resolve_input
 from .duration import plan_segment_durations
 from .faces import detect_and_track
@@ -324,7 +324,7 @@ def _speaker_face_tracks(out_root: Path, video: Path) -> Dict[str, tuple]:
                      "votes on audio alone", out_root.name)
             return {}
         from models.faces.base import FaceTracks
-        from .assign_faces import speaker_face_tracks
+        from .faces import speaker_face_tracks
         tracks = FaceTracks.load_npz(npz[0])
         assignments = json.loads(js[0].read_text())
         return speaker_face_tracks(assignments, tracks)
@@ -477,8 +477,6 @@ GENDER_SUFFIX = ".gender.json"
 
 def _read_gender_stage(out_root: Path, video: Path) -> Dict[str, dict]:
     """Stage 6b's ballot for this job, or `{}`.
-
-    Scoped to `out_root` on purpose -- see the call site in 9d: an experiment
     variant writes elsewhere and must predict for itself.
     """
     path = Path(out_root) / "voices" / f"{Path(video).stem}{GENDER_SUFFIX}"
@@ -930,7 +928,7 @@ def run_post_mt_stages(
             # checked 2026-10-22), so the audio cannot be made shorter after
             # the fact. The sentence has to be.
             #
-            # Marker on ONE line: `ui/progress.py` scrapes these, so a
+            # Marker on ONE line: `frontend/progress.py` scrapes these, so a
             # wrapped marker loses its closing `===` and silently stops
             # matching.
             if condense_overlong_text:
@@ -1410,7 +1408,7 @@ def run_post_mt_stages(
                     # in stage 6b (for the gender face vote) before the MT
                     # gate; a marker inside the helper would fire there too
                     # and light the Lip-sync pill on a job that has not been
-                    # anywhere near a render. ONE line -- `ui/progress.py`
+                    # anywhere near a render. ONE line -- `frontend/progress.py`
                     # scrapes it and the test greps the literal.
                     log.info("=== stage 6: active speaker detection (%s) ===", asd_model)
                     _run_asd_stage(
@@ -1812,7 +1810,7 @@ def _run_pipeline(
     duration_voice: str = "default",
     duration_safety_margin_s: float = 0.10,
     # 9c2. LLM rewrite of lines the tempo stretch cannot fit. Off by default
-    # on the CLI; the UI turns it ON (`ui/presets.py`), since a UI run has no
+    # on the CLI; the UI turns it ON (`frontend/presets.py`), since a UI run has no
     # operator watching stage 9c's overrun warnings go past.
     condense_overlong_text: bool = False,
     condense_model: Optional[str] = None,
@@ -1926,7 +1924,7 @@ def _run_pipeline(
             "tts":             tts_model,
             "voice_engine":    voice_engine,
             "lipsync":         lipsync_model,
-            # 9i. Recorded because `ui/progress.plan_stages` branches on it:
+            # 9i. Recorded because `frontend/progress.plan_stages` branches on it:
             # a switch the planner reads but the manifest does not hold means
             # a finished job re-plans to a different shape than it ran.
             "restore":         restore_model,
@@ -1935,12 +1933,12 @@ def _run_pipeline(
             "timing_producer": timing_producer,
             "variant_tag":     variant_tag,
             # Every OPTIONAL stage's switch, under the key name
-            # `ui/progress.py::plan_stages` reads. These were missing, and
+            # `frontend/progress.py::plan_stages` reads. These were missing, and
             # the manifest is the only durable record of what a run did:
             # `_run_pipeline` re-allocates here and OVERWRITES whatever the
             # caller wrote at submission, so the UI's richer config lasted
             # until the pipeline started and no longer. Everything that
-            # reads the manifest afterwards — `ui/spec.py`, `ui/cost.py`,
+            # reads the manifest afterwards — `frontend/spec.py`, `frontend/cost.py`,
             # `_list_jobs`, `edit_agent._config` — therefore saw a run with
             # no resegmentation, no speaker refinement, no register, no
             # emotion, no visemes and no face detector, none of which was
@@ -2217,7 +2215,7 @@ def _run_pipeline(
                     allow_auto=captions_allow_auto)
         if caption_result is not None:
             cap = caption_result.extra.get("captions", {})
-            # ONE line, deliberately. `ui/progress.py` scrapes these markers
+            # ONE line, deliberately. `frontend/progress.py` scrapes these markers
             # -- a marker split across two source lines is captured without
             # its closing `===` and silently stops being matched, which
             # freezes the progress bar.
@@ -2383,7 +2381,7 @@ def _run_pipeline(
     # "no global style", i.e. the voice's neutral reading, which is also what
     # happens when the video came from a local file with no metadata.
     if tts_style == "auto":
-        from .classify import classify_register, transcript_sample
+        from .translate import classify_register, transcript_sample
         sample = ""
         try:
             if result.mt_json and Path(result.mt_json).exists():
@@ -2588,8 +2586,8 @@ def run_pipeline(*args, **kwargs) -> PipelineResult:
 
     Without this a failed run leaves `manifest.json` reading "running"
     forever, which is indistinguishable from a job that is still going.
-    `functools.wraps` keeps the real signature visible to
-    `backend.experiment`, which validates variant knobs against it.
+    `functools.wraps` keeps the real signature visible to callers that
+    introspect it.
     """
     try:
         return _run_pipeline(*args, **kwargs)
@@ -2623,7 +2621,7 @@ def _captions_from(subtitles, audio_16k, diar_result, asr_full_audio,
     forcing captions onto turns there would quietly re-impose it.
     """
     try:
-        from .caption_asr import transcript_from_captions
+        from .asr import transcript_from_captions
     except Exception as e:                               # noqa: BLE001
         log.debug("captions: helper unavailable (%s)", e)
         return None

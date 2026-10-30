@@ -104,7 +104,7 @@ A new caller imports the canonical one. A new adapter inherits. A case that does
 | ffprobe → `(fps, duration)` | `backend/media_io.py::probe_video` |
 | media duration (ffprobe → ffmpeg banner) | `backend/media_io.py::probe_duration` |
 | `--speed-mode segment` knobs | `backend/speed.py` |
-| best-effort JSON read of a job file | `ui/_io.py::read_json` |
+| best-effort JSON read of a job file | `frontend/_io.py::read_json` |
 | lip-sync model ids the edit agent advertises | `models.lipsync.available_models()`, via `edits._lipsync_model_ids` |
 | delivery styles the TTS engine accepts | `backend/edits.py::tone_styles` (reads `INDIC_SPEAK_STYLES`) |
 | ASD face crops, VRAM windowing | `models/asd/_av_frontend.py` |
@@ -118,14 +118,14 @@ Why: [docs/STAGES.md](docs/STAGES.md).
 
 ## 3. Running things
 
-**UI.** `ui/server.py` (FastAPI, loopback only, port 7861) serves `ui/web-dist/`. Jobs launch detached via
+**frontend.** `frontend/server.py` (FastAPI, loopback only, port 7861) serves `frontend/web-dist/`. Jobs launch detached via
 `./ui_run_job.sh`, the one launcher that sets the libstdc++ preload. The progress bar is 5 pills:
 `Prepare`, `Translate`, `Dub audio`, `Lip-sync` (`progress.PHASE_GROUPS`) plus a synthetic `Finished`.
 
-**A UI job ends at the MT gate.** `ui/runner.py` forces `stop_after_mt=True` on every submission — not a
+**A UI job ends at the MT gate.** `frontend/runner.py` forces `stop_after_mt=True` on every submission — not a
 default, so no `request.json` can opt out; the CLI is unaffected because it never goes through the runner.
 Phase one runs through stage 9 plus 9b1 (the last marker before `run_post_mt_stages`), stamps
-`awaiting_cast` on the manifest, and exits `done`. Casting (`POST /api/jobs/{id}/cast` → `ui.runner
+`awaiting_cast` on the manifest, and exits `done`. Casting (`POST /api/jobs/{id}/cast` → `frontend.runner
 --cast`) runs TTS + mix; lip-sync is a third, separate submission. **Trap:** the gate is
 `run_post_mt_stages`, not the `Translate` pill — 9b and 9c sit in that pill but run *after* the gate.
 
@@ -136,7 +136,7 @@ job both reuse the scores. Written to `voices/<stem>.gender.json`, deliberately 
 `speaker_voice_map.json`, which 9d rewrites wholesale. 9d reads the file back and only predicts the
 speakers it does not cover.
 
-**Progress-bar rules** (`ui/progress.py`). Three that are easy to break:
+**Progress-bar rules** (`frontend/progress.py`). Three that are easy to break:
 
 - **`skipped` ≠ not-yet.** A group with no substages is `skipped` ("never part of this run"); post-gate
   stages are planned and flagged `deferred` ("not run yet"). `StageRibbon` ticks only `done` — painting
@@ -147,7 +147,7 @@ speakers it does not cover.
   rows in `planned` are reset, everything else is preserved. Before this, cast/rerun/lip-sync each
   replaced the file and erased phase one.
 - **A replay must open its own rows.** `edit_agent._rerun_lipsync_only` logs no stage marker, so
-  `ui/runner.py::_run_rerun` calls `writer.begin()` for `6`/`9h` itself. 9i is planned only when
+  `frontend/runner.py::_run_rerun` calls `writer.begin()` for `6`/`9h` itself. 9i is planned only when
   `restore` is set — it never writes `progress.json`, so a planted row would hold `Finished` dark.
 
 **Edit agent.**

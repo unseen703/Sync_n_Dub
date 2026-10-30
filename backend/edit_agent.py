@@ -178,7 +178,7 @@ def recover_args(view: JobView) -> Optional[argparse.Namespace]:
     method…). Re-parsing it is the difference between replaying the run the
     user actually launched and replaying a defaults-shaped approximation.
 
-    A UI job has no pipeline command line — `ui/runner.py` is launched with
+    A UI job has no pipeline command line — `frontend/runner.py` is launched with
     the job id alone — so this returns None for one, and the caller recovers
     the pacing from the recorded config instead (`speed_setup_from_config`).
 
@@ -893,7 +893,7 @@ def _keep_language_re(source_language: Optional[str]) -> str:
     alts = list(_KEEP_LANG_PHRASES)
     if source_language:
         try:
-            from ui.langs import LANGUAGES
+            from frontend.langs import LANGUAGES
             meta = LANGUAGES.get(str(source_language).split("-")[0].lower())
         except Exception:                               # noqa: BLE001
             meta = None
@@ -1119,7 +1119,7 @@ def _rule_parse(nlq: str, *,
     # gender -- NLQ gender changes now go through set_voice: the voice must
     # be named. A bare "sound female" with no voice is deliberately left
     # unparsed, matching the LLM prompt. The cast-table dropdown that posts
-    # a gender without a voice uses `ui/routes_edits.py`, not this parser.
+    # a gender without a voice uses `frontend/routes_edits.py`, not this parser.
 
     # explicit voice id
     #
@@ -1142,7 +1142,7 @@ def _rule_parse(nlq: str, *,
     # same, this is the defense in the no-key fallback. A sentence that
     # names a voice but no speaker returns no set_voice op; the user has to
     # name the speaker. The cast-table dropdown builds a set_voice with
-    # scope=Scope(speaker=...) directly in `ui/routes_edits.py`, not through
+    # scope=Scope(speaker=...) directly in `frontend/routes_edits.py`, not through
     # this parser, so it is unaffected.
     if not _has("create_speaker") and scope.speaker:
         m = re.search(r"\b(?:use|switch to|change .*? voice to)\s+"
@@ -1243,14 +1243,14 @@ def _resolve_target_language(text: str) -> Optional[str]:
 
     Only fires when the request names a language-switch verb -- `translate`,
     `retranslate`, `dub`, or `(change the) target language` -- followed by
-    `to`/`in`/`into` and a token the shared `ui.langs.LANGUAGES` table
+    `to`/`in`/`into` and a token the shared `frontend.langs.LANGUAGES` table
     recognises (ISO code, English name, or native-script name).
     """
     if not re.search(r"\b(?:translate|retranslate|dub|language)\b",
                      text, re.I):
         return None
     try:
-        from ui.langs import LANGUAGES
+        from frontend.langs import LANGUAGES
     except Exception:
         return None
     name_to_iso: Dict[str, str] = {}
@@ -1402,7 +1402,7 @@ def available_stages(view: JobView, res: EditResult,
         out.append("lipsync")
     # `cfg` first: a UI job has no argv, so reading this off the namespace
     # alone dropped stage 9c from the replayable set on every one of them.
-    # It is recorded in the manifest (`ui.presets.plan_config`), which is the
+    # It is recorded in the manifest (`frontend.presets.plan_config`), which is the
     # durable record either way.
     if cfg.get("duration_adjust") or nsget("duration_adjust"):
         out.append("duration")
@@ -1495,13 +1495,13 @@ def speed_setup_from_config(cfg: Dict[str, Any]):
     """The run's pacing, read off a recorded config when there is no argv.
 
     Takes any dict using the pipeline's own kwarg names, which is both the
-    manifest's `config` (via `ui.presets.plan_config`) and the `pipeline`
+    manifest's `config` (via `frontend.presets.plan_config`) and the `pipeline`
     block of a UI job's `request.json`. The second matters because it is
     already on disk for every job ever submitted from the UI, so a job that
-    predates this fix still replays correctly — `ui/runner.py` passes it.
+    predates this fix still replays correctly — `frontend/runner.py` passes it.
 
     `recover_args` re-parses the command line because it carries knobs the
-    manifest never did. A UI job has no command line: `ui/runner.py` is
+    manifest never did. A UI job has no command line: `frontend/runner.py` is
     launched with the job id alone, so the pipeline parser exits on it and
     `ns` comes back None. The replay then fell through to argparse DEFAULTS
     — which describe a run nobody launched.
@@ -1509,7 +1509,7 @@ def speed_setup_from_config(cfg: Dict[str, Any]):
     The damage was specific and silent. A UI submission runs
     `timing_producer=naive_slot` with `use_target_duration=True`,
     `tts_apply_stretch=False`, `mix_strategy=timing_plan`,
-    `mix_clip_source=raw` (`ui/presets.UI_TIMING_DEFAULTS`). The defaults are
+    `mix_clip_source=raw` (`frontend/presets.UI_TIMING_DEFAULTS`). The defaults are
     `timing_params=None`, stretch ON, `global_tempo`, `auto`. So every edit
     replayed on a UI job came back paced differently from the dub it was
     editing — and `set_speed` came back at the ORIGINAL SPEED, because its
@@ -1600,7 +1600,7 @@ def rerun(plan: EditPlan, *, device: Optional[str] = None,
     # global-tempo run that also stretches twice.
     # Three sources, most authoritative first. The caller's beats the argv
     # because only a caller that HAS the submission can supply it —
-    # `ui/runner.py` reads `request.json`, which records the resolved kwargs
+    # `frontend/runner.py` reads `request.json`, which records the resolved kwargs
     # verbatim — and the manifest is the fallback for everyone else.
     setup = speed_setup
     if setup is None and ns is not None:
@@ -1680,7 +1680,7 @@ def rerun(plan: EditPlan, *, device: Optional[str] = None,
         mix_clip_source=(setup.mix_clip_source if setup is not None
                          else nsget("mix_clip_source", "auto")),
         mux_video=not bool(nsget("no_mux")),
-        # Caller-supplied tag -- `ui/runner.py` derives it from the edit
+        # Caller-supplied tag -- `frontend/runner.py` derives it from the edit
         # record filename, so `mix/versions/` grows one dubbed.wav/mp4 pair
         # per edit replay. None skips the snapshot.
         mix_producer_tag=mix_producer_tag,
@@ -1763,7 +1763,7 @@ def _rerun_lipsync_only(plan: EditPlan, *, num_gpus: Optional[int]) -> Dict[str,
     # defaults and the `lipsync_batch_size` the submission recorded was
     # written to the manifest and then ignored. That was invisible while
     # the two numbers happened to agree; it stops being invisible the
-    # moment either side moves. `ui/presets.py` says this config exists
+    # moment either side moves. `frontend/presets.py` says this config exists
     # precisely "because the replay that renders it rebuilds its kwargs
     # from this job's manifest config" -- it now actually does.
     ls_kwargs: Dict[str, Any] = {}
@@ -1964,7 +1964,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         if have_sec and not have_pub:
             # The reported case: only the private key in hand. Say where the
             # other one is rather than just failing, because it is NOT a
-            # secret and is sitting in the UI.
+            # secret and is sitting in the frontend.
             print("hint      Langfuse signs in with HTTP Basic as "
                   "public_key:secret_key and needs BOTH. The public key is "
                   "not a secret — copy the pk-lf-… from Langfuse → Project "

@@ -324,26 +324,9 @@ def plan_segment_durations(
 # post-synthesis stretch (called by TTS stage after audio exists)
 # ---------------------------------------------------------------------------
 
-def wsola_stretch_cap(
-    wav_in: Path, wav_out: Path, *,
-    target_duration_s: float,
-    max_stretch: float = 0.10,
-    backend: str = "auto",
-) -> Tuple[float, bool]:
-    """Stretch `wav_in` to `target_duration_s`, capped at +-`max_stretch`.
-
-    Returns (applied_factor, budget_violation). A shim: `backend.tts` unpacks
-    this exact tuple, while the real work -- and the record of which backend
-    ran, which this signature cannot carry -- is in `backend.stretch`.
-    """
-    from .stretch import stretch_to_duration
-    res = stretch_to_duration(
-        wav_in, wav_out,
-        target_duration_s=target_duration_s,
-        max_stretch=max_stretch,
-        backend=backend,
-    )
-    return res.applied_factor, res.capped
+# `wsola_stretch_cap` moved to `backend.stretch`. Re-exported here for
+# callers that still import it from this module.
+from .stretch import wsola_stretch_cap  # noqa: E402, F401
 
 
 # ---------------------------------------------------------------------------

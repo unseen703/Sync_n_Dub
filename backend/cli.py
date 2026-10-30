@@ -745,7 +745,7 @@ def resolve_speed_setup(args) -> "SpeedSetup":
         _speed.validate_absorb_bounds(
             args.speed_borrow_gap, args.speed_borrow_frac,
             args.absorb_max_frac)
-        # The values live in `backend/speed.py`, which `ui/presets` also
+        # The values live in `backend/speed.py`, which `frontend/presets` also
         # calls, so the two cannot drift.
         _seg = _speed.segment_timing_kwargs(
             speed_cap=args.speed_cap,

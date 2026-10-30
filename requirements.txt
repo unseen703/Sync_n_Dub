@@ -101,10 +101,10 @@ nltk>=3.8            # METEOR
 # third_party/CodeFormer and the --restore flags all gone), so they went with
 # it. Nothing else in the tree imports them.
 
-# -------- operator UI (ui/server.py) --------
+# -------- operator UI (frontend/server.py) --------
 # These were running from the conda env without ever being declared, so a
-# fresh clone could not start the UI. The frontend is a built Vite app under
-# ui/web-dist/ (see ui/web/package.json); Node is NOT a runtime dependency,
+# fresh clone could not start the frontend. The frontend is a built Vite app under
+# frontend/web-dist/ (see frontend/web/package.json); Node is NOT a runtime dependency,
 # only a build-time one, so it is deliberately not pinned here.
 fastapi>=0.110
 uvicorn[standard]>=0.29

@@ -373,3 +373,24 @@ def stretch_to_duration(
         log.info("stretch capped: wanted %.3fx, applied %.3fx (%s) on %s",
                  ratio, applied, res.backend, wav_in.name)
     return res
+
+
+def wsola_stretch_cap(
+    wav_in: Path, wav_out: Path, *,
+    target_duration_s: float,
+    max_stretch: float = 0.10,
+    backend: str = "auto",
+) -> "tuple[float, bool]":
+    """Stretch `wav_in` to `target_duration_s`, capped at +-`max_stretch`.
+
+    Returns (applied_factor, budget_violation). A thin shim around
+    `stretch_to_duration` so `backend.tts` can unpack the two values it needs
+    without carrying the full `StretchResult`.
+    """
+    res = stretch_to_duration(
+        wav_in, wav_out,
+        target_duration_s=target_duration_s,
+        max_stretch=max_stretch,
+        backend=backend,
+    )
+    return res.applied_factor, res.capped

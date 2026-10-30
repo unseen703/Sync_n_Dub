@@ -3,7 +3,7 @@
 What `POST /api/jobs` actually sets, and which stage each setting governs.
 Reference for anyone wondering why a run did — or did not — do something.
 
-Generated from `ui/presets.py` and `ui/progress.py` on **2026-10-20** by
+Generated from `frontend/presets.py` and `frontend/progress.py` on **2026-10-20** by
 resolving a real submission (`preset=standard`, `target_language=hi`). The
 tables are the code's own output, not a transcription.
 
@@ -12,10 +12,10 @@ tables are the code's own output, not a transcription.
 ## 1. How a submission becomes a run
 
 ```
-    browser  ──POST /api/jobs──▶  ui/routes_create.py
+    browser  ──POST /api/jobs──▶  frontend/routes_create.py
                                         │  validates, allocates a job folder
                                         ▼
-                                  ui/presets.build_kwargs(preset, …)
+                                  frontend/presets.build_kwargs(preset, …)
                                         │  ~30 kwargs; everything else keeps
                                         │  the pipeline's OWN default
                                         ▼
@@ -24,7 +24,7 @@ tables are the code's own output, not a transcription.
                                         │  libstdc++ preload — a bare Popen
                                         │  walks stage 9h into the cv2 trap
                                         ▼
-                                  ui/runner.py ──▶ backend.pipeline.run_pipeline
+                                  frontend/runner.py ──▶ backend.pipeline.run_pipeline
                                         │
                    ProgressWriter on the ROOT logger scrapes the
                    `=== stage N ===` lines into <job>/progress.json

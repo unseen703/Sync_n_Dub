@@ -115,7 +115,7 @@ Return exactly one JSON object: {"segments": [{"segment_id": "<echo>", "text": "
 def _language_name(code: Optional[str], default: str) -> str:
     """ISO code -> English language name, or the code itself if unknown."""
     try:
-        from ui.langs import english_name
+        from frontend.langs import english_name
     except Exception:                                     # noqa: BLE001
         return code or default
     return english_name(code, default)

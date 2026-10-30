@@ -11,8 +11,8 @@ speaker's mouth to the new audio.
 - Known bugs and incident history: [docs/ROUGH_EDGES.md](docs/ROUGH_EDGES.md)
 
 
-dev start cmd conda run --no-capture-output -n dubui npm --prefix ui/web run dev
-server start cmd $PY -m ui.server --port 7861
+dev start cmd conda run --no-capture-output -n dubui npm --prefix frontend/web run dev
+server start cmd $PY -m frontend.server --port 7861
 ## Quickstart
 
 ```bash
@@ -86,7 +86,7 @@ The same pipeline with a screen on it: paste a YouTube link, pick a language
 and a part of the video, watch it run, then listen and recast voices.
 
 ```bash
-$PY -m ui.server                       # http://127.0.0.1:7861
+$PY -m frontend.server                       # http://127.0.0.1:7861
 ```
 
 It binds **loopback only** and has **no authentication**. Reach it over an SSH
@@ -108,16 +108,16 @@ apply it, since it re-runs TTS, mix and lip-sync.
 
 ### Building the frontend
 
-Vite app in `ui/web/`, built to `ui/web-dist/`. Node lives in its own conda
+Vite app in `frontend/web/`, built to `frontend/web-dist/`. Node lives in its own conda
 env, and bare `npm` is broken on this host (see [docs/HOST.md](docs/HOST.md)):
 
 ```bash
 conda create -n dubui nodejs=20
-conda run -n dubui npm --prefix ui/web install
-conda run -n dubui npm --prefix ui/web run build
+conda run -n dubui npm --prefix frontend/web install
+conda run -n dubui npm --prefix frontend/web run build
 ```
 
-If `ui/web-dist/` is missing, the server runs API-only and logs a warning.
+If `frontend/web-dist/` is missing, the server runs API-only and logs a warning.
 
 ## Editing a finished dub in plain language
 
@@ -164,7 +164,7 @@ moved or removed. The same listing is in [plan.md §11](plan.md#11-repository-st
 keep the two in step.
 
 *As built, 2026-10-27. Descriptions come from each file's own docstring.*
-**Scope:** `backend/`, `models/`, `ui/` (Python side) and `tests/` (docstring
+**Scope:** `backend/`, `models/`, `frontend/` (Python side) and `tests/` (docstring
 headers only). Not covered: `scripts/` and the web frontends. The
 `backend/speed.py` and `backend/restore.py` rows come from CLAUDE.md and the
 earlier README, not from reading those files.
@@ -179,7 +179,7 @@ earlier README, not from reading those files.
 | `docs/` | Long-form docs: `HOST.md`, `STAGES.md`, `ROUGH_EDGES.md`, `EDIT_AGENT.md`, `PROMPTS.md`, `UI_RUN.md` |
 | `backend/` | The pipeline: one module per stage or concern (below) |
 | `models/` | Model adapters, one folder per stage, each with a registry |
-| `ui/` | FastAPI operator UI and its job runner |
+| `frontend/` | FastAPI operator UI and its job runner |
 | `tests/` | pytest suite, no models or network |
 | `scripts/` | Operator and batch scripts: setup, corpus fetch, clip runs, sweeps, repo checkup |
 | `data/` | Job folders (`data/jobs/<job_id>/`), voice reference clips, layout doc `DATA_LAYOUT.md` |
@@ -292,13 +292,13 @@ Stages and adapters (registered names in bold)
 | `restore/` | `gfpgan_adapter.py` (**gfpgan**) | GFPGAN v1.4 plus Real-ESRGAN over a finished render via `backend/face_enhance.py`; stage 9i |
 | `translit/` | `bodhan_adapter.py` (**bodhan**) | Hosted Indic-Transliterate; falls back to the MT endpoint |
 | `tts/` | `bodhan_adapter.py` (**bodhan**) | Hosted Indic-Speak, returns WAV bytes; re-speaks at a different rate; the only stock-voice engine |
-Removed registry entries: `wav2lip_hd` and `lipgan` (2026-10-23; restoration is now `--restore gfpgan`), `latentsync` (1.6, on 2026-10-28 — ~18 GB against 16 GiB cards), `openvoice` and `vevo`, and `ts_talknet`. All three retired display rows were dropped from `ui/lipsync_models.FACTS` on 2026-10-28 too, so the three `hd_*` job folders now label as plain Wav2Lip. Voice conversion went with them: `models/vc/`, `backend/voice_convert.py`, stage 9f and the `--vc` flag were deleted on 2026-10-28, since the registry had been empty for five days and no run on disk ever set it. Adapter files for `asd/` and `faces/` and the Bodhan base classes were not opened; their rows come from the registry docstrings.
+Removed registry entries: `wav2lip_hd` and `lipgan` (2026-10-23; restoration is now `--restore gfpgan`), `latentsync` (1.6, on 2026-10-28 — ~18 GB against 16 GiB cards), `openvoice` and `vevo`, and `ts_talknet`. All three retired display rows were dropped from `frontend/lipsync_models.FACTS` on 2026-10-28 too, so the three `hd_*` job folders now label as plain Wav2Lip. Voice conversion went with them: `models/vc/`, `backend/voice_convert.py`, stage 9f and the `--vc` flag were deleted on 2026-10-28, since the registry had been empty for five days and no run on disk ever set it. Adapter files for `asd/` and `faces/` and the Bodhan base classes were not opened; their rows come from the registry docstrings.
 
-### `ui/` — operator UI (Python side)
+### `frontend/` — operator UI (Python side)
 
 | File | Features |
 | --- | --- |
-| `server.py` | FastAPI app on loopback port 7861; serves `ui/web-dist/` and the job APIs |
+| `server.py` | FastAPI app on loopback port 7861; serves `frontend/web-dist/` and the job APIs |
 | `runner.py` | Detached process that runs one job from `request.json`; fetch, cut, probe, then the pipeline; `--rerun` for edit replays |
 | `progress.py` | Logging handler that turns the pipeline's `=== stage N ===` markers into `progress.json` for the 8-pill bar |
 | `presets.py` | Three run presets (`draft`, `standard`, `best`), pipeline kwargs, runtime estimates |
@@ -319,7 +319,7 @@ Removed registry entries: `wav2lip_hd` and `lipgan` (2026-10-23; restoration is 
 | `spec.py` | The job's settings as plain label, value and hint lines, plus the raw config for an "Advanced" view |
 | `cost.py` | Turns an edit's dirty stages into what re-runs, what doesn't, and an estimated time |
 
-`ui/auth.py` is deleted in the working tree. The frontends (`ui/web/`, `ui/web-dist/`) were not read, and there may be other `ui/` modules I haven't seen.
+`frontend/auth.py` is deleted in the working tree. The frontends (`frontend/web/`, `frontend/web-dist/`) were not read, and there may be other `frontend/` modules I haven't seen.
 
 ### `tests/`
 
@@ -367,7 +367,7 @@ Setup and launch
 
 | File | Features |
 | --- | --- |
-| `start_ui.sh` | Starts the operator UI with its own interpreter and libstdc++ preload; `--port` to change it; no auth |
+| `start_frontend.sh` | Starts the operator UI with its own interpreter and libstdc++ preload; `--port` to change it; no auth |
 | `ui_run_job.sh` | Launches one UI-submitted job detached from `data/jobs/<job_id>/request.json`; the only launcher that sets the libstdc++ preload |
 | `setup.py` | Old doctor, model fetch and dry run; superseded by `scripts/doctor.py` and `scripts/fetch_assets.py` |
 | `audit_edit_ops.py` | Runs every phrasing the edit agent advertises (op examples + quick-action fills, bare and cue-scoped) through the rule parser and prints the op and scope each produces; no network, no job folder |

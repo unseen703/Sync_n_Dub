@@ -2,14 +2,14 @@
 # Start the operator UI, portably -- resolves its own interpreter and
 # libstdc++ preload instead of needing either done by hand.
 #
-#   ./start_ui.sh                    # 127.0.0.1:7861
-#   ./start_ui.sh --port 7900
+#   ./start_frontend.sh                    # 127.0.0.1:7861
+#   ./start_frontend.sh --port 7900
 #
 # There is NO auth (removed 2026-10-25) -- `--host 0.0.0.0` exposes every
 # route, including the ones that start GPU jobs. Use the SSH tunnel instead.
 #
 # Replaces "started by hand" (README/CLAUDE.md's old `conda activate dubbing;
-# python ui/server.py`), which is how this host once ran the server from
+# python frontend/server.py`), which is how this host once ran the server from
 # `.venv-diarization` and spent a day on "insightface not found" before
 # realising it was the wrong interpreter (CLAUDE.md). PY resolution here
 # mirrors ./ui_run_job.sh's: DUBBING_PY wins if it points at something
@@ -40,7 +40,7 @@ if ! PY="$(resolve_py)"; then
        "env's python (e.g. <conda prefix>/envs/dubbing/bin/python)" >&2
   exit 1
 fi
-export DUBBING_PY="$PY"   # so the UI's own job launcher (ui.jobqueue) inherits it too
+export DUBBING_PY="$PY"   # so the UI's own job launcher (frontend.jobqueue) inherits it too
 
 ENV_LIB="$(dirname "$PY")/../lib"
 LIBSTDCXX="$ENV_LIB/libstdc++.so.6"
@@ -51,10 +51,10 @@ export PYTHONUNBUFFERED=1
 
 cd "$REPO" || exit 1
 
-WEB_DIST="$REPO/ui/web-dist/index.html"
+WEB_DIST="$REPO/frontend/web-dist/index.html"
 if [ ! -f "$WEB_DIST" ]; then
   echo "warning: $WEB_DIST missing -- server will be API-only" >&2
-  echo "  build it: conda run -n dubui npm --prefix ui/web ci && conda run -n dubui npm --prefix ui/web run build" >&2
+  echo "  build it: conda run -n dubui npm --prefix frontend/web ci && conda run -n dubui npm --prefix frontend/web run build" >&2
 fi
 
 if [ -f "$REPO/./doctor.py" ]; then
@@ -63,4 +63,4 @@ if [ -f "$REPO/./doctor.py" ]; then
   echo "--- starting the server regardless of the above; fix FAILs for full functionality ---"
 fi
 
-exec "$PY" -m ui.server "$@"
+exec "$PY" -m frontend.server "$@"

@@ -9,10 +9,10 @@ there. Together they're a from-scratch recipe for that env, line for line.
 
 | Env | Spec | Why it's separate |
 |---|---|---|
-| `dubbing` | `dubbing.yml` + `dubbing.pip.txt` | The main pipeline + UI env — everything in `backend/`, `models/` (except the two sidecars below) and `ui/` runs here. Face restoration (basicsr / gfpgan / facexlib / realesrgan) was folded in on 2026-10-30. |
+| `dubbing` | `dubbing.yml` + `dubbing.pip.txt` | The main pipeline + UI env — everything in `backend/`, `models/` (except the two sidecars below) and `frontend/` runs here. Face restoration (basicsr / gfpgan / facexlib / realesrgan) was folded in on 2026-10-30. |
 | `musetalk` | `musetalk.yml` + `musetalk.pip.txt` + `build_mmcv_musetalk.sh` | diffusers/mmcv/mmdet/mmpose pins conflict with `dubbing`. |
 | `latentsync` | `latentsync.yml` + `latentsync.pip.txt` | diffusers/transformers/insightface pins conflict with `dubbing`. |
-| `dubui` | `dubui.yml` | Node, for building `ui/web/` — never a runtime dependency of the server. |
+| `dubui` | `dubfrontend.yml` | Node, for building `frontend/web/` — never a runtime dependency of the server. |
 
 **Deliberately excluded**: `lipgan` (vestigial — its adapter was removed
 2026-10-23 and its last display row on 2026-10-28, see

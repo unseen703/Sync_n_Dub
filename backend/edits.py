@@ -80,9 +80,9 @@ def tone_styles() -> Tuple[str, ...]:
     and NONE of those five is an engine value. A tone edit through the agent
     therefore wrote `tts_style="formal"`, which Bodhan does not know, so the
     one op whose whole purpose is to change delivery changed nothing. The
-    speaker dropdown never had the bug because `ui.speakers.tone_vocabulary`
+    speaker dropdown never had the bug because `frontend.speakers.tone_vocabulary`
     already read the engine; this is the same read, placed where `backend/`
-    can use it without importing `ui/`.
+    can use it without importing `frontend/`.
 
     `NEUTRAL_STYLE` leads the list: it is not an engine value but a sentinel
     `models.tts.resolve_style` turns back into "send no style".
@@ -112,7 +112,7 @@ def _tone_style_ids() -> str:
 #: It narrows what is OFFERED, never what is ACCEPTED: typing "make it sad"
 #: still parses and still applies, because `_h_set_tone` validates against
 #: `tone_styles()` and the regex matches every engine style. If the offered
-#: pair ever needs a third, add it here — one list, served to the UI.
+#: pair ever needs a third, add it here — one list, served to the frontend.
 TONE_CHOICES: Tuple[str, ...] = ("TV style news", "educational lecture")
 
 #: Post-MT chain, in execution order. See `run_post_mt_stages`.
@@ -556,7 +556,7 @@ OP_SPECS: List[OpSpec] = [
         # speaker's apparent gender follows the voice. A bare "make this
         # female" with no voice named is deliberately refused by the LLM
         # prompt and the regex, because set_gender's pool-pick path is
-        # reserved for the cast-table dropdown — see `ui/routes_edits.py`.
+        # reserved for the cast-table dropdown — see `frontend/routes_edits.py`.
         params={"voice": "engine voice id, e.g. Amit, Deepika, Chinmay",
                 "engine": "tts engine, only if it changes"},
         summary="Pin a specific TTS voice for the named speaker. Requires "
@@ -817,7 +817,7 @@ def action_catalogue() -> List[Dict[str, Any]]:
     """Every op as plain language: what it is, takes, changes, and the cost.
 
     Served to the UI so the list cannot drift from the op registry. The repo
-    has paid for that before: `ui/speakers.py` first shipped an invented
+    has paid for that before: `frontend/speakers.py` first shipped an invented
     tone vocabulary, and every tone change then failed at the API with
     nothing on screen to explain it.
     """
@@ -1415,7 +1415,7 @@ def _h_set_tone(data, seg_ids, op, applied, ctx, res):
 def _language_name(code, default="the source language"):
     """ISO code -> English language name, or the code itself if unknown."""
     try:
-        from ui.langs import english_name
+        from frontend.langs import english_name
     except Exception:                                   # noqa: BLE001
         return code or default
     return english_name(code, default)
@@ -2032,7 +2032,7 @@ def _h_set_target_language(data, seg_ids, op, applied, ctx, res):
     # One source of truth for the catalogue: the same table the home-page
     # dropdown reads from. Avoids a second list drifting the first time an
     # adapter gains or loses support for a language.
-    from ui.langs import LANGUAGES
+    from frontend.langs import LANGUAGES
     meta = LANGUAGES.get(iso)
     indic = sorted(k for k, v in LANGUAGES.items() if v["script"] != "latn")
     if meta is None or meta["script"] == "latn":

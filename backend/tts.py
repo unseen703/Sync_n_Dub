@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
 from models.tts import TTSRequest, available_models, get_tts, resolve_style
 
-from .duration import wsola_stretch_cap
+from .stretch import wsola_stretch_cap
 from .sanitize import sanitize_for_tts
 
 if TYPE_CHECKING:                       # heavy-ish import; only needed for the hint

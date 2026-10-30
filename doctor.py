@@ -10,7 +10,7 @@ or starts a job. PASS/WARN/FAIL per row, and a row names the fix rather than
 just the symptom — the whole point is that a missing dependency shows up
 here, once, in plain language, instead of as a job that dies at stage 9h
 after ASR/MT/TTS/mix have already run, or as "The job failed (unrecognised)"
-in the UI.
+in the frontend.
 
 Reuses rather than re-derives: `./fetch_assets.py`'s manifest for
 vendor/weight presence, `models.lipsync.base.resolve_env_python` for
@@ -172,7 +172,7 @@ def check_dubui() -> Row:
     if not node.is_file():
         return _row(WARN, "env:dubui",
                      f"no sibling 'dubui' env at {node} — UI build needs "
-                     f"`conda create -n dubui nodejs=20` (see envs/dubui.yml)")
+                     f"`conda create -n dubui nodejs=20` (see envs/dubfrontend.yml)")
     proc = subprocess.run([str(node), "-v"], capture_output=True, text=True)
     return _row(PASS, "env:dubui", f"{node} — {proc.stdout.strip()}")
 
@@ -182,12 +182,12 @@ def check_ui_build() -> Row:
     web_src = REPO_ROOT / "ui" / "web" / "src"
     if not web_dist.is_file():
         return _row(WARN, "ui build",
-                     "ui/web-dist/ missing — server is API-only, no UI. Build it: conda run -n dubui npm --prefix ui/web ci "
-                     "&& conda run -n dubui npm --prefix ui/web run build")
+                     "frontend/web-dist/ missing — server is API-only, no frontend. Build it: conda run -n dubui npm --prefix frontend/web ci "
+                     "&& conda run -n dubui npm --prefix frontend/web run build")
     if web_src.is_dir():
         newest_src = max((p.stat().st_mtime for p in web_src.rglob("*") if p.is_file()), default=0)
         if newest_src > web_dist.stat().st_mtime:
-            return _row(WARN, "ui build", "ui/web-dist/ is OLDER than ui/web/src/ — rebuild it")
+            return _row(WARN, "ui build", "frontend/web-dist/ is OLDER than frontend/web/src/ — rebuild it")
     return _row(PASS, "ui build", str(web_dist))
 
 
@@ -253,7 +253,7 @@ def check_talking_head_audio() -> Row:
     audio_dir = REPO_ROOT / "data" / "talking_head" / "audio"
     if not catalogue.is_file():
         return _row(WARN, "talking-head catalogue", f"{catalogue} missing")
-    from ui.talking_head import dialogues_for, languages_with_dialogues
+    from frontend.talking_head import dialogues_for, languages_with_dialogues
     want = sum(1 for lang in languages_with_dialogues()
                for e in dialogues_for(lang) if e.get("audio_url"))
     have = len(list(audio_dir.glob("*.wav"))) if audio_dir.is_dir() else 0

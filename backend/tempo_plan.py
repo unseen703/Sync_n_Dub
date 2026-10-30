@@ -127,7 +127,7 @@ class TempoConfig:
     w_rate: float = 1.0
     w_onset: float = 4.0
     w_pause: float = 0.5
-    # --- ramping (consumed by backend.rate_ramp) ---
+    # --- ramping (consumed by backend.warp_plan) ---
     ramp_s: float = 0.18
     ramp_prefer_silence: bool = True
 

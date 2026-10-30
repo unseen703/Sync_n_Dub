@@ -22,7 +22,7 @@
 #     see .env.example's own comments for what each one needs)
 #   - accept the pyannote gate on your behalf (that's a one-time click on
 #     the model card at huggingface.co, tied to your HF_TOKEN's account)
-#   - start the UI server (./start_ui.sh does that, once this finishes)
+#   - start the UI server (./start_frontend.sh does that, once this finishes)
 
 set -uo pipefail
 
@@ -125,7 +125,7 @@ PY
   if env_exists dubui; then
     say "dubui: env already exists, skipping creation"
   else
-    conda env create -f envs/dubui.yml -n dubui
+    conda env create -f envs/dubfrontend.yml -n dubui
   fi
 else
   say "skipping conda env creation (--skip-envs)"
@@ -147,9 +147,9 @@ fi
 # 3. UI build
 # ---------------------------------------------------------------------------
 if [ "$SKIP_UI" -eq 0 ]; then
-  say "UI build (ui/web -> ui/web-dist)"
-  conda run -n dubui npm --prefix ui/web ci
-  conda run -n dubui npm --prefix ui/web run build
+  say "UI build (frontend/web -> frontend/web-dist)"
+  conda run -n dubui npm --prefix frontend/web ci
+  conda run -n dubui npm --prefix frontend/web run build
 else
   say "skipping UI build (--skip-ui)"
 fi
@@ -164,4 +164,4 @@ if [ ! -f .env ]; then
 fi
 "$PY_DUBBING" ./doctor.py || true
 
-say "done. Fix anything FAIL/WARN above, then: ./start_ui.sh"
+say "done. Fix anything FAIL/WARN above, then: ./start_frontend.sh"

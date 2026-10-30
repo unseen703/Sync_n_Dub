@@ -383,7 +383,7 @@ Annotate: speaker turns with timestamps; verbatim transcript; word boundaries on
 
 *As built, 2026-10-27. Descriptions come from each file's own docstring. The original planned layout (a `dubbing/` package with `stages/`, `clients/`, `baselines/`) was not built that way: the stages live in `backend/`, the model adapters in `models/`, and the contract is the merged JSON inside a job folder, not a `Manifest` class.*
 
-**Scope:** `backend/`, `models/`, `ui/` (Python side) and `tests/` (docstring headers only). Not covered: `scripts/` and the web frontends. The `backend/speed.py` and `backend/restore.py` rows come from CLAUDE.md and the README, not from reading those files.
+**Scope:** `backend/`, `models/`, `frontend/` (Python side) and `tests/` (docstring headers only). Not covered: `scripts/` and the web frontends. The `backend/speed.py` and `backend/restore.py` rows come from CLAUDE.md and the README, not from reading those files.
 
 ### Top level
 
@@ -395,7 +395,7 @@ Annotate: speaker turns with timestamps; verbatim transcript; word boundaries on
 | `docs/` | Long-form docs: `HOST.md`, `STAGES.md`, `ROUGH_EDGES.md`, `EDIT_AGENT.md`, `PROMPTS.md`, `UI_RUN.md` |
 | `backend/` | The pipeline: one module per stage or concern (below) |
 | `models/` | Model adapters, one folder per stage, each with a registry |
-| `ui/` | FastAPI operator UI and its job runner |
+| `frontend/` | FastAPI operator UI and its job runner |
 | `tests/` | pytest suite, no models or network |
 | `scripts/` | Operator and batch scripts: setup, corpus fetch, clip runs, sweeps, repo checkup |
 | `data/` | Job folders (`data/jobs/<job_id>/`), voice reference clips, layout doc `DATA_LAYOUT.md` |
@@ -413,7 +413,6 @@ Entry points and orchestration
 | `cli.py` | `python -m backend.cli`: argparse front end (79 flags) for a whole run |
 | `pipeline.py` | End-to-end orchestrator, 26 logged stages from download to the 10b MT check; `run_post_mt_stages` (9b to 9h) is what edit replays re-run |
 | `jobs.py` | Job-folder layout and `manifest.json` (status, config, stage inventory); `python -m backend.jobs list/show` |
-| `experiment.py` | Runs one clip through several dubbing variants with the upstream prefix (download to MT) cached once and TTS reused where only placement changes |
 | `gpu.py` | GPU discovery, free-card check, and ffmpeg sharding helpers for multi-GPU lip-sync |
 | `tracing.py` | Langfuse tracing around the LLM client; never raises, flushes at exit |
 
@@ -509,11 +508,11 @@ Stages and adapters (registered names in bold)
 | `tts/` | `bodhan_adapter.py` (**bodhan**) | Hosted Indic-Speak, returns WAV bytes; re-speaks at a different rate; the only stock-voice engine |
 Removed registry entries, so the README block is out of date on them: `wav2lip_hd` and `lipgan` (2026-10-23; restoration is now `--restore gfpgan`), `openvoice` and `vevo`, and `ts_talknet`. The whole `vc/` package went on 2026-10-28, along with `backend/voice_convert.py`, stage 9f and `--vc`. Adapter files for `asd/`, `faces/` and the `bodhan` base classes were not opened; their rows come from the registry docstrings.
 
-### `ui/` — operator UI (Python side)
+### `frontend/` — operator UI (Python side)
 
 | File | Features |
 | --- | --- |
-| `server.py` | FastAPI app on loopback port 7861; serves `ui/web-dist/` and the job APIs |
+| `server.py` | FastAPI app on loopback port 7861; serves `frontend/web-dist/` and the job APIs |
 | `runner.py` | Detached process that runs one job from `request.json`; fetch, cut, probe, then the pipeline; `--rerun` for edit replays |
 | `progress.py` | Logging handler that turns the pipeline's `=== stage N ===` markers into `progress.json` for the 8-pill bar |
 | `presets.py` | Three run presets (`draft`, `standard`, `best`), pipeline kwargs, runtime estimates |
@@ -534,7 +533,7 @@ Removed registry entries, so the README block is out of date on them: `wav2lip_h
 | `spec.py` | The job's settings as plain label, value and hint lines, plus the raw config for an "Advanced" view |
 | `cost.py` | Turns an edit's dirty stages into what re-runs, what doesn't, and an estimated time |
 
-`ui/auth.py` is deleted in the working tree. The frontends (`ui/web/`, `ui/web-dist/`) were not read, and there may be other `ui/` modules I haven't seen.
+`frontend/auth.py` is deleted in the working tree. The frontends (`frontend/web/`, `frontend/web-dist/`) were not read, and there may be other `frontend/` modules I haven't seen.
 
 ### `tests/`
 

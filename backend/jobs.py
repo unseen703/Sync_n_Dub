@@ -292,7 +292,7 @@ _RESULT_FIELDS = (
     # the manifest serialises, so a field missing here is absent from disk even
     # though `PipelineResult` carries it.
     "content_register", "content_register_tier",
-    # The MT gate flag — ui/progress.py reads it back to show the cast banner.
+    # The MT gate flag — frontend/progress.py reads it back to show the cast banner.
     "awaiting_cast",
 )
 

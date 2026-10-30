@@ -27,7 +27,7 @@ set -u
 
 # REPO is this script's own location, not a literal, so the same file works
 # from any checkout. PY mirrors models/lipsync/base.py::resolve_env_python's
-# order: an explicit DUBBING_PY wins -- `ui.server.main()` sets it to its own
+# order: an explicit DUBBING_PY wins -- `frontend.server.main()` sets it to its own
 # `sys.executable` before spawning a job (CLAUDE.md), so a detached run
 # normally gets the exact interpreter already proven to work -- then the
 # sibling `dubbing` conda env next to whatever interpreter this shell can
@@ -108,4 +108,4 @@ echo " GPUs         : ${CUDA_VISIBLE_DEVICES:-all visible}"
 echo "=================================================================="
 
 cd "$REPO" || exit 1
-exec "$PY" -m ui.runner "$JOB_ID" "$@"
+exec "$PY" -m frontend.runner "$JOB_ID" "$@"

@@ -74,7 +74,7 @@ how every row here started.
 | ffprobe → `(fps, duration)` | `backend/media_io.py::probe_video` | 4x |
 | media duration (ffprobe, then ffmpeg's banner) | `backend/media_io.py::probe_duration` | 2x |
 | `--speed-mode segment` knobs and their bounds | `backend/speed.py` | 2x |
-| best-effort JSON read of a job file | `ui/_io.py::read_json` | 4x |
+| best-effort JSON read of a job file | `frontend/_io.py::read_json` | 4x |
 | the lip-sync model ids the edit agent advertises | `models.lipsync.available_models()`, via `edits._lipsync_model_ids` | hand-typed |
 
 Four things about this that are load-bearing rather than tidy:
@@ -97,7 +97,7 @@ Four things about this that are load-bearing rather than tidy:
   this repo exercises the Bodhan HTTP path at all** — so the loops stay
   where their special cases are readable. The constructor-time half is what
   moved.
-- **`backend/speed.py` is dependency-free on purpose.** `ui/presets.py` is
+- **`backend/speed.py` is dependency-free on purpose.** `frontend/presets.py` is
   imported when the web server starts and pulls in nothing heavier than `os`
   and `typing`; routing it through `backend.cli` would drag argparse and all
   seven model registries into that import.
@@ -137,7 +137,7 @@ defaults to 0.0 because any margin is itself a pause.
 
 **The shift-forward cursor used to put speech on top of the music, two ways.**
 Both fixed 2026-10-22 in `plan_naive_slot`, both on by default under
-`--speed-mode segment` and in the UI.
+`--speed-mode segment` and in the frontend.
 
 1. **A cue nested in another cue's slot is SIMULTANEOUS SPEECH**, and a
    monotone cursor cannot say so — it pushes the nested cue past the turn it
@@ -187,7 +187,7 @@ tell "the operator asked" from "nobody said"; only the first collides, and
 the explicit flag for the same reason: refusing a transcribe-only run over
 an unasked-for default would be a regression.
 
-`ui/presets.py::UI_TIMING_DEFAULTS` was a deliberate COPY of what the
+`frontend/presets.py::UI_TIMING_DEFAULTS` was a deliberate COPY of what the
 resolver builds (the CLI resolver takes an argparse namespace the UI path
 does not have), merged unconditionally at `build_kwargs`. Since 2026-10-23
 it is `backend.speed.segment_timing_kwargs()` — both sides call the one
@@ -204,15 +204,15 @@ namespace does not describe how a run was paced — `--speed-mode` and
 after parsing, so `resolve_speed_setup` is the accurate source.
 
 **There is an operator UI, and it is a second entry point into the pipeline.**
-`ui/server.py` (FastAPI, loopback-only, port 7861) serves a built Vite app from
-`ui/web-dist/` (API-only, with a warning, when no build exists). Jobs submitted from it are launched DETACHED through
+`frontend/server.py` (FastAPI, loopback-only, port 7861) serves a built Vite app from
+`frontend/web-dist/` (API-only, with a warning, when no build exists). Jobs submitted from it are launched DETACHED through
 `scripts/ui_run_job.sh`, which is the only launcher that exports the
-`libstdc++` preload — starting `ui.runner` with a bare `Popen` walks stage 9h
+`libstdc++` preload — starting `frontend.runner` with a bare `Popen` walks stage 9h
 into the cv2/insightface import-order trap in section 1.
 
 **Speaker preview before casting.** The voices stage writes
 `voices/<stem>.refs/*.wav` only after the cast is chosen, so a job waiting on
-the cast has no reference clips. `ui.speaker_media.speaker_preview_paths` cuts
+the cast has no reference clips. `frontend.speaker_media.speaker_preview_paths` cuts
 each speaker's longest solo stretch (max 8 s) from the vocals stem into
 `voices/previews/` so the cast row can play it. It is kept out of `*.refs`
 on purpose; the pipeline must never mistake a preview for its own reference.
@@ -228,7 +228,7 @@ Three things about it are easy to get wrong:
   `tests/test_ui_server.py` does.
 - **The progress bar is EIGHT pills, always, on every run — seven named
   stages plus `Finished`.** Changed 2026-10-22 by request. `PHASE_GROUPS`
-  in `ui/progress.py` folds the 24 markers into Download video · Speaker
+  in `frontend/progress.py` folds the 24 markers into Download video · Speaker
   annotation · Transcribe · Translate · Speech generation · Mix · Lip sync,
   and `_group_phases` appends `Finished`. A stage marker added to
   `pipeline.py` therefore also belongs in a group (or in `HIDDEN_KEYS`, for
@@ -276,13 +276,13 @@ Three things about it are easy to get wrong:
   "Finished" over an unlit Lip sync node is the screen contradicting itself.
   A terminal job with a pending node heads `<label> not started`.
 - **Progress is scraped from the pipeline's own `=== stage N ===` log lines**
-  by a `logging.Handler` that `ui/runner.py` installs on the ROOT logger.
+  by a `logging.Handler` that `frontend/runner.py` installs on the ROOT logger.
   `backend/` has no idea the UI exists, which is the point — but renaming a
   marker silently freezes the progress bar. `tests/test_ui_progress.py` greps
   `pipeline.py` for every marker literal and fails if one stops matching.
   The handler needs the root logger's LEVEL raised too: a handler never sees
   a record its logger filtered first, and root defaults to WARNING.
-- **The UI never shows the runner log.** `ui/errors.py` turns a traceback
+- **The UI never shows the runner log.** `frontend/errors.py` turns a traceback
   into `{title, detail, action}` — "Missing Hugging Face credentials · Add
   HF_TOKEN to .env", "Ran out of GPU memory · Use a shorter section" — and
   `read_progress` attaches it as `progress.failure`. An unrecognised failure
@@ -290,7 +290,7 @@ Three things about it are easy to get wrong:
   at one line so the UI cannot drift back into streaming a log. The log stays
   at `GET /api/jobs/{id}/log` for whoever is debugging.
 - **Tone options are the engine's own list, not a plausible one.**
-  `ui/speakers.py::tone_vocabulary()` reads
+  `frontend/speakers.py::tone_vocabulary()` reads
   `models.tts.bodhan_adapter.INDIC_SPEAK_STYLES` — 14 values where case and
   spacing are significant and an unknown value is a **422, not a silent
   fallback**. This module first shipped an invented list ("formal",
@@ -325,7 +325,7 @@ Three things about it are easy to get wrong:
   dirty a pipeline stage and cost a re-render for changing a caption.
 - **Three job-folder shapes exist on disk** (`progress.json`, the clip
   runner's `STATUS.json`, a bare `manifest.json`) plus 16 folders with no
-  status file at all. `ui/progress.py::read_progress` normalises all four,
+  status file at all. `frontend/progress.py::read_progress` normalises all four,
   so nothing above it branches on which runner produced a job.
 
 **Two things the UI refuses on purpose.** (Moved from README 2026-10-26.)
@@ -353,7 +353,7 @@ is the case to override by hand: a 96×96 crop on a ~520 px face is upscaled
 roughly 5×.
 
 **Every hosted stage of a default UI run is Bodhan.** As of 2026-10-17
-`ui/presets.py` defaults ASR, MT and TTS all to `bodhan` (ASR moved off
+`frontend/presets.py` defaults ASR, MT and TTS all to `bodhan` (ASR moved off
 `whisperx` by request). That removes the one stage that used to run locally,
 so an outage — which these endpoints answer as `internal_error` 5xx, not as
 rate limiting — takes the whole run rather than most of it. Since 2026-10-28
@@ -450,8 +450,8 @@ the relabelled turn list.
 
 **There is a second page now: Talking Head (`#/talking-head`).** Added
 2026-10-20. A still portrait plus a chosen line, rather than a video plus its
-own soundtrack — `ui/talking_head.py`, `ui/routes_talkinghead.py`, and
-`ui/web/src/components/talkinghead/`. Three gates in order: a photo WITH a
+own soundtrack — `frontend/talking_head.py`, `frontend/routes_talkinghead.py`, and
+`frontend/web/src/components/talkinghead/`. Three gates in order: a photo WITH a
 face, a language, a line.
 
 **The lines are DATA, not code** — `data/talking_head/dialogues.json`, five
@@ -461,7 +461,7 @@ adding the link is the only step that makes it playable. No code change, no
 deploy. (Every entry shipped that way; the 50 clips are in
 `data/talking_head/audio/` since 2026-10-21 and no null is left. The rule
 stays, for lines added later.) The language dropdown is
-`ui/langs.options("bodhan")`, i.e. the voice catalog — not a list written on
+`frontend/langs.options("bodhan")`, i.e. the voice catalog — not a list written on
 the page, which is how the tone picker once shipped values the engine 422s
 on.
 
@@ -488,7 +488,7 @@ deliberate 501 while the catalogue had no clips, and the Generate button was
 hard-coded `disabled`; both outlived their reason the day the 50 wavs
 landed, and the page then looked broken rather than unfinished. It is a
 background THREAD plus `GET .../render/{id}` to poll — the same shape
-`ui/bbox_video.py` uses, and for the same reason: 8-21x the clip length is
+`frontend/bbox_video.py` uses, and for the same reason: 8-21x the clip length is
 minutes, long enough that an inline request dies to a browser timeout while
 the GPU work carries on. Four things about it:
 
@@ -509,7 +509,7 @@ the GPU work carries on. Four things about it:
   the VRAM is committed, same as `routes_edits.run_lipsync_now`.
 
 **"insightface not found" on this page is a WRONG INTERPRETER, not a broken
-install.** Seen 2026-10-21: `python -m ui.server` had been started from
+install.** Seen 2026-10-21: `python -m frontend.server` had been started from
 `.venv-diarization` (a uv venv carrying torch and cv2 but not insightface)
 instead of from `envs/dubbing`. The UI server is started by hand and has no
 launcher wrapping it, so nothing pins the env the way `scripts/ui_run_job.sh`
@@ -518,7 +518,7 @@ loads and misbehaves, and names `sys.executable` plus the python to use —
 `type(e).__name__` was the one fact that does not help, since
 `ModuleNotFoundError` is equally true of a typo, a broken install and the
 wrong env. Start it with
-`/data1/dipak_data/miniconda3/envs/dubbing/bin/python -m ui.server`.
+`/data1/dipak_data/miniconda3/envs/dubbing/bin/python -m frontend.server`.
 
 **A dub can be reviewed BEFORE the expensive stage, in three steps.**
 Added 2026-10-19. The `draft` preset already dubbed without lip-syncing
@@ -542,7 +542,7 @@ Two things went with the move:
   language, lip-sync model and every speaker's voice and tone — a read-only
   second copy of what the cast table and the lip-sync panel already show,
   kept in step by hand. A staged change appears ON the thing it changes now:
-  `components/ui/StagedValue.tsx` renders old-struck-through → new-in-blue,
+  `components/frontend/StagedValue.tsx` renders old-struck-through → new-in-blue,
   on the cast rows for gender/voice/tone and under the cue for a rewritten
   line.
 - **`blue-ink` is its own token, not `brand-ink`.** Brand means
@@ -574,7 +574,7 @@ Three pieces were added and each exists because of a specific silent failure:
   reads that key ahead of the map. An unknown target id is refused: a made-up
   speaker has no reference clip, no gender vote and no catalog voice, so TTS
   would fall back to the engine default.
-- **`GET .../transcript`** (`ui/transcript.py`) is a READ of the merged JSON,
+- **`GET .../transcript`** (`frontend/transcript.py`) is a READ of the merged JSON,
   paged. It carries source text AND dub text — a translation cannot be judged
   from one side — plus `tts_error` per cue, because a Bodhan outage leaves
   the stage green with every segment failed and that has to be visible

@@ -16,7 +16,7 @@ Versions, in their own subdirectory beside them::
 
 Naming constraints, each load-bearing:
 
-1. Versions go in a subdirectory. `ui/media.find_dubbed_video` falls back to
+1. Versions go in a subdirectory. `frontend/media.find_dubbed_video` falls back to
    "newest `.mp4` in `mix/`" when the manifest pointer is missing, so a
    version file in `mix/` would silently become the UI's dub.
 2. The `.dubbed.<ext>` tail is kept so the files stay playable; the

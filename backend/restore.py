@@ -1,7 +1,7 @@
 """Stage 9i — face restoration over a finished lip-sync render.
 
 Runs after 9h, never as part of a submission: `--restore gfpgan` on the CLI,
-`POST /api/jobs/{id}/enhance` in the UI. The restorer writes video only, so
+`POST /api/jobs/{id}/enhance` in the frontend. The restorer writes video only, so
 the render's audio is remuxed here after the output is decode-checked.
 """
 from __future__ import annotations

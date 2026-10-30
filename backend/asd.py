@@ -13,7 +13,7 @@ from typing import Dict, Optional
 from models.asd import ASDResult, available_models, get_asd
 from models.faces import FaceTracks
 
-from .assign_faces import (
+from .faces import (
     SegmentAssignment,
     assign_faces_to_turns,
     assignments_to_jsonable,

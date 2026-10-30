@@ -285,7 +285,7 @@ def place_face_restore_weights() -> int:
     """
     import sysconfig
 
-    weights = _resolve_dest("models/weights/restore")
+    weights = _resolve_dest("models/weights/gfgan")
     sp = Path(sysconfig.get_paths()["purelib"])
     targets = {
         "detection_Resnet50_Final.pth": [sp / "facexlib/weights"],

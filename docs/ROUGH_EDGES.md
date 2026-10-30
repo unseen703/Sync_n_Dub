@@ -8,7 +8,7 @@ holds the incident history.
 ## 4. Known rough edges
 
 - **Three commits now exist.** `8c77641` ("Commit full pipeline work…")
-  brought `backend/`, `models/`, `tests/` and `ui/` under version control, so
+  brought `backend/`, `models/`, `tests/` and `frontend/` under version control, so
   the long-standing "only two commits; everything lives on this disk" warning
   no longer applies. `git status` is still busy — `data/` and a number of
   `scripts/` remain untracked — so check it rather than assuming either way.
@@ -268,7 +268,7 @@ holds the incident history.
      and returned the dub-only estimate as an ordinary "about X to Y". So the
      one model that runs a second per-frame GAN pass advertised as the
      CHEAPEST row on the list. It now returns `lipsync_measured` and says so
-     in the text; `ui/cost.py` had always warned by name, and the two
+     in the text; `frontend/cost.py` had always warned by name, and the two
      disagreeing was the tell.
   2. **`"wav2lip_hd".startswith("wav2lip")` is True**, and `wav2lip` came
      first in all three prefix loops — `spec.py`, `server.py::_job_config`
@@ -282,7 +282,7 @@ holds the incident history.
      registered adapters, and `edits.py`'s op catalogue advertised three to
      the LLM, so the agent was never told HD or LipGAN existed.
 
-  `ui/lipsync_models.py` is now the single source: labels, measured bands,
+  `frontend/lipsync_models.py` is now the single source: labels, measured bands,
   per-model caveats, and one `normalise()` (longest key first) replacing all
   three loops. `presets.LIPSYNC_FACTORS`, `cost.LIPSYNC_RATES`,
   `spec.LIPSYNC_WORDS` and `/api/options` all derive from it, and
@@ -297,7 +297,7 @@ holds the incident history.
   per-PIXEL, so it tracks frame size as well as length.
 
 - **The retired lip-sync FACTS rows were dropped, and three jobs relabelled.**
-  2026-10-28, by request. `ui/lipsync_models.FACTS` carried `wav2lip_hd`,
+  2026-10-28, by request. `frontend/lipsync_models.FACTS` carried `wav2lip_hd`,
   `lipgan` and `latentsync` as display-only `retired: True` rows so a
   finished job on disk still read correctly. All three are gone and
   `RETIRED` is now empty.
@@ -388,7 +388,7 @@ holds the incident history.
   explicit argument, then `<MODEL>_PYTHON`, then the **sibling conda env**
   (`<prefix>/envs/<name>/bin/python`, derived from `sys.executable` the same
   way `media_io._ffmpeg_bin()` finds the running env), then `sys.executable`
-  with a warning. Resolving it in the adapter covers the CLI, `ui/runner.py`,
+  with a warning. Resolving it in the adapter covers the CLI, `frontend/runner.py`,
   the edit agent and `experiment.py` at once; `.env` is now optional. All four
   variables are in `.env.example`.
 
@@ -487,9 +487,9 @@ holds the incident history.
   incomplete.** `_run_pipeline` calls `_jobs.allocate(config=…)` at startup,
   which OVERWRITES whatever the submitter wrote — so the UI's richer config
   survived only until the pipeline began. That dict carried 15 keys and
-  none of the optional-stage switches, while `ui/progress.plan_stages`
+  none of the optional-stage switches, while `frontend/progress.plan_stages`
   branches on 22. A finished job therefore re-planned to 15 stages against
-  a progress doc holding 25, and `ui/spec.py`, `ui/cost.py`, `_list_jobs`
+  a progress doc holding 25, and `frontend/spec.py`, `frontend/cost.py`, `_list_jobs`
   and `edit_agent._config` all described a run with no resegmentation, no
   speaker refinement, no register, no emotion, no visemes and no face
   detector — none of which was true. Fixed 2026-10-17: the allocate config
@@ -502,7 +502,7 @@ holds the incident history.
 
   `edit_agent.rerun` recovers a run's timing setup by re-parsing its argv
   through `cli.resolve_speed_setup`, which is right for a CLI run and
-  impossible for a UI one: `ui/runner.py` is launched with the **job id
+  impossible for a UI one: `frontend/runner.py` is launched with the **job id
   alone**, so `recover_args` hands the pipeline parser `['<job_id>']`, it
   exits on the missing `--input`, the exception is caught, and `ns` is None.
   Every `nsget(...)` then returned its argparse default and `setup` stayed
@@ -529,10 +529,10 @@ holds the incident history.
 
   Three sources now, most authoritative first: an explicit `speed_setup=`
   from the caller, then the argv, then `speed_setup_from_config(cfg)` off the
-  manifest. `ui/runner.py` passes the first, read from **`request.json`'s
+  manifest. `frontend/runner.py` passes the first, read from **`request.json`'s
   `pipeline` block** rather than the manifest — the resolved kwargs are
   recorded there verbatim for every job this UI has ever submitted, so jobs
-  that predate the fix replay correctly too. `ui/presets.plan_config` also
+  that predate the fix replay correctly too. `frontend/presets.plan_config` also
   records the pacing now, for everyone else.
   `tests/test_ui_backend_sync.py` greps `SpeedSetup._fields` against
   `plan_config`, so a field added to one and not the other fails loudly
@@ -548,7 +548,7 @@ holds the incident history.
   absent. `--rerun` and the edit agent's replay both take this path.
 
 - **Bodhan is the only TTS engine, and the UI no longer offers a choice.**
-  Changed 2026-10-17. `ui/presets.py::default_tts()` returns `bodhan`, the
+  Changed 2026-10-17. `frontend/presets.py::default_tts()` returns `bodhan`, the
   new-job form states the engine instead of picking it, and `/api/options`
   returns a one-row `tts_engines` list. `POST /api/jobs` validates the id
   against the registry and 400s on an unknown one — it used to allocate,
@@ -573,7 +573,7 @@ holds the incident history.
      — verified absent from all 322 voices `edge_tts.list_voices()` returns
      — and the adapter answered an unknown language by silently substituting
      Hindi, so every Punjabi Edge run produced fluent Hindi at exit code 0.
-     `ui/spec.py` and `ui/server.py` still carry `edge` as a *display label*,
+     `frontend/spec.py` and `frontend/server.py` still carry `edge` as a *display label*,
      deliberately: jobs recorded before 10-17 name it on disk.
 
 - **The TTS register is chosen at stage 9b1, and a UI run used to miss it
@@ -793,7 +793,7 @@ holds the incident history.
   Face restoration was removed on 2026-10-17 (CodeFormer,
   `--restore codeformer`) and **is back, now as GFPGAN** in
   `models/restore/`, with `backend/face_enhance.py` and the UI's enhance
-  routes (`ui/enhance.py`, `ui/routes_enhance.py`). For reference, the old
+  routes (`frontend/enhance.py`, `frontend/routes_enhance.py`). For reference, the old
   CodeFormer pass measured 386 s on 30 s / 747 frames of 720p (~13×
   realtime, ~770 MiB VRAM), roughly doubling a Wav2Lip run, and raised
   detail in a 139×131 face box by +36%.

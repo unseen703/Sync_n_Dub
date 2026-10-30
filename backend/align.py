@@ -22,7 +22,7 @@ from models.align import (
     available_models,
     get_aligner,
 )
-from models.asr import ASRResult, ASRSegment, Word
+from backend.asr import ASRResult, ASRSegment, Word
 
 log = logging.getLogger(__name__)
 

@@ -11,8 +11,8 @@ import logging
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from models.asr import ASRResult, available_models, get_asr
-from models.asr.base import ASRSegment
+from backend.asr import ASRResult, available_models, get_asr
+from backend.asr.base import ASRSegment
 
 log = logging.getLogger(__name__)
 

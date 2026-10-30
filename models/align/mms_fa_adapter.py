@@ -18,7 +18,7 @@ from typing import List, Optional
 
 import numpy as np
 
-from models.asr.base import Word
+from backend.asr.base import Word
 
 from .base import AlignRequest, AlignResult, AlignedSegment, BaseAligner
 

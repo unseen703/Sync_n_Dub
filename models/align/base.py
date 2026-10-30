@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional
 
-from models.asr.base import Word
+from backend.asr.base import Word
 
 
 @dataclass

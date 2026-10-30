@@ -694,7 +694,7 @@ def write_report(report: Dict[str, Any], out_path: Path) -> Path:
 
 
 # ---------------------------------------------------------------------------
-# CLI — `python -m backend.transcripts test ...`
+# CLI — `python -m backend.asr.transcripts test ...`
 # ---------------------------------------------------------------------------
 
 def _print_overlap_metrics(r: Dict[str, Any]) -> None:
@@ -743,25 +743,25 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     Examples:
         # ASR WER/CER against publisher captions
-        python -m backend.transcripts test \
+        python -m backend.asr.transcripts test \
             --asr-json data/asr/VID.bodhan.asr.json \
             --transcript data/videos/VID.en.vtt \
             --language en
 
         # MT BLEU/chrF against a dubbed-language caption file
-        python -m backend.transcripts test \
+        python -m backend.asr.transcripts test \
             --mt-json data/mt/VID.bodhan.hi.mt.json \
             --transcript data/videos/VID.hi.vtt \
             --target-language hi
 
         # Both at once; writes JSON reports next to --out-dir (default: cwd)
-        python -m backend.transcripts test \
+        python -m backend.asr.transcripts test \
             --asr-json ... --mt-json ... --transcript ... --out-dir data/eval
     """
     import argparse
 
     ap = argparse.ArgumentParser(
-        prog="python -m backend.transcripts",
+        prog="python -m backend.asr.transcripts",
         description="Score ASR/MT outputs against an existing transcript "
                     "(VTT, SRT, or plain .txt).",
     )

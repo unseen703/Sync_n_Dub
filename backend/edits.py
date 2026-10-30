@@ -1459,7 +1459,7 @@ def _h_code_mix(data, seg_ids, op, applied, ctx, res):
             # the designed path for this edit, and an LLM rewrite of every
             # line is a bigger change than the user asked for.
             try:
-                from models.translit import available_models
+                from backend.translate.translit import available_models
                 model = (available_models() or [None])[0]
             except Exception as e:                      # registry unimportable
                 log.info("translit registry unavailable: %s", e)
@@ -2056,8 +2056,8 @@ def _h_set_target_language(data, seg_ids, op, applied, ctx, res):
     script = op.params.get("target_script") or None
 
     try:
-        from models.mt import get_mt
-        from models.mt.base import MTRequest
+        from backend.translate import get_mt
+        from backend.translate.base import MTRequest
         bodhan = get_mt("bodhan")
     except Exception as e:
         raise EditError(f"Bodhan MT adapter is not available: {e}") from e

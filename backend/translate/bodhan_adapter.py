@@ -20,7 +20,7 @@ import logging
 import time
 from typing import List, Optional
 
-from backend.sanitize import sanitize_mt_output
+from backend.translate.sanitize import sanitize_mt_output
 
 from backend.common.bodhan import BodhanClientMixin
 from .base import BaseMT, MTRequest, MTResult, MTSegment

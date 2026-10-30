@@ -29,8 +29,8 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from backend.asr import ASRResult
-from models.mt import MTRequest, MTResult, available_models, get_mt
-from models.translit import (
+from backend.translate import MTRequest, MTResult, available_models, get_mt
+from backend.translate.translit import (
     TranslitRequest,
     available_models as translit_available_models,
     get_transliterator,

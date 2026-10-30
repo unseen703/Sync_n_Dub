@@ -94,8 +94,8 @@ def _tts_styles():
         return ("auto", NEUTRAL_STYLE) + tuple(INDIC_SPEAK_STYLES)
     except ImportError:
         return ("auto", NEUTRAL_STYLE)
-from models.mt import available_models as _mt_models
-from models.translit import available_models as _translit_models
+from backend.translate import available_models as _mt_models
+from backend.translate.translit import available_models as _translit_models
 from models.tts import available_models as _tts_models
 
 from .pipeline import DEFAULT_DATA_DIR, REPO_ROOT, run_pipeline

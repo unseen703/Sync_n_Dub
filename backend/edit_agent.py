@@ -1714,7 +1714,7 @@ def _latentsync_targets_npz(root: Path, video: Path, *, device: str = "cuda"):
     try:
         from .asd import find_scores_npz, load_scores_npz
         from .lipsync_targets import build_targets, save_targets
-        from models.faces.base import FaceTracks
+        from backend.faces.base import FaceTracks
 
         npz = find_scores_npz(root / "asd", video.stem)
         faces = sorted((root / "faces").glob("*.npz"))

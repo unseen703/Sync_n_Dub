@@ -1,6 +1,6 @@
 """LoCoNet-ASD adapter (Wang et al., CVPR 2024).
 
-Wraps the `SJTUwxz/LoCoNet_ASD` clone under `models/asd/vendor/loconet`,
+Wraps the `SJTUwxz/LoCoNet_ASD` clone under `backend/asd/vendor/loconet`,
 driven by the `Superxixixi/LoCoNet_ASD` AVA weights. Unlike a per-face scorer
 it models a scene's speakers jointly, which is where its gain sits (+3% mAP
 multi-speaker).
@@ -74,7 +74,7 @@ class LoCoNetASD(BaseASD):
             self.vendor_name, f"{self.env_prefix}_REPO",
             str(repo_path) if repo_path else None,
             legacy=self.legacy_path,
-            vendor_root="models/asd/vendor")
+            vendor_root="backend/asd/vendor")
 
         env_ckpt = os.getenv(f"{self.env_prefix}_CHECKPOINT")
         if checkpoint or env_ckpt:
@@ -132,7 +132,7 @@ class LoCoNetASD(BaseASD):
             raise RuntimeError(
                 f"LoCoNet repo not found at {self.repo_path}. Clone it with:\n"
                 f"  git clone {self.clone_url} "
-                f"models/asd/vendor/{self.vendor_name}\n"
+                f"backend/asd/vendor/{self.vendor_name}\n"
                 f"or set {self.env_prefix}_REPO to an existing clone."
             )
         if self.checkpoint is None or not self.checkpoint.exists():

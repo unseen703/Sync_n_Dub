@@ -24,11 +24,11 @@ from dotenv import load_dotenv
 from backend import speed as _speed
 
 from models.align import available_models as _align_models
-from models.asd import available_models as _asd_models
+from backend.asd import available_models as _asd_models
 from backend.asr import available_models as _asr_models
 from backend.diarize import available_models as _diar_models
-from models.faces.detect import available_detectors as _detectors
-from models.faces.track import available_trackers as _trackers
+from backend.faces.detect import available_detectors as _detectors
+from backend.faces.track import available_trackers as _trackers
 from models.lipsync import available_models as _lipsync_models
 
 

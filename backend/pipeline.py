@@ -323,7 +323,7 @@ def _speaker_face_tracks(out_root: Path, video: Path) -> Dict[str, tuple]:
             log.info("voices: no face tracks + ASD assignments in %s; gender "
                      "votes on audio alone", out_root.name)
             return {}
-        from models.faces.base import FaceTracks
+        from backend.faces.base import FaceTracks
         from .faces import speaker_face_tracks
         tracks = FaceTracks.load_npz(npz[0])
         assignments = json.loads(js[0].read_text())
@@ -383,7 +383,7 @@ def _asd_coord_list(out_root: Path, video: Path, model: str, *,
                 out_root.name, model)
             return None
 
-        from models.faces.base import FaceTracks
+        from backend.faces.base import FaceTracks
         from .asd import load_scores_npz
         from .lipsync_targets import build_coord_list
 
@@ -438,7 +438,7 @@ def _asd_targets_npz(out_root: Path, video: Path, model: str, *,
                 out_root.name, model)
             return None
 
-        from models.faces.base import FaceTracks
+        from backend.faces.base import FaceTracks
         from .asd import load_scores_npz
         from .lipsync_targets import build_targets, save_targets
 
@@ -651,7 +651,7 @@ def _run_asd_stage(
         except (OSError, ValueError):
             return None
 
-    from models.faces.base import FaceTracks
+    from backend.faces.base import FaceTracks
     tracks = FaceTracks.load_npz(faces[0])
     log.info("=== ASD (%s) + Hungarian assignment ===", asd_model)
     asd_result = score_asd(
@@ -2051,7 +2051,7 @@ def _run_pipeline(
         # Claim the shared C libraries before pyannote does. Must stay ABOVE
         # stage 4: importing it after costs stage 5 the whole face stage with
         # an error that blames a missing package. See the docstring.
-        from backend.faces import preimport_face_stack
+        from backend.faces.faces import preimport_face_stack
         preimport_face_stack()
 
         # 4. Diarization — prefer the dialogue stem (cleaner input).

@@ -18,9 +18,9 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
-from models.faces import FaceDetections, FaceTracks
-from models.faces.detect import available_detectors, get_detector
-from models.faces.track import available_trackers, get_tracker
+from backend.faces.faces import FaceDetections, FaceTracks
+from backend.faces.detect import available_detectors, get_detector
+from backend.faces.track import available_trackers, get_tracker
 
 log = logging.getLogger(__name__)
 

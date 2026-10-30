@@ -10,8 +10,8 @@ import logging
 from pathlib import Path
 from typing import Dict, Optional
 
-from models.asd import ASDResult, available_models, get_asd
-from models.faces import FaceTracks
+from backend.asd import ASDResult, available_models, get_asd
+from backend.faces.faces import FaceTracks
 
 from .faces import (
     SegmentAssignment,
@@ -95,7 +95,7 @@ def load_scores_npz(path: Path) -> ASDResult:
     """Read back what `save_scores_npz` wrote."""
     import numpy as np
 
-    from models.asd import ASDScore
+    from backend.asd import ASDScore
 
     with np.load(Path(path), allow_pickle=True) as z:
         ids = [str(t) for t in z["track_ids"].tolist()]

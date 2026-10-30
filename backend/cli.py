@@ -26,7 +26,7 @@ from backend import speed as _speed
 from models.align import available_models as _align_models
 from models.asd import available_models as _asd_models
 from backend.asr import available_models as _asr_models
-from models.diarization import available_models as _diar_models
+from backend.diarize import available_models as _diar_models
 from models.faces.detect import available_detectors as _detectors
 from models.faces.track import available_trackers as _trackers
 from models.lipsync import available_models as _lipsync_models
@@ -857,7 +857,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # pyannote.audio 4.x torchcodec needs system ffmpeg libs; shim via PyAV.
     if args.model == "pyannote":
-        from models.diarization.pyannote_adapter import (
+        from backend.diarize.pyannote_adapter import (
             ensure_ffmpeg_libs_on_ld_path_or_reexec,
         )
         ensure_ffmpeg_libs_on_ld_path_or_reexec()

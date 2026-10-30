@@ -25,8 +25,8 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
-from models.diarization import available_models, get_diarizer
-from models.diarization.base import DiarizationResult, Turn
+from backend.diarize import available_models, get_diarizer
+from backend.diarize.base import DiarizationResult, Turn
 
 log = logging.getLogger(__name__)
 

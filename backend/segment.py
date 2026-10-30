@@ -14,7 +14,7 @@ from typing import List, Optional, Tuple
 import numpy as np
 import torch
 
-from models.diarization.base import DiarizationResult, Turn
+from backend.diarize.base import DiarizationResult, Turn
 
 log = logging.getLogger(__name__)
 

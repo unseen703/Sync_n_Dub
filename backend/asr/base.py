@@ -109,7 +109,7 @@ class BaseASR(ABC):
         return language.split("-")[0].lower() in cls.supported_languages
 
     def __init__(self, device: Optional[str] = None, **kwargs):
-        from models.diarization.base import _resolve_device
+        from backend.diarize.base import _resolve_device
         self.device = device or _resolve_device()
         self._loaded = False
 

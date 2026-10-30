@@ -94,7 +94,7 @@ class BaseMT(ABC):
     supports_nbest: bool = False
 
     def __init__(self, device: Optional[str] = None, **kwargs):
-        from models.diarization.base import _resolve_device
+        from backend.diarize.base import _resolve_device
         self.device = device or _resolve_device()
         self._loaded = False
 

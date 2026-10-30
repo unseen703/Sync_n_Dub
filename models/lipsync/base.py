@@ -119,7 +119,7 @@ class BaseLipSync(ABC):
     licence: str = "unknown"
 
     def __init__(self, device: Optional[str] = None, **kwargs):
-        from models.diarization.base import _resolve_device
+        from backend.diarize.base import _resolve_device
         self.device = device or _resolve_device()
         # Physical CUDA id to pin the adapter's subprocess to via
         # CUDA_VISIBLE_DEVICES. None = inherit parent env (default GPU).

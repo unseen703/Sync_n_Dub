@@ -1510,7 +1510,7 @@ def get_versions(job_id: str) -> Dict[str, Any]:
 def _launch_rerun(job_id: str, root: Path, *, flag: str = "--rerun",
                   env_extra: Optional[Dict[str, str]] = None,
                   ) -> Dict[str, Any]:
-    """`./ui_run_job.sh <job_id> <flag>`, detached (`--rerun` or `--cast`).
+    """`backend/common/ui_run_job.sh <job_id> <flag>`, detached (`--rerun` or `--cast`).
 
     Goes through the shell launcher rather than calling `python -m server.runner`
     directly, for one reason: **LD_PRELOAD**. A voice change dirties the
@@ -1531,7 +1531,7 @@ def _launch_rerun(job_id: str, root: Path, *, flag: str = "--rerun",
     imply they were not.
     """
     logf = root / "run.log"
-    launcher = REPO_ROOT / "ui_run_job.sh"
+    launcher = REPO_ROOT / "backend" / "common" / "ui_run_job.sh"
     if launcher.is_file():
         cmd = [str(launcher), job_id, flag]
     else:

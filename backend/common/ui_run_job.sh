@@ -34,7 +34,7 @@ set -u
 # find, then refuse rather than guess. A silently wrong interpreter here is
 # the cv2/insightface import-order trap in CLAUDE.md section 1, and it would
 # otherwise only surface after ASR/MT/TTS/mix have already run.
-REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 resolve_py() {
   if [ -n "${DUBBING_PY:-}" ] && [ -x "${DUBBING_PY}" ]; then

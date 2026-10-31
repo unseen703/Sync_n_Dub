@@ -104,7 +104,7 @@ A new caller imports the canonical one. A new adapter inherits. A case that does
 | ffprobe → `(fps, duration)` | `backend/common/media_io.py::probe_video` |
 | media duration (ffprobe → ffmpeg banner) | `backend/common/media_io.py::probe_duration` |
 | `--speed-mode segment` knobs | `backend/media/speed.py` |
-| best-effort JSON read of a job file | `frontend/_io.py::read_json` |
+| best-effort JSON read of a job file | `server/utils/_io.py::read_json` |
 | lip-sync model ids the edit agent advertises | `backend.lipsync.available_models()`, via `backend.pipeline.edits._lipsync_model_ids` |
 | delivery styles the TTS engine accepts | `backend/pipeline/edits.py::tone_styles` (reads `INDIC_SPEAK_STYLES`) |
 | ASD face crops, VRAM windowing | `backend/asd/_av_frontend.py` |
@@ -118,8 +118,8 @@ Why: [docs/STAGES.md](docs/STAGES.md).
 
 ## 3. Running things
 
-**frontend.** `frontend/server.py` (FastAPI, loopback only, port 7861) serves `frontend/-dist/`. Jobs launch detached via
-`./ui_run_job.sh`, the one launcher that sets the libstdc++ preload. The progress bar is 5 pills:
+**frontend.** `server/server.py` (FastAPI, loopback only, port 7861) serves `server/-dist/`. Jobs launch detached via
+`backend/common/ui_run_job.sh`, the one launcher that sets the libstdc++ preload. The progress bar is 5 pills:
 `Prepare`, `Translate`, `Dub audio`, `Lip-sync` (`progress.PHASE_GROUPS`) plus a synthetic `Finished`.
 
 **A UI job ends after emotion detection.** `server/runner.py` forces `stop_after_mt=True` on every
@@ -137,7 +137,7 @@ job both reuse the scores. Written to `voices/<stem>.gender.json`, deliberately 
 `speaker_voice_map.json`, which 9d rewrites wholesale. 9d reads the file back and only predicts the
 speakers it does not cover.
 
-**Progress-bar rules** (`frontend/progress.py`). Three that are easy to break:
+**Progress-bar rules** (`server/progress.py`). Three that are easy to break:
 
 - **`skipped` ≠ not-yet.** A group with no substages is `skipped` ("never part of this run"); post-gate
   stages are planned and flagged `deferred` ("not run yet"). `StageRibbon` ticks only `done` — painting
@@ -148,7 +148,7 @@ speakers it does not cover.
   rows in `planned` are reset, everything else is preserved. Before this, cast/rerun/lip-sync each
   replaced the file and erased phase one.
 - **A replay must open its own rows.** `edit_agent._rerun_lipsync_only` logs no stage marker, so
-  `frontend/runner.py::_run_rerun` calls `writer.begin()` for `6`/`9h` itself. 9i is planned only when
+  `server/runner.py::_run_rerun` calls `writer.begin()` for `6`/`9h` itself. 9i is planned only when
   `restore` is set — it never writes `progress.json`, so a planted row would hold `Finished` dark.
 
 **Edit agent.**

@@ -61,16 +61,16 @@ music and effects, and optionally lip-syncs the speaker's mouth to the new audio
 git clone git@github.com:unseen703/Sync_n_Dub.git dubbingstudio
 cd dubbingstudio
 
-./setup.sh                        # creates 4 conda envs, fetches vendor
+setup/setup.sh                    # creates 4 conda envs, fetches vendor
                                   # repos + weights, builds the UI, runs doctor
 
 cp .env.example .env && chmod 600 .env
 # Fill in HF_TOKEN, BODHAN_*_KEY, and optionally OPENROUTER_API_KEY
 
-./setup.sh --check-only           # verify everything is wired up
+setup/setup.sh --check-only      # verify everything is wired up
 ```
 
-`setup.sh` delegates to `install.sh`, which is idempotent — re-running after a
+`setup/setup.sh` delegates to `setup/install.sh`, which is idempotent — re-running after a
 partial install only does the remaining work.
 
 ### install.sh flags
@@ -125,8 +125,8 @@ envs/build_mmcv_musetalk.sh "$CONDA_BASE/envs/musetalk/bin/python"
 
 ```bash
 PY="$CONDA_BASE/envs/dubbing/bin/python"
-$PY ./fetch_assets.py --all                  # required weights
-$PY ./fetch_assets.py --all --include-optional   # +musetalk v1, syncnet (~6 GB)
+$PY setup/fetch_assets.py --all                  # required weights
+$PY setup/fetch_assets.py --all --include-optional   # +musetalk v1, syncnet (~6 GB)
 ```
 
 Reads `models/assets.lock.json` — every repo commit, patch and weight checksum
@@ -158,9 +158,9 @@ Output lands in `frontend/-dist/`. If missing, the server runs API-only.
 ### 6. Run the doctor
 
 ```bash
-$PY ./doctor.py               # full check
-$PY ./doctor.py --quick        # skip slow/import-heavy checks
-$PY ./doctor.py --json         # machine-readable output
+$PY setup/doctor.py               # full check
+$PY setup/doctor.py --quick        # skip slow/import-heavy checks
+$PY setup/doctor.py --json         # machine-readable output
 ```
 
 ---
@@ -190,8 +190,8 @@ One input per run. Each run becomes its own job folder under `data/jobs/`.
 ### Operator UI
 
 ```bash
-./start_ui.sh                              # http://127.0.0.1:7861
-./start_ui.sh --port 7900                  # custom port
+setup/start_ui.sh                          # http://127.0.0.1:7861
+setup/start_ui.sh --port 7900              # custom port
 ```
 
 Binds **loopback only** — no authentication. Reach it over an SSH tunnel:
@@ -296,12 +296,10 @@ removed.
 | Path | What it is |
 |---|---|
 | `CLAUDE.md` | Host setup, conventions, working rules for Claude Code |
-| `setup.sh` / `install.sh` | One-command install: conda envs, vendor assets, UI build, doctor |
-| `start_ui.sh` | Starts the operator UI server with correct interpreter and preload |
-| `doctor.py` | Health check: envs, imports, weights, secrets, GPUs |
-| `fetch_assets.py` | Downloads vendor repos + weights from `models/assets.lock.json` |
+| `setup/` | `setup.sh`, `install.sh`, `doctor.py`, `fetch_assets.py`, `start_ui.sh` |
+| `backend/common/ui_run_job.sh` | Detached job launcher (sets LD_PRELOAD) |
 | `backend/` | The pipeline: one package per stage, each with adapters and `_REGISTRY_SPEC` |
-| `frontend/` | FastAPI operator UI and its job runner |
+| `server/` | FastAPI operator UI and its job runner |
 | `data/` | Job folders (`data/jobs/<job_id>/`), voice refs, `DATA_LAYOUT.md` |
 | `models/` | Vendored upstream repos and model weights |
 | `envs/` | Conda env specs (`.yml`) and pip deps (`.pip.txt`) for all four envs |

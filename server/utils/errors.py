@@ -94,7 +94,7 @@ _RULES: List[Tuple[str, str, str, Optional[str]]] = [
     # cause is the import-order trap in CLAUDE.md §1, where cv2's bundled
     # libtbb.so.12 needs CXXABI_1.3.15 that the system libstdc++ lacks, so
     # whichever loads first decides whether the import works.
-    # `./ui_run_job.sh` exports the preload, so a UI job hitting this
+    # `backend/common/ui_run_job.sh` exports the preload, so a UI job hitting this
     # was started some other way.
     (r"RetinaFace needs either|No module named 'retinaface'|"
      r"CXXABI_1\.3\.15|libtbb\.so",
@@ -102,7 +102,7 @@ _RULES: List[Tuple[str, str, str, Optional[str]]] = [
      "The face detector could not load its library. insightface is "
      "installed, so this is almost always the C++ runtime load order, not "
      "a missing package.",
-     "Start the job through ./ui_run_job.sh, which exports "
+     "Start the job through backend/common/ui_run_job.sh, which exports "
      "LD_PRELOAD=<env>/lib/libstdc++.so.6. Never launch server.runner with a "
      "bare Popen."),
 

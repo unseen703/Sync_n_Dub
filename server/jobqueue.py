@@ -28,7 +28,7 @@ from .progress import PROGRESS_FILE, write_atomic
 log = logging.getLogger("server.jobqueue")
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-RUNNER_SH = REPO_ROOT / "ui_run_job.sh"
+RUNNER_SH = REPO_ROOT / "backend" / "common" / "ui_run_job.sh"
 
 #: One tmux session for detached jobs, so a human can attach to a running
 #: render. See `.claude/skills/long-run`.
@@ -40,7 +40,7 @@ MAX_CONCURRENT_ENV = "DUBBING_UI_MAX_CONCURRENT"
 #:
 #: `spawn()` returns in microseconds, but the job only reads `running` on
 #: disk once `ProgressWriter.__init__` runs inside the new process -- after
-#: `ui_run_job.sh` has started python and imported torch. Without a marker
+#: `backend/common/ui_run_job.sh` has started python and imported torch. Without a marker
 #: over that window, occupancy reads 0 and `pump()` fires the whole backlog.
 #: Generous on purpose: overshooting delays the next job, undershooting
 #: re-creates the flood.
@@ -240,7 +240,7 @@ def spawn(job_id: str, job_root: Path, *, rerun: bool = False) -> Dict[str, Any]
         _ensure_session()
         # `tmux new-window` runs under the tmux SERVER's stored environment,
         # not this process's, so `DUBBING_PY` never reaches the script if
-        # `dubsync` predates this server and `ui_run_job.sh` falls back to a
+        # `dubsync` predates this server and `backend/common/ui_run_job.sh` falls back to a
         # guessed interpreter. `-e` (tmux >=3.0) sets it for this window only.
         env_py = os.environ.get("DUBBING_PY") or sys.executable
         cmd = ["tmux", "new-window", "-d", "-t", TMUX_SESSION, "-n", window,

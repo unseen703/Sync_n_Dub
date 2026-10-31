@@ -28,6 +28,7 @@ export function Stage() {
   const running = normalizeState(progress?.state) === 'running'
     || normalizeState(progress?.state) === 'queued';
 
+
   if (talkingHead) {
     return (
       <MotionConfig reducedMotion="user">
@@ -76,23 +77,16 @@ export function Stage() {
             </div>
           ) : null}
 
-          {running ? (
-            <>
-              {progress?.milestones?.video_ready ? (
-                <VideoStage />
-              ) : centre === 'preparing' || centre === 'creating' ? (
-                <section className="space-y-2">
-                  <Eyebrow>{centre === 'creating' ? 'Queued' : 'Getting the video ready'}</Eyebrow>
-                  <Skeleton className="aspect-video w-full" />
-                  <p className="t-sm">
-                    {centre === 'creating'
-                      ? 'Waiting for a free GPU — one dub renders at a time on this machine.'
-                      : 'The player appears as soon as the video has been fetched and trimmed.'}
-                  </p>
-                </section>
-              ) : null}
-              <SpeakerTable />
-            </>
+          {running && !progress?.milestones?.video_ready ? (
+            <section className="space-y-2">
+              <Eyebrow>{centre === 'creating' ? 'Queued' : 'Getting the video ready'}</Eyebrow>
+              <Skeleton className="aspect-video w-full" />
+              <p className="t-sm">
+                {centre === 'creating'
+                  ? 'Waiting for a free GPU — one dub renders at a time on this machine.'
+                  : 'The player appears as soon as the video has been fetched and trimmed.'}
+              </p>
+            </section>
           ) : (
             <EditPanel jobId={selected} />
           )}

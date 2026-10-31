@@ -275,9 +275,10 @@ export const useStore = create<State>()((set, get) => ({
       const p = await api.getProgress(id);
       if (get().selected !== id) return null;
       const before = get().progress;
+      const sameJob = before?.job_id === p.job_id;
       set({ progress: p, jobError: null });
 
-      if (p.milestones?.lipsync_ready && !before?.milestones?.lipsync_ready) {
+      if (sameJob && p.milestones?.lipsync_ready && !before?.milestones?.lipsync_ready) {
         void get().refreshMedia();
         get().pushToast({
           kind: 'success',
@@ -289,11 +290,11 @@ export const useStore = create<State>()((set, get) => ({
           },
         });
       }
-      if (p.milestones?.diarization_done && !before?.milestones?.diarization_done) {
+      if (sameJob && p.milestones?.diarization_done && !before?.milestones?.diarization_done) {
         void get().refreshSpeakers();
       }
 
-      if (p.milestones?.awaiting_cast && !before?.milestones?.awaiting_cast) {
+      if (sameJob && p.milestones?.awaiting_cast && !before?.milestones?.awaiting_cast) {
         void get().refreshSpeakers();
         get().pushToast({
           kind: 'info',
@@ -306,10 +307,10 @@ export const useStore = create<State>()((set, get) => ({
           },
         });
       }
-      if (p.milestones?.speakers_ready && !before?.milestones?.speakers_ready) {
+      if (sameJob && p.milestones?.speakers_ready && !before?.milestones?.speakers_ready) {
         void get().refreshSpeakers();
       }
-      if (p.milestones?.mix_done && !before?.milestones?.mix_done) {
+      if (sameJob && p.milestones?.mix_done && !before?.milestones?.mix_done) {
         void get().refreshMedia();
         get().pushToast({
           kind: 'success',
@@ -317,7 +318,7 @@ export const useStore = create<State>()((set, get) => ({
           body: 'Play it against the original under the video.',
         });
       }
-      if (before && before.state !== p.state) {
+      if (sameJob && before && before.state !== p.state) {
         void get().refreshJobs();
         void get().refreshSpec();
         if (p.state === 'failed' && p.failure) {
@@ -443,6 +444,8 @@ export const useStore = create<State>()((set, get) => ({
   },
 
   pushToast(t) {
+    const existing = get().toasts.find((x) => x.title === t.title);
+    if (existing) return;
     const id = toastSeq++;
     set({ toasts: [...get().toasts, { ...t, id }] });
     setTimeout(() => get().dismissToast(id), 9000);

@@ -117,7 +117,7 @@ def _detector(device: str = "cpu"):
     # which only the conda libstdc++ has, and whichever loads first wins --
     # importing insightface alone raises `CXXABI_1.3.15' not found. torch
     # pulls the conda copy in. The LD_PRELOAD that normally covers this is
-    # set by `./ui_run_job.sh`, which launches jobs, not the UI server.
+    # set by `backend/common/ui_run_job.sh`, which launches jobs, not the UI server.
     import torch  # noqa: F401
     try:
         from insightface.app import FaceAnalysis

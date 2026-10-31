@@ -1793,3 +1793,116 @@ def stage_mute(job_id: str, body: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
              "staged" if on else "cleared",
              sid, view.job_id, payload["dirty_stages"])
     return payload
+
+
+# ---------------------------------------------------------------------------
+# split cue  (user op, no agent)
+# ---------------------------------------------------------------------------
+
+@router.post("/api/jobs/{job_id}/script/split")
+def stage_split(job_id: str, body: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
+    """Stage a split_cue directly from the UI — no LLM parse.
+
+    Body: one of
+
+      ``{"at_s": 12.5}``                              — split the cue
+                                                        containing 12.5s and
+                                                        keep the original
+                                                        speaker on both halves.
+      ``{"at_s": 12.5, "segment_id": "SEG_0007"}``    — same, but anchor the
+                                                        split to a named cue.
+      ``{"at_s": 12.5, "speaker": "SPK_02"}``         — reassign the right
+                                                        half to an existing
+                                                        speaker.
+      ``{"at_s": 12.5, "voice": "Deepika"}``          — mint a new speaker for
+                                                        the right half, voiced
+                                                        by the named catalog
+                                                        voice. Gender follows
+                                                        the voice.
+
+    The op is staged in the pending edit queue just like a mute, and
+    becomes visible in the staged list immediately. It applies when the
+    user commits with ``POST .../edits/apply``.
+    """
+    view = _open(job_id)
+    at_s = body.get("at_s")
+    if at_s is None:
+        at_s = body.get("at") or body.get("timestamp")
+    if at_s is None:
+        raise HTTPException(422, "at_s (seconds) is required")
+    try:
+        at_val = float(at_s)
+    except (TypeError, ValueError):
+        raise HTTPException(422, f"at_s must be a number, got {at_s!r}")
+
+    sid = str(body.get("segment_id") or "").strip() or None
+    speaker = str(body.get("speaker") or "").strip() or None
+    voice = str(body.get("voice") or "").strip() or None
+    if speaker and voice:
+        raise HTTPException(422,
+            "pass `speaker` OR `voice`, not both — pick an existing "
+            "speaker, or mint a new one with a voice")
+
+    merged = _read_json(view.merged_json) or {}
+    segs = merged.get("segments") or []
+    if not segs:
+        raise HTTPException(409, "this job has no segments to split yet")
+
+    # Resolve the target cue: explicit id if given, else the one
+    # containing at_s. If the point falls in a gap, the handler itself
+    # will refuse — don't fabricate here.
+    if sid:
+        if not any(str(s.get("id")) == sid for s in segs):
+            raise HTTPException(422, f"no segment {sid!r}")
+        scope: Dict[str, Any] = {"segments": [sid]}
+    else:
+        containing = [s for s in segs
+                      if float(s.get("start") or 0) <= at_val
+                      <= float(s.get("end") or 0)]
+        if not containing:
+            raise HTTPException(422,
+                f"no cue contains t={at_val:.2f}s — pass segment_id to "
+                f"disambiguate, or pick a timestamp inside a cue")
+        sid = str(containing[0].get("id"))
+        scope = {"segments": [sid]}
+
+    params: Dict[str, Any] = {"at_s": at_val}
+    if speaker:
+        params["speaker"] = speaker
+    if voice:
+        params["voice"] = voice
+
+    note_bits = [f"UI: split {sid} at {at_val:.2f}s"]
+    if speaker:
+        note_bits.append(f"-> {speaker}")
+    elif voice:
+        note_bits.append(f"-> new speaker ({voice})")
+
+    op = E.EditOp(op="split_cue", scope=E.Scope.from_dict(scope),
+                  params=params, note=" ".join(note_bits))
+
+    # Append to the existing pending list rather than replacing it —
+    # splits are not idempotent, so stacking two says "cut twice".
+    prior = _read_json(_pending_path(view.root))
+    prior_ops: List[E.EditOp] = []
+    turns: List[Dict[str, Any]] = []
+    if isinstance(prior, dict):
+        turns = [t for t in (prior.get("turns") or []) if isinstance(t, dict)]
+        try:
+            prior_ops = [E.EditOp.from_dict(o) for o in (prior.get("ops") or [])]
+        except E.EditError:
+            prior_ops = []
+
+    all_ops = prior_ops + [op]
+    prev = _preview(view, all_ops)
+    payload = _payload(view.job_id, [], all_ops, prev)
+    payload["turns"] = turns + [{
+        "at": _now(),
+        "message": " ".join(note_bits),
+        "source": "script",
+        "ops": [op.to_dict()],
+    }]
+    _write_atomic(_pending_path(view.root), payload)
+    log.info("split: staged %s at %.2fs for %s -> %s",
+             sid, at_val, view.job_id, payload["dirty_stages"])
+    return payload

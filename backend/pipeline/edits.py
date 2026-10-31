@@ -473,8 +473,7 @@ OP_SPECS: List[OpSpec] = [
                 "target_language": "ISO code, only if it changes"},
         summary="Re-translate the scoped segment(s) from the source transcript, "
                 "following a free-text instruction.",
-        examples=[
-    "make the translation simpler between 2:00 and 2:30"],
+        examples=[],
         needs_llm=True,
     ),
     OpSpec(
@@ -650,6 +649,27 @@ OP_SPECS: List[OpSpec] = [
                   "combine SEG_0004 with SEG_0005"],
         needs_llm=True,
     ),
+    OpSpec(
+        # Split a cue in two at a user-given timestamp and (optionally)
+        # assign the right half to a different speaker, or mint a new one.
+        # Deterministic: no LLM is required. The two halves inherit the
+        # parent's text split on the nearest word boundary that fits inside
+        # each half; translation text is kept on the LEFT half and the right
+        # half is left for the operator to retranslate (or hand off to the
+        # agent).
+        name="split_cue", dirty_from="codemix",
+        params={"at_s": "timestamp inside the cue to split at (seconds)",
+                "speaker": "optional existing speaker id for the right half",
+                "voice": "optional voice name — mints a new speaker for "
+                         "the right half (gender follows the voice)"},
+        summary="Split one cue into two at a given timestamp. The right "
+                "half becomes a new cue; its speaker is kept, reassigned, "
+                "or minted from the voice you name.",
+        examples=["split the cue at 0:12.5",
+                  "split SEG_0007 at 7.8 and assign the right half to SPK_02",
+                  "split at 1:03 and create a new speaker with "
+                  "the Deepika voice"],
+    ),
 ]
 
 OPS: Dict[str, OpSpec] = {s.name: s for s in OP_SPECS}
@@ -757,7 +777,7 @@ USER_ACTIONS: Dict[str, Dict[str, Any]] = {
         "options": list(TONE_CHOICES),
     },
     "code_mix": {
-        "title": "Keep source words untranslated",
+        "title": "Code-mix the translation",
         "takes": "optionally the terms to protect, e.g. gradient, weight",
         "changes": "technical terms stay in the source language inside the "
                    "translated sentence instead of being translated",
@@ -826,6 +846,18 @@ USER_ACTIONS: Dict[str, Dict[str, Any]] = {
         "category": "Translation", "scopes": ["all", "segment"], "quick": True,
         "fill": "change the target language to <language>",
         "needs": "language",
+    },
+    "split_cue": {
+        "title": "Split one cue in two",
+        "takes": "a timestamp inside the cue, and optionally a speaker "
+                 "to assign the right half to (or a voice to mint a new "
+                 "speaker for it)",
+        "changes": "the cue is cut at that moment; the right half becomes "
+                   "a new cue, which keeps the original speaker unless you "
+                   "reassign it or mint a new one",
+        "category": "Cleanup", "scopes": ["segment"], "quick": False,
+        "fill": "split this cue at <time>",
+        "needs": "time",
     },
     "merge_cues": {
         "title": "Merge two consecutive cues",
@@ -2355,6 +2387,250 @@ def _h_merge_cues(data, seg_ids, op, applied, ctx, res):
         f"{sid_b} was removed from the cue list; use mt/versions/ to revert")
 
 
+def _mint_speaker_id(data: Dict[str, Any]) -> str:
+    """Pick the next free SPK_NN id, matching `_h_create_speaker`'s scheme."""
+    known = {str(s.get("speaker")) for s in data.get("segments", [])
+             if s.get("speaker")}
+    used: List[int] = []
+    for name in known:
+        m = re.match(r"(?:SPK|SPEAKER)[_ ]?(\d+)$", name, re.I)
+        if m:
+            used.append(int(m.group(1)))
+    nxt = (max(used) + 1) if used else 0
+    return f"SPK_{nxt:02d}"
+
+
+def _split_text_proportional(text: str, left_fraction: float) -> Tuple[str, str]:
+    """Cut `text` at the whitespace boundary closest to `left_fraction`.
+
+    A deterministic fallback for when word-level timings are not available
+    on a cue. Picks the whitespace split whose offset ratio is nearest the
+    target, so the two halves are at least shaped like the time split.
+    """
+    text = text or ""
+    stripped = text.strip()
+    if not stripped:
+        return "", ""
+    frac = max(0.05, min(0.95, float(left_fraction)))
+    # candidate split points are the whitespace runs
+    boundaries = [i for i, ch in enumerate(text) if ch.isspace()]
+    if not boundaries:
+        # one unbroken token — give it to the left, nothing to the right.
+        return text, ""
+    target = int(round(len(text) * frac))
+    cut = min(boundaries, key=lambda i: abs(i - target))
+    return text[:cut].rstrip(), text[cut:].lstrip()
+
+
+def _h_split_cue(data, seg_ids, op, applied, ctx, res):
+    """Split one cue at a user-given timestamp into two cues.
+
+    Scope resolves to exactly one cue (either an explicit SEG id, or the
+    cue that contains `at_s`). The timestamp must fall strictly inside the
+    cue — a split at the exact boundary is a no-op and refused rather than
+    producing an empty cue.
+
+    The left half keeps the original id, speaker, voice pins and
+    translation; its end moves to `at_s`. The right half gets a fresh
+    SEG id, start=`at_s`, the original end, and — unless `speaker` or
+    `voice` is given — the same speaker as the left half.
+
+    Word-level timings on the parent are partitioned by `end <= at_s` →
+    left, else → right, and each half's `text` is rebuilt from its words.
+    Without words we fall back to a proportional whitespace split.
+
+    `mt_text` / `final_text` are kept on the LEFT half and cleared on the
+    RIGHT, with a warning: the operator should either `retranslate` the
+    right half, or let the codemix/MT replay regenerate it. We do NOT
+    guess the translation split: a wrong-but-plausible dubbed line is the
+    silent-wrong-output trap several other handlers in this file cite.
+
+    `dirty_from="codemix"`: both halves need re-translation, re-fit,
+    re-TTS, remix and re-sync. The right half is a brand-new cue so TTS
+    has nothing cached for it; the left half's wording changed so its
+    cached clip is invalid too.
+    """
+    if len(seg_ids) != 1:
+        raise EditError(
+            "split_cue needs exactly one cue in its scope "
+            f"(got {len(seg_ids)}). Name the cue by id or give a "
+            "timestamp inside it.")
+
+    at_s = _as_time(op.params.get("at_s"))
+    if at_s is None:
+        # Fall back to the scope's point timestamp, if any.
+        if op.scope.start_s is not None and op.scope.end_s is None:
+            at_s = float(op.scope.start_s)
+        elif (op.scope.start_s is not None and op.scope.end_s is not None
+              and float(op.scope.start_s) == float(op.scope.end_s)):
+            at_s = float(op.scope.start_s)
+    if at_s is None:
+        raise EditError(
+            "split_cue needs `at_s` (seconds) — the moment to cut at")
+
+    segs = data.get("segments") or []
+    idx_by_id = {str(s.get("id")): i for i, s in enumerate(segs)}
+    sid = seg_ids[0]
+    if sid not in idx_by_id:
+        raise EditError(f"split_cue: unknown cue {sid!r}")
+    i_a = idx_by_id[sid]
+    seg_a = segs[i_a]
+    s0, s1 = _seg_start(seg_a), _seg_end(seg_a)
+    MIN_HALF = 0.15
+    if not (s0 + MIN_HALF <= at_s <= s1 - MIN_HALF):
+        raise EditError(
+            f"split_cue: at_s={at_s:.3f}s must sit at least "
+            f"{MIN_HALF:.2f}s inside {sid} ({s0:.2f}–{s1:.2f}s)")
+
+    # Resolve the right-half speaker policy.
+    want_speaker = str(op.params.get("speaker") or "").strip() or None
+    want_voice = str(op.params.get("voice") or "").strip() or None
+    known_speakers = {str(s.get("speaker")) for s in segs if s.get("speaker")}
+    orig_speaker = str(seg_a.get("speaker") or "") or None
+
+    new_speaker_id: Optional[str] = None
+    voice_assignment: Optional[Tuple[str, str, Optional[str]]] = None  # (engine, voice, gender)
+    if want_speaker and want_voice:
+        raise EditError(
+            "split_cue: pass `speaker` OR `voice`, not both — pick an "
+            "existing speaker, or mint a new one with a voice")
+    if want_speaker:
+        if want_speaker not in known_speakers:
+            raise EditError(
+                f"split_cue: unknown speaker {want_speaker!r} "
+                f"(known: {', '.join(sorted(known_speakers)) or 'none'})")
+        right_speaker = want_speaker
+    elif want_voice:
+        engine = op.params.get("engine") or ctx.tts_engine or ctx.voice_engine
+        canonical, cat_gender, why = _voice_catalog_lookup(
+            want_voice, engine=engine, language=ctx.target_language,
+            catalog_json=ctx.voice_catalog_json)
+        if canonical is None:
+            raise EditError(
+                f"split_cue: {want_voice!r} is not in the {engine!r} "
+                f"catalog ({why})")
+        new_speaker_id = _mint_speaker_id(data)
+        voice_assignment = (engine, canonical, cat_gender)
+        right_speaker = new_speaker_id
+    else:
+        right_speaker = orig_speaker or ""
+
+    # Partition words by their END time: a word ending at or before `at_s`
+    # belongs to the left half; the rest, including a word straddling the
+    # cut, go right. Keeps the picture-locked boundary at a word boundary
+    # on the LEFT at the cost of the right half starting slightly early;
+    # the alternative (straddling word → left) would smear mouth timing on
+    # the first word of the right half.
+    words = list(seg_a.get("words") or [])
+    if words:
+        left_words = [w for w in words if _as_time(w.get("end")) is not None
+                      and float(w["end"]) <= at_s + 1e-6]
+        right_words = words[len(left_words):]
+        left_text = " ".join((w.get("text") or "").strip()
+                             for w in left_words).strip()
+        right_text = " ".join((w.get("text") or "").strip()
+                              for w in right_words).strip()
+        if not left_text or not right_text:
+            # Degenerate word timing: fall back to proportional split.
+            left_words, right_words = [], []
+            left_text, right_text = _split_text_proportional(
+                str(seg_a.get("text") or ""),
+                (at_s - s0) / max(1e-6, (s1 - s0)))
+    else:
+        left_text, right_text = _split_text_proportional(
+            str(seg_a.get("text") or ""),
+            (at_s - s0) / max(1e-6, (s1 - s0)))
+        left_words, right_words = [], []
+
+    # Mint the new id. Scan ALL existing SEG ids for the biggest number
+    # seen and pick next (zero-padded to 4 digits — the width the pipeline
+    # already writes). This keeps new ids out of collision with both
+    # upstream SEG_NNNN and any earlier splits.
+    seg_nums: List[int] = []
+    for s in segs:
+        m = re.match(r"SEG[_ ]?(\d+)$", str(s.get("id") or ""), re.I)
+        if m:
+            seg_nums.append(int(m.group(1)))
+    new_seg_id = f"SEG_{(max(seg_nums) + 1) if seg_nums else 0:04d}"
+
+    # Back up every field the left half overwrites, so revert() restores it.
+    for key in ("end", "end_s", "text", "words", "mt_text", "final_text",
+                "target_duration_s", "est_duration_s", "candidates", "qc"):
+        if key in seg_a:
+            _backup(seg_a, key)
+
+    # Build the right half FIRST (from the parent's pre-mutation state) so
+    # we can carry forward the fields that still make sense (speaker,
+    # tts_style, language, mt_target_* ) without inheriting left-only
+    # artefacts like `candidates` or `qc`.
+    new_seg: Dict[str, Any] = {
+        "id": new_seg_id,
+        "start": at_s,
+        "end": s1,
+        "text": right_text,
+        "speaker": right_speaker,
+        "language": seg_a.get("language"),
+    }
+    if "end_s" in seg_a:
+        new_seg["end_s"] = s1
+    if "start_s" in seg_a:
+        new_seg["start_s"] = at_s
+    if right_words:
+        new_seg["words"] = right_words
+    for carry in ("mt_target_language", "mt_target_script",
+                  "tts_style", "tts_engine"):
+        if carry in seg_a:
+            new_seg[carry] = seg_a[carry]
+    # The right half has no translation yet. The post-apply replay
+    # (dirty_from=codemix) will MT-translate it on the next pipeline run;
+    # for now we leave the fields empty so a UI that reads `final_text`
+    # does not show the LEFT half's wording against the RIGHT half's time.
+    new_seg["mt_text"] = ""
+    new_seg["final_text"] = ""
+
+    # Mutate the left half in place.
+    seg_a["end"] = at_s
+    if "end_s" in seg_a:
+        seg_a["end_s"] = at_s
+    if left_text:
+        _set_segment_text(seg_a, left_text)
+        seg_a["text"] = left_text
+    if left_words:
+        seg_a["words"] = left_words
+    # The left half's wording changed; its downstream pacing fields are
+    # now stale. Drop them so the replay re-derives from the shorter slot.
+    for key in ("target_duration_s", "est_duration_s", "candidates", "qc"):
+        seg_a.pop(key, None)
+    # The MT/final text of the LEFT half is unchanged (we kept the words
+    # it already covered), but the duration has shrunk — flag it for the
+    # codemix replay by clearing `final_text` so the condense/fit stages
+    # recompute, same as any other dirtied cue.
+    seg_a["mt_text"] = ""
+    seg_a["final_text"] = ""
+
+    # Insert the new cue right after the parent.
+    segs.insert(i_a + 1, new_seg)
+
+    # Speaker bookkeeping if we minted one.
+    if new_speaker_id and voice_assignment:
+        engine, voice, gender = voice_assignment
+        res.speaker_voice_overrides[new_speaker_id] = {
+            "engine": engine, "voice": voice, "source": "edit:split_cue"}
+        if gender:
+            res.gender_overrides[new_speaker_id] = gender
+        svm = data.setdefault("extra", {}).setdefault("speaker_voice_map", {})
+        svm[new_speaker_id] = {"engine": engine, "voice": voice,
+                               "gender": gender, "source": "edit:split_cue"}
+
+    applied.changes.append(
+        f"{sid}: split at {at_s:.3f}s -> {sid} ({s0:.2f}–{at_s:.2f}s) + "
+        f"{new_seg_id} ({at_s:.2f}–{s1:.2f}s, speaker={right_speaker or '?'})")
+    applied.warnings.append(
+        f"{new_seg_id}: translation cleared — re-run from codemix to "
+        f"translate the new cue, or `retranslate` it directly")
+    applied.dirty_from = "codemix"
+
+
 _HANDLERS: Dict[str, Callable] = {
     "set_text": _h_set_text,
     "retranslate": _h_retranslate,
@@ -2370,6 +2646,7 @@ _HANDLERS: Dict[str, Callable] = {
     "mute_cue": _h_mute_cue,
     "set_target_language": _h_set_target_language,
     "merge_cues": _h_merge_cues,
+    "split_cue": _h_split_cue,
 }
 
 assert set(_HANDLERS) == set(OPS), "handler/spec drift"

@@ -12,11 +12,11 @@ here, once, in plain language, instead of as a job that dies at stage 9h
 after ASR/MT/TTS/mix have already run, or as "The job failed (unrecognised)"
 in the frontend.
 
-Reuses rather than re-derives: `./fetch_assets.py`'s manifest for
-vendor/weight presence, `models.lipsync.base.resolve_env_python` for
-interpreter resolution, `backend.gpu.ensure_onnxruntime_cuda` for the CUDA
-EP check, `models.restore.gfpgan_adapter.GfpganRestore.blockers()` for the
-restore stage. A check added here for something already checked elsewhere
+Reuses rather than re-derives: `setup/fetch_assets.py`'s manifest for
+vendor/weight presence, `backend.lipsync.base.resolve_env_python` for
+interpreter resolution, `backend.common.gpu.ensure_onnxruntime_cuda` for the
+CUDA EP check, `backend.restore.gfpgan_adapter.GFPGANRestore.blockers()` for
+the restore stage. A check added here for something already checked elsewhere
 should call that code, not copy it (CLAUDE.md's canonical-implementations
 rule applies to diagnostics too).
 """
@@ -34,7 +34,6 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-sys.path.insert(0, str(REPO_ROOT / "scripts"))
 import setup.fetch_assets as FA  # noqa: E402
 
 PASS, WARN, FAIL = "PASS", "WARN", "FAIL"
@@ -134,7 +133,6 @@ def check_tmux() -> Row:
 _ENV_CHECKS = [
     ("musetalk",   "musetalk",   "musetalk",   ["torch", "diffusers", "mmcv", "mmdet", "mmpose", "chumpy"]),
     ("latentsync", "latentsync", "latentsync", ["torch", "diffusers", "insightface", "decord"]),
-    ("restore",    "restore",    "restore",    ["torch", "basicsr", "facexlib", "gfpgan", "realesrgan"]),
 ]
 
 
@@ -203,7 +201,7 @@ def check_assets(*, quick: bool) -> List[Row]:
         status = PASS if state == "present" else FAIL
         rows.append(_row(status, f"vendor:{v['name']}",
                           state if state == "present" else
-                          f"{state} — `$PY ./fetch_assets.py --feature {v['feature']}`"))
+                          f"{state} — `$PY setup/fetch_assets.py --feature {v['feature']}`"))
     required = [w for w in manifest["weights"] if not w.get("optional")]
     missing = []
     for w in required:
@@ -215,7 +213,7 @@ def check_assets(*, quick: bool) -> List[Row]:
         rows.append(_row(FAIL, "weights (required)",
                           f"{len(missing)}/{len(required)} missing or mismatched: "
                           f"{', '.join(missing[:6])}{'…' if len(missing) > 6 else ''} — "
-                          f"`$PY ./fetch_assets.py --all`"))
+                          f"`$PY setup/fetch_assets.py --all`"))
     else:
         rows.append(_row(PASS, "weights (required)", f"all {len(required)} present"))
     return rows

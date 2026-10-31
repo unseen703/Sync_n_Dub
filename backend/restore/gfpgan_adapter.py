@@ -6,7 +6,7 @@ on 2026-10-30, so no separate interpreter resolution is needed; the historical
 `torchvision.transforms.functional_tensor` incompatibility is patched inline
 by `install.sh` and the facexlib/gfpgan weights are placed by
 `./fetch_assets.py` (feature `restore`). Weights live in
-`models/weights/gfgan/`; `RESTORE_WEIGHTS` overrides the location.
+`backend/faces/vendor/gfpgan`; `RESTORE_WEIGHTS` overrides the location.
 """
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ from .base import BaseRestore, RestoreRequest, RestoreResult
 log = logging.getLogger(__name__)
 
 ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_WEIGHTS_DIR = "models/weights/gfgan"
+DEFAULT_WEIGHTS_DIR = "backend/faces/vendor/gfpgan"
 WEIGHT_FILES = ("GFPGANv1.4.pth", "RealESRGAN_x4plus.pth")
 
 _SUMMARY_RE = re.compile(

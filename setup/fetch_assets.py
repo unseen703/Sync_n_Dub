@@ -1,6 +1,6 @@
 """Fetch the vendored lip-sync/ASD repos and their weights onto a fresh clone.
 
-Reads `models/assets.lock.json` -- every vendor repo (pinned commit + patch)
+Reads `setup/assets.lock.json` -- every vendor repo (pinned commit + patch)
 and weight file (pinned source + sha256) this project needs beyond what pip
 and conda can install. Nothing here is guessed: every commit, revision and
 hash in that manifest was either read off a live checkout, cross-checked
@@ -48,7 +48,10 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-MANIFEST_PATH = REPO_ROOT / "models" / "assets.lock.json"
+MANIFEST_PATH = Path(__file__).resolve().parent / "assets.lock.json"
+#: Must match backend/restore/gfpgan_adapter.py's DEFAULT_WEIGHTS_DIR --
+#: both read the same RESTORE_WEIGHTS override.
+DEFAULT_RESTORE_WEIGHTS = "backend/faces/vendor/gfpgan"
 
 log = logging.getLogger("fetch_assets")
 
@@ -274,7 +277,7 @@ def fetch_weight(w: Dict[str, Any], *, dry_run: bool, force: bool) -> bool:
 
 
 def place_face_restore_weights() -> int:
-    """Copy facexlib/gfpgan/realesrgan weights from models/weights/restore
+    """Copy facexlib/gfpgan/realesrgan weights from backend/faces/vendor/gfpgan
     into the running interpreter's site-packages, so the libraries do not
     download them from GitHub on first use mid-render. Idempotent; a size
     match counts as "already placed".
@@ -285,7 +288,7 @@ def place_face_restore_weights() -> int:
     """
     import sysconfig
 
-    weights = _resolve_dest("models/weights/gfgan")
+    weights = _resolve_dest(os.getenv("RESTORE_WEIGHTS", DEFAULT_RESTORE_WEIGHTS))
     sp = Path(sysconfig.get_paths()["purelib"])
     targets = {
         "detection_Resnet50_Final.pth": [sp / "facexlib/weights"],
@@ -330,6 +333,12 @@ def main() -> int:
     ap.add_argument("--force", action="store_true",
                      help="re-fetch even if a file already looks right")
     args = ap.parse_args()
+
+    try:
+        from dotenv import load_dotenv
+        load_dotenv(REPO_ROOT / ".env")
+    except ImportError:
+        pass
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
 

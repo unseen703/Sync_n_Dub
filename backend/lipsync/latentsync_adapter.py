@@ -14,7 +14,7 @@ Shells out to the repo's `scripts/inference.py` rather than importing it,
 since LatentSync pins specific diffusers / accelerate versions.
 
 Env:
-  LATENTSYNC_REPO              (default: models/lipsync/vendor/latentsync,
+  LATENTSYNC_REPO              (default: backend/lipsync/vendor/latentsync,
                                 falling back to third_party/LatentSync)
   LATENTSYNC_VERSION           (1.5)
   LATENTSYNC_UNET_CONFIG       (overrides the version's config)

@@ -57,9 +57,9 @@ if [ ! -f "$WEB_DIST" ]; then
   echo "  build it: conda run -n dubui npm --prefix frontend/ ci && conda run -n dubui npm --prefix frontend/ run build" >&2
 fi
 
-if [ -f "$REPO/./doctor.py" ]; then
-  echo "--- quick doctor check (./doctor.py --quick) ---"
-  "$PY" "$REPO/./doctor.py" --quick || true
+if [ -f "$REPO/setup/doctor.py" ]; then
+  echo "--- quick doctor check (setup/doctor.py --quick) ---"
+  "$PY" "$REPO/setup/doctor.py" --quick || true
   echo "--- starting the server regardless of the above; fix FAILs for full functionality ---"
 fi
 

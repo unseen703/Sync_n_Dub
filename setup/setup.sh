@@ -10,12 +10,12 @@
 # three separate conda envs (CLAUDE.md), and target hosts commonly have
 # Blackwell (sm_120) cards, which cu121 has no kernels for. The real logic
 # now lives in ./install.sh, built from envs/*.yml (pinned to what each env
-# here actually runs) and models/assets.lock.json (the vendored repos and
+# here actually runs) and setup/assets.lock.json (the vendored repos and
 # weights pip/conda can't provide). This file stays as the name every doc
 # and habit already points at.
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
 if [ "${1:-}" = "--check-only" ]; then
@@ -26,7 +26,7 @@ if [ "${1:-}" = "--check-only" ]; then
     echo "dubbing env not found yet -- run ./setup.sh (without --check-only) first" >&2
     exit 1
   fi
-  exec "$PY" "$REPO_ROOT/doctor.py" "$@"
+  exec "$PY" "$REPO_ROOT/setup/doctor.py" "$@"
 fi
 
-exec "$REPO_ROOT/install.sh" "$@"
+exec "$REPO_ROOT/setup/install.sh" "$@"

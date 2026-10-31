@@ -8,7 +8,7 @@ so the adapter writes a one-entry YAML, shells out, and copies the result to
 the requested output path.
 
 Env:
-  MUSETALK_REPO       (default: models/lipsync/vendor/musetalk,
+  MUSETALK_REPO       (default: backend/lipsync/vendor/musetalk,
                        falling back to third_party/MuseTalk)
   MUSETALK_CHECKPOINT (default: third_party/MuseTalk/models — the repo's
                         pretrained-weights folder; adapter also accepts

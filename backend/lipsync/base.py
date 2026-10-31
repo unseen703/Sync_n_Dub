@@ -4,7 +4,7 @@ An adapter takes a video and a driving audio track (the dubbed audio from
 the mix stage) and re-renders the on-screen mouths to match it. Only the
 lower-face region changes.
 
-Each adapter wraps an external upstream clone (see `models/lipsync/vendor/`).
+Each adapter wraps an external upstream clone (see `backend/lipsync/vendor/`).
 None installs from PyPI, so the adapter clones the repo and loads its
 checkpoints via env vars.
 """

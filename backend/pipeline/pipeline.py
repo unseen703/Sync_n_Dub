@@ -81,7 +81,7 @@ DEFAULT_DATA_DIR = REPO_ROOT / "data"
 #: Fitted duration-model coefficients (`<lang>.<voice>.json`). These are a
 #: shared model asset, not per-run output: fitting one costs a full TTS
 #: calibration pass, so a job reads them from here rather than owning a copy.
-DURATION_MODEL_DIR = REPO_ROOT / "models" / "duration"
+DURATION_MODEL_DIR = REPO_ROOT / "data" / "duration_model"
 
 
 @dataclass

@@ -9,7 +9,7 @@ librosa / numpy / torch and importing it in-process clashes with the
 rest of the pipeline.
 
 Env:
-  WAV2LIP_REPO       (default: models/lipsync/vendor/wav2lip, falling
+  WAV2LIP_REPO       (default: backend/lipsync/vendor/wav2lip, falling
                       back to third_party/Wav2Lip)
   WAV2LIP_CHECKPOINT (default: <repo>/checkpoints/wav2lip_gan.pth, derived
                       from whichever repo path resolved)

@@ -2439,11 +2439,13 @@ def _h_split_cue(data, seg_ids, op, applied, ctx, res):
     left, else → right, and each half's `text` is rebuilt from its words.
     Without words we fall back to a proportional whitespace split.
 
-    `mt_text` / `final_text` are kept on the LEFT half and cleared on the
-    RIGHT, with a warning: the operator should either `retranslate` the
-    right half, or let the codemix/MT replay regenerate it. We do NOT
-    guess the translation split: a wrong-but-plausible dubbed line is the
-    silent-wrong-output trap several other handlers in this file cite.
+    `mt_text` / `final_text` are split proportionally between the halves
+    by the same time fraction as the cut, so BOTH halves have readable
+    text immediately. The post-MT replay chain does not re-call Bodhan MT
+    (only an explicit `retranslate` op does), and leaving the halves
+    empty would send TTS into silence -- the "SEG shows blank" trap. A
+    warning flags that the word boundary may not match the sentence
+    boundary; `retranslate` on either half cleans the grammar up.
 
     `dirty_from="codemix"`: both halves need re-translation, re-fit,
     re-TTS, remix and re-sync. The right half is a brand-new cue so TTS
@@ -2581,12 +2583,23 @@ def _h_split_cue(data, seg_ids, op, applied, ctx, res):
                   "tts_style", "tts_engine"):
         if carry in seg_a:
             new_seg[carry] = seg_a[carry]
-    # The right half has no translation yet. The post-apply replay
-    # (dirty_from=codemix) will MT-translate it on the next pipeline run;
-    # for now we leave the fields empty so a UI that reads `final_text`
-    # does not show the LEFT half's wording against the RIGHT half's time.
-    new_seg["mt_text"] = ""
-    new_seg["final_text"] = ""
+    # Translation split. The post-MT replay chain does NOT re-call Bodhan
+    # MT -- only an explicit `retranslate` op does. If we cleared both
+    # halves here, TTS would walk into empty `final_text` and the cues
+    # would synthesise as silence, which is the "SEG shows blank in the
+    # UI" bug this comment exists to prevent. So split the parent's
+    # translation proportionally by the same time fraction as the split
+    # itself, warn that the grammar is approximate, and let the operator
+    # `retranslate` either half if the word boundary matters.
+    parent_mt = str(seg_a.get("mt_text") or "")
+    parent_final = str(seg_a.get("final_text") or parent_mt or "")
+    left_frac = max(0.05, min(0.95, (at_s - s0) / max(1e-6, (s1 - s0))))
+    left_mt, right_mt = _split_text_proportional(parent_mt, left_frac)
+    left_final, right_final = _split_text_proportional(parent_final, left_frac)
+    # Fallback: if the parent had no translation at all, there is nothing
+    # to carry forward; leave both halves empty with a stronger warning.
+    new_seg["mt_text"] = right_mt
+    new_seg["final_text"] = right_final
 
     # Mutate the left half in place.
     seg_a["end"] = at_s
@@ -2601,12 +2614,8 @@ def _h_split_cue(data, seg_ids, op, applied, ctx, res):
     # now stale. Drop them so the replay re-derives from the shorter slot.
     for key in ("target_duration_s", "est_duration_s", "candidates", "qc"):
         seg_a.pop(key, None)
-    # The MT/final text of the LEFT half is unchanged (we kept the words
-    # it already covered), but the duration has shrunk — flag it for the
-    # codemix replay by clearing `final_text` so the condense/fit stages
-    # recompute, same as any other dirtied cue.
-    seg_a["mt_text"] = ""
-    seg_a["final_text"] = ""
+    seg_a["mt_text"] = left_mt
+    seg_a["final_text"] = left_final
 
     # Insert the new cue right after the parent.
     segs.insert(i_a + 1, new_seg)
@@ -2625,9 +2634,15 @@ def _h_split_cue(data, seg_ids, op, applied, ctx, res):
     applied.changes.append(
         f"{sid}: split at {at_s:.3f}s -> {sid} ({s0:.2f}–{at_s:.2f}s) + "
         f"{new_seg_id} ({at_s:.2f}–{s1:.2f}s, speaker={right_speaker or '?'})")
-    applied.warnings.append(
-        f"{new_seg_id}: translation cleared — re-run from codemix to "
-        f"translate the new cue, or `retranslate` it directly")
+    if parent_mt or parent_final:
+        applied.warnings.append(
+            f"{sid} / {new_seg_id}: translation split proportionally; "
+            f"the word boundary may not match the sentence boundary -- "
+            f"`retranslate` either half for cleaner grammar")
+    else:
+        applied.warnings.append(
+            f"{sid} / {new_seg_id}: parent had no translation; both halves "
+            f"are empty -- `retranslate` to populate")
     applied.dirty_from = "codemix"
 
 

@@ -1,0 +1,55 @@
+# MuseTalk's own env — needed because its pins (diffusers, mmcv/mmdet/mmpose)
+# conflict with `dubbing`. See models/lipsync/base.py::resolve_env_python.
+#
+# The CUDA toolchain lines below are the literal commands from this env's
+# `conda-meta/history`, not a reconstruction — including the first attempt,
+# kept as a documented gotcha rather than silently dropped:
+#
+#   1) conda install -c nvidia/label/cuda-12.8.0 cuda-nvcc cuda-toolkit
+#      -- WRONG: an unpinned `cuda-toolkit` under this label resolved to
+#         13.4.2 from the `defaults` channel, not 12.8.
+#   2) conda install -c nvidia/label/cuda-12.8.0 cuda-nvcc cuda-cudart-dev cuda-cccl
+#      -- replaced (1)'s packages, but still not fully pinned.
+#   3) conda install -c nvidia cuda-nvcc=12.8 cuda-cccl=12.8 cuda-cudart-dev=12.8 \
+#        cuda-nvtx=12.8 libnvjitlink=12.8 cuda-cudart=12.8
+#      -- the command that actually stuck; this file reproduces (3) directly
+#         and skips the detour.
+#   4) conda install -c conda-forge ffmpeg
+#      -- unpinned, resolved to 4.4.0 (NOT the 7.1 `dubbing` runs — this
+#         env's ffmpeg is only used if MuseTalk's own code shells out to it;
+#         the pipeline's own ffmpeg calls go through the running interpreter's
+#         env per media_io._ffmpeg_bin(), i.e. `dubbing`'s).
+#
+# Recreate:
+#   conda env create -f envs/musetalk.yml -n musetalk
+#   <conda prefix>/envs/musetalk/bin/python -m pip install \
+#       -r envs/musetalk.pip.txt --no-deps \
+#       --extra-index-url https://download.pytorch.org/whl/cu128
+#   # then build mmcv and install chumpy — see envs/build_mmcv_musetalk.sh.
+#   # musetalk.pip.txt EXCLUDES mmcv and chumpy; neither installs correctly
+#   # from a plain `pip install <name>==<version>`:
+#   #   - mmcv==2.1.0 here was compiled locally against this exact
+#   #     torch/cuda pair (no matching prebuilt wheel exists for sm_120);
+#   #     envs/build_mmcv_musetalk.sh is that recipe, reconstructed from
+#   #     mmcv's own documented build process since the original build
+#   #     directory was under /tmp and no longer exists.
+#   #   - chumpy's PyPI release has known numpy-compatibility issues; this
+#   #     env has it from a specific git commit instead (see the script).
+#   # --no-deps on the main install because several packages here (mmdet,
+#   # mmpose) would otherwise try to pull a DIFFERENT mmcv off PyPI before
+#   # the local build is in place.
+name: musetalk
+channels:
+  - nvidia
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  - nvidia::cuda-nvcc=12.8
+  - nvidia::cuda-cccl=12.8
+  - nvidia::cuda-cudart-dev=12.8
+  - nvidia::cuda-cudart=12.8
+  - nvidia::cuda-nvtx=12.8
+  - nvidia::libnvjitlink=12.8
+  - conda-forge::ffmpeg
+  - pip

@@ -1,0 +1,7 @@
+node_modules/
+dist/
+.vite/
+*.local
+# The build output lives one level up, in frontend/-dist/ — ignored there, not
+# here, because frontend/server.py serves it and it must never be committed.
+web-dist/

@@ -1,0 +1,29 @@
+# LatentSync's own env -- its diffusers/transformers/insightface pins
+# conflict with `dubbing`, same reason musetalk has one. Unlike musetalk, it
+# needs no source-built CUDA extension: no cuda-nvcc or build toolchain was
+# ever installed here (verified against this env's conda-meta), so the
+# upstream repo's own ops run through plain torch.
+#
+# Conda layer taken verbatim from this env's `conda-meta/history`:
+#   conda create -n latentsync -y python=3.10
+#   conda install -c conda-forge ffmpeg      # unpinned, resolved to 7.1.0 --
+#                                             # the same build dubbing runs.
+#
+# Recreate:
+#   conda env create -f envs/latentsync.yml -n latentsync
+#   <conda prefix>/envs/latentsync/bin/python -m pip install \
+#       -r envs/latentsync.pip.txt \
+#       --extra-index-url https://download.pytorch.org/whl/cu128
+#
+# No excluded packages here -- every line in latentsync.pip.txt installs
+# from a normal wheel, including insightface==0.7.3, decord==0.6.0 and
+# mediapipe==0.10.11 (this env's mediapipe is independent of `dubbing`'s
+# optional face-detector adapter; LatentSync vendors its own use of it).
+name: latentsync
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  - ffmpeg
+  - pip

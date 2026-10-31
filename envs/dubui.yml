@@ -1,0 +1,22 @@
+# Node, for building frontend// only -- never a runtime dependency of the
+# server itself (CLAUDE.md: the server serves static files from
+# frontend/-dist/ and never shells into node). The system node on this host is
+# v12, and bare `npm` under it fails with "Cannot find module 'node:path'",
+# which looks like a corrupt install and is not -- `conda run -n dubui` (or
+# this env's own node/npm-cli.js directly) is the fix.
+#
+# Conda layer taken verbatim from this env's `conda-meta/history`:
+#   conda create -n dubui -y nodejs=20
+# which resolved to 20.20.2 from pkgs/main. `frontend//package-lock.json` is
+# tracked, so `npm ci` against it is reproducible without a separate lock
+# file here.
+#
+# Recreate:
+#   conda env create -f envs/dubfrontend.yml -n dubui
+#   conda run -n dubui npm --prefix frontend/ ci
+#   conda run -n dubui npm --prefix frontend/ run build    # -> frontend/-dist/
+name: dubui
+channels:
+  - defaults
+dependencies:
+  - nodejs=20.20.2

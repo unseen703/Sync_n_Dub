@@ -1,0 +1,41 @@
+# The main pipeline + UI env. Captured from the live env on the host this
+# project was built on: 2x NVIDIA RTX PRO 2000 Blackwell (sm_120, compute
+# capability 12.0), driver 580.178.04, CUDA 12.8.
+#
+# This is the CONDA layer only — the packages conda installed, taken
+# verbatim from `conda-meta/history` on the live env, not re-derived or
+# guessed. Everything pip-installed (422 packages) is in `dubbing.pip.txt`,
+# a full `pip list --format=freeze`.
+#
+# Recreate:
+#   conda env create -f envs/dubbing.yml -n dubbing
+#   <conda prefix>/envs/dubbing/bin/python -m pip install \
+#       -r envs/dubbing.pip.txt \
+#       --extra-index-url https://download.pytorch.org/whl/cu128
+#
+# The --extra-index-url matters: torch==2.8.0 / torchvision==0.23.0 /
+# torchaudio==2.8.0 at this EXACT build only exist on PyTorch's own cu128
+# index, not on plain PyPI, and this project's sm_120 cards need a cu128+
+# build (torch<2.7 has no sm_120 kernels — see CLAUDE.md). The nvidia-*-cu12
+# packages pip pulls alongside torch (cuBLAS, cuDNN 9.10.2, NCCL, ...) ARE
+# on plain PyPI, so they resolve without the extra index.
+#
+# known oddity, left as-is rather than "fixed": this env has BOTH a conda
+# `opencv-headless` package (below) AND three pip opencv variants
+# (opencv-python, opencv-contrib-python, opencv-python-headless, all in
+# dubbing.pip.txt). Redundant, and a candidate for cleanup, but this is the
+# combination the live env actually runs on, so it is captured as-is rather
+# than guessed at.
+name: dubbing
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  - ffmpeg<8                 # conda-forge; resolved to 7.1.0 here — has
+                              # `atempo` but NOT `rubberband` (CLAUDE.md).
+                              # The `imageio_ffmpeg` pip package (pulled in
+                              # by dubbing.pip.txt) supplies the rubberband
+                              # build `backend/stretch.py` also probes for.
+  - opencv>=4.9               # conda-forge; resolved to 4.10.0-headless.
+  - pip

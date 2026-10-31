@@ -1,6 +1,6 @@
 # The edit agent — what it accepts, and what it refuses
 
-Reference for anyone driving or maintaining `backend/edit_agent.py`: the nine
+Reference for anyone driving or maintaining `backend/pipeline/edit_agent.py`: the nine
 operations it can plan, the scopes they take, the stages each one invalidates,
 and — the half that usually costs the most time — every way a request gets
 rejected and what the message means.
@@ -49,13 +49,21 @@ is replayed.
 | `set_speaker` | reattribute dialogue to another existing speaker | `speaker` | — | `voices` |
 | `set_voice` | pin a specific TTS voice | `voice` | `engine` | `voices` |
 | `set_speed` | re-fit speech into a shorter/longer slot | `factor` (0.5–2.0) | — | `tts` |
-| `lipsync_window` | lip-sync only a time window | — | `model` (`wav2lip`\|`musetalk`\|`latentsync`) | `lipsync` |
+| `lipsync_window` | lip-sync only a time window | — | `model` (`wav2lip`\|`musetalk`\|`latentsync15`) | `lipsync` |
+| `mute_cue` | silence scoped cues, release the slot as pause | — | — | `timing` |
+| `set_target_language` | switch the dub's output language via Bodhan MT | `target_language` (ISO code of a supported Indic language) | `target_script` | `codemix` (whole dub) or `tts` (per-cue) |
+| `merge_cues` | combine two consecutive same-speaker cues into one, LLM-rewritten | — (scope carries both ids) | — | `codemix` |
 
 Stage order for replay:
-`codemix → duration → voices → tts → vc → timing → mix → lipsync`.
+`codemix → duration → voices → tts → timing → mix → lipsync`.
+
+> `vc` (stage 9f, voice conversion) was removed from the chain on
+> **2026-10-28** along with `backend/vc/` and `backend/voice_convert.py`. No
+> run on disk ever set it — the registry had been empty since 2026-10-23 —
+> so a legacy `request.json` carrying `"vc": null` still replays unchanged.
 
 > **`set_speaker` was invisible until 2026-10-19.** It has been registered in
-> `backend/edits.py` all along, but the generated `op_catalogue()` advertised
+> `backend/pipeline/edits.py` all along, but the generated `op_catalogue()` advertised
 > only eight of the nine, so the model was never told it could reattribute a
 > line. The catalogue now lives in the system prompt and lists all nine, with
 > a test asserting both directions (§7).
@@ -131,6 +139,16 @@ addresses the video timeline rather than cues.
 | `lipsync_window` | `lipsync_window needs a time range (start and end)` |
 | `lipsync_window` | `lipsync window 0.30s is too short to render` |
 | `set_gender` | `cannot honour gender='female': <why>` — the voice pool was exhausted |
+| `set_target_language` | `set_target_language needs a 'target_language' ISO code, e.g. hi, mr, ta` |
+| `set_target_language` | `unknown or non-Indic target language 'xx'. Supported: as, bn, …` |
+| `set_target_language` | `set_target_language cannot scope to a speaker alone — add a time range …` |
+| `set_target_language` | `Bodhan MT refused the translation: <why>` — the API call failed; `BODHAN_MT_KEY` missing surfaces here |
+| `merge_cues` | `merge_cues needs exactly two cue ids in its scope` — the user named one or more-than-two |
+| `merge_cues` | `merge_cues: unknown cue(s): SEG_XXXX` — a named id is not in the live cue list |
+| `merge_cues` | `merge_cues: SEG_a and SEG_b are not consecutive` — they are not index-adjacent in the segments list |
+| `merge_cues` | `merge_cues: speakers differ (SPK_00 vs SPK_01)` — explicit same-speaker requirement |
+| `merge_cues` | `merge_cues: N.NNs gap between SEG_a and SEG_b (max 2.0s)` — pause between the cues is too long |
+| `merge_cues` | `merge_cues needs the LLM (OPENROUTER_API_KEY unset)` — the handler calls the LLM, no fallback |
 
 ### No LLM configured
 
@@ -167,7 +185,7 @@ correct.
 |---|---|
 | `set_tone` on a non-Bodhan engine | *"tts engine 'indicf5' ignores the style hint … the tone change will come from the rewritten wording alone"* — only the Bodhan adapter forwards `instructions.style` |
 | per-segment rate | only engines with `supports_rate = True` honour it; since Edge was removed that is Bodhan alone |
-| IndicF5 | reads neither style nor rate — a tone edit changes the wording and nothing about the delivery |
+| IndicF5 (removed 2026-10-28) | read neither style nor rate — on a job recorded against it a tone edit changes the wording and nothing about the delivery |
 | `set_gender` | a hard filter on the voice catalog, not a weight; if the same-gender pool is exhausted it crosses gender and says so |
 
 ## 6. Accepted, but the stage is not in this job
@@ -198,7 +216,7 @@ job. 8 representative requests, **7 resolved correctly**:
 | make SPK_99 formal | `[]` — correctly refused |
 | **make it a little faster** | `set_speed` with **no `factor`** — the prompt asks for `{"ops": []}` here |
 
-The eighth fails safely: `backend/edits.py` answers *"set_speed needs a
+The eighth fails safely: `backend/pipeline/edits.py` answers *"set_speed needs a
 positive `factor`"* rather than inventing a speed.
 
 **Two traps worth carrying forward.**
@@ -215,10 +233,9 @@ The catalogue moving into the system prompt **did not reduce tokens**: input
 per parse went 1653 → 2156, up 30%, because the prompt is longer than the
 catalogue it replaced. The win is correctness.
 
-Because the prompt is hand-written while `OPS` is generated,
-`tests/test_edit_agent.py` fails if a registered op is missing from the
-prompt, and fails the other way if the prompt advertises one that does not
-exist.
+Because the prompt is hand-written while `OPS` is generated, the two must be
+kept in sync by hand — there's no automated check if a registered op goes
+missing from the prompt, or if the prompt advertises one that does not exist.
 
 ---
 
@@ -248,5 +265,4 @@ request is journalled to `extra.edits.history` and `<job>/edits/edit_NNN.json`
 anything. `pending.json` is working state and is deleted on commit.
 
 Traces of every LLM call (prompt, raw reply, tokens, cost, latency) go to
-Langfuse when configured; see `backend/tracing.py` and
-`scripts/langfuse_usage.py`.
+Langfuse when configured; see `backend/common/tracing.py`.

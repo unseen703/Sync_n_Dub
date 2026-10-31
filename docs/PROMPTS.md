@@ -4,12 +4,14 @@ Reference for anyone tuning model behaviour: the exact text sent to an LLM,
 where it lives, when it fires, and what consumes the answer.
 
 **Six system prompts, one injected repair turn, one probe.** All of them go
-through `backend/llm.py`, the single module here that talks to an LLM, so all
+through `backend/common/llm.py`, the single module here that talks to an LLM, so all
 of them are traced to Langfuse when it is configured.
 
-Generated from the source on **2026-10-20**. The bodies below are copied out
-of the running code, not retyped — but the code is the source of truth, and
-this file is hand-maintained (CLAUDE.md §5).
+Generated from the source on **2026-10-20**, updated **2026-10-31**. All
+system prompts now live in `backend/common/prompts/`, one file per prompt,
+exposed as `PROMPTS["key"]` from `backend.common.prompts`. The bodies below
+are copied from those files — they are the source of truth, and this file is
+hand-maintained (CLAUDE.md §5).
 
 ---
 
@@ -17,14 +19,14 @@ this file is hand-maintained (CLAUDE.md §5).
 
 | # | Prompt | File | Fires when | Model call |
 |---|---|---|---|---|
-| 1 | Edit planner | `backend/edit_agent.py` `_SYSTEM` | every agent message | `chat_json`, `max_tokens=1200`, trace `edit_agent.parse` |
-| 2 | Term translation | `backend/edits.py` `_h_replace_term` | `replace_term` with no `replace` | `chat`, `max_tokens=512`, trace `edit_agent.rewrite` |
-| 3 | Retranslate | `backend/edits.py` `_h_retranslate` | per cue in a `retranslate` | same |
-| 4 | Tone rewrite | `backend/edits.py` `_h_set_tone` | per cue, when `rewrite_text` | same |
-| 5 | Code-mix | `backend/edits.py` `_h_code_mix` | per cue, `mode=llm` only | same |
+| 1 | Edit planner | `backend/pipeline/edit_agent.py` `_SYSTEM` | every agent message | `chat_json`, `max_tokens=1200`, trace `edit_agent.parse` |
+| 2 | Term translation | `backend/pipeline/edits.py` `_h_replace_term` | `replace_term` with no `replace` | `chat`, `max_tokens=512`, trace `edit_agent.rewrite` |
+| 3 | Retranslate | `backend/pipeline/edits.py` `_h_retranslate` | per cue in a `retranslate` | same |
+| 4 | Tone rewrite | `backend/pipeline/edits.py` `_h_set_tone` | per cue, when `rewrite_text` | same |
+| 5 | Code-mix | `backend/pipeline/edits.py` `_h_code_mix` | per cue, `mode=llm` only | same |
 | 6 | Register classifier | `backend/classify.py` `_LLM_SYSTEM` | stage 9b1 tier 4, `--tts-style auto` | `chat_json`, `temperature=0`, trace `classify.register` |
-| — | JSON repair | `backend/llm.py` `chat_json` | automatically, on unparseable JSON | appended user turn |
-| — | Liveness probe | `backend/edit_agent.py` | `--check-llm` only | `chat_json`, `max_tokens=32` |
+| — | JSON repair | `backend/common/llm.py` `chat_json` | automatically, on unparseable JSON | appended user turn |
+| — | Liveness probe | `backend/pipeline/edit_agent.py` | `--check-llm` only | `chat_json`, `max_tokens=32` |
 
 **2–5 are the only prompts that rewrite dialogue**, and they are the ones that
 refuse by name without `OPENROUTER_API_KEY`. Each runs **one cue per call**.
@@ -36,13 +38,26 @@ tuning cost or behaviour, #1 is effectively the whole surface.
 
 ---
 
-## 1. Edit planner — `backend/edit_agent.py` `_SYSTEM`
+## 1. Edit planner — `backend/pipeline/edit_agent.py` `_SYSTEM`
 
 Turns a sentence into typed operations. Its output is schema-validated and
 re-resolved against real segment ids before anything runs, so a bad op is
 rejected rather than executed. The operation catalogue lives **here**, not in
-the user turn — `tests/test_edit_agent.py` fails if it and `backend/edits.py`
-`OPS` disagree in either direction.
+the user turn — it must be kept in sync with `backend/pipeline/edits.py`'s `OPS` by
+hand; nothing fails automatically if they disagree.
+
+Two placeholders are substituted at import: `{{lipsync_models}}` from the
+lip-sync registry and `{{tone_styles}}` from `edits.tone_styles()`, which
+reads `backend.tts.bodhan_adapter.INDIC_SPEAK_STYLES`. Both lists were once
+typed out by hand here, and both were wrong — the model list omitted two
+registered adapters, and the tone list ("formal | casual | friendly |
+serious | energetic") contained no value the engine accepts at all, so every
+tone the planner chose was written to `tts_style` and ignored at synthesis.
+
+**Reached only when the rule parser declines.** Since 2026-10-28
+`backend/pipeline/edit_agent.py::parse_request` runs `_rule_parse` FIRST and returns
+on a match, so this prompt sees only the sentences the patterns could not
+place. Every phrasing in the op catalogue is meant to parse without it.
 
 **User turn** (only the parts that vary per request):
 
@@ -115,7 +130,8 @@ Use only the following operation names and parameters.
 
 3. set_tone
    Change the delivery tone.
-   Required params: tone
+   Required params: tone — one of exactly these engine styles: {{tone_styles}}
+     Do not invent a register. "formal", "casual", "warm" and "urgent" are NOT engine styles and are rejected by the pipeline. If the user asks for a register that is not in the list and none of the listed styles clearly means the same thing, return {"ops": []}.
    Optional params: rewrite_text (boolean; defaults to true)
 
 4. code_mix
@@ -195,7 +211,7 @@ Choose the operation that most directly matches the requested change.
 - Exact replacement wording: set_text. Preserve the user's replacement text exactly.
 - Change the translation while retaining the source meaning: retranslate.
 - Change ONE word or phrase and leave the rest of the line exactly as it is: replace_term. Prefer it over retranslate whenever the request names a specific word, including "translate the word X", "replace X with Y" or "keep X but change it to Y". retranslate regenerates the whole line and will alter wording the request never mentioned.
-- Change delivery style, such as formal, casual, serious, or energetic: set_tone.
+- Change delivery style, such as a news read, a lecture, or an emotion: set_tone. The style must be one of the engine styles listed under operation 3; there is no "formal" and no "casual".
 - Keep specified English technical terms in the translated sentence: code_mix.
 - Change the perceived voice gender: set_gender.
 - Correct who is speaking: set_speaker.
@@ -207,15 +223,15 @@ Do not substitute one operation for another merely because they can produce simi
 
 For requests involving distinct changes, create one operation per change. If one change fully satisfies the request, emit exactly one operation.
 
-For example, "make SPK_01 more formal" requires set_tone with scope {"speaker":"SPK_01"}. Do not add a time range.
+For example, "read SPK_01's lines as a news anchor" requires set_tone with tone "news" and scope {"speaker":"SPK_01"}. Do not add a time range.
 
-"Make the translation more formal and preserve the words gradient and weight in English" requires set_tone and code_mix, each with the same appropriate scope.
+"Make it sound sad and preserve the words gradient and weight in English" requires set_tone (tone "sad") and code_mix, each with the same appropriate scope.
 
 ## PARAMETER RULES
 
 - Include all required parameters and only relevant optional parameters.
 - Do not include default values unless they are needed to make the requested behavior explicit.
-- For set_tone, use rewrite_text=true unless the user explicitly asks to change vocal delivery without rewriting wording.
+- For set_tone, use rewrite_text=true unless the user explicitly asks to change vocal delivery without rewriting wording. Never pass a tone that is not in the engine list; an unknown style is refused by the pipeline, not quietly ignored.
 - For code_mix, include terms only when the user identifies terms to preserve. Do not invent a termbase path.
 - For set_speed, use the numeric factor specified or unambiguously implied by the user. Do not invent a factor for vague requests such as "a little faster"; if the operation requires a factor and no configured default exists, return {"ops": []}.
 - For lipsync_window, use the requested time window. Do not change the lip-sync model unless requested or necessary to specify a model.
@@ -250,7 +266,7 @@ Return the JSON object only.
 
 ---
 
-## 2. Term translation — `backend/edits.py` `_h_replace_term`
+## 2. Term translation — `backend/pipeline/edits.py` `_h_replace_term`
 
 Asked for **one word**, never a sentence, and called **once per distinct term
 for the whole op** rather than once per cue — so the same word cannot come out
@@ -272,7 +288,7 @@ Translate this term: {find}
 
 ---
 
-## 3. Retranslate — `backend/edits.py` `_h_retranslate`
+## 3. Retranslate — `backend/pipeline/edits.py` `_h_retranslate`
 
 Rewritten on 2026-10-20. It used to say only *"reply with the replacement line
 ONLY"*, and given a word-level instruction the model answered with just that
@@ -301,7 +317,7 @@ Write the corrected {lang} line.
 
 ---
 
-## 4. Tone rewrite — `backend/edits.py` `_h_set_tone`
+## 4. Tone rewrite — `backend/pipeline/edits.py` `_h_set_tone`
 
 Only fires when `rewrite_text` is true. The length constraint is load-bearing:
 the line has to fit the same slot, and a longer rewrite is re-fitted by the
@@ -326,7 +342,7 @@ separate field (`tts_style`), and it reaches only the Bodhan adapter.
 
 ---
 
-## 5. Code-mix — `backend/edits.py` `_h_code_mix`
+## 5. Code-mix — `backend/pipeline/edits.py` `_h_code_mix`
 
 Only on `mode=llm`. The default path re-runs the transliterator stage instead
 and never calls a model.
@@ -345,6 +361,41 @@ English source: {src}
 Current translation: {cur}
 Always keep these in English: {terms}      <- omitted when no terms given
 ```
+
+---
+
+## 5b. Merge cues — `backend/pipeline/edits.py` `_h_merge_cues`
+
+Added 2026-10-30. The handler merges two consecutive cues of the same speaker
+into one; the LLM's job is to produce a single translated line that reads as
+one utterance from the two originals plus the two current translations.
+Validation (adjacency, same speaker, ≤ 2.0s gap) runs in the handler, not in
+the prompt — the model is given a pair that has already passed those checks.
+
+**System prompt:**
+
+```
+You are a subtitle translator for a dubbing pipeline. Two CONSECUTIVE utterances by the SAME speaker are being merged into one cue. You are given both source lines and both current translations.
+
+Write ONE translated line in the target language that joins the two naturally, preserving the full meaning of both. Keep the approximate combined length so the merged cue still fits its time slot. Reply with the merged line ONLY: no quotes, no commentary, no alternatives.
+```
+
+**User turn:**
+
+```
+Target language: {lang}
+Speaker: {spk or 'unknown'}
+Original 1: {src_a}
+Original 2: {src_b}
+Current translation 1: {cur_a}
+Current translation 2: {cur_b}
+Write the merged {lang} line.
+```
+
+The length hint is load-bearing: the merged cue inherits cue1.start and
+cue2.end, so the slot it has to fit is the sum of the two originals plus the
+pause between them. A longer rewrite is re-fitted by the stretch layer in 9c,
+same as every other translation edit.
 
 ---
 
@@ -387,7 +438,7 @@ voice's neutral reading, which is right for a local file with no metadata.
 
 ## Injected turns
 
-**JSON repair** — `backend/llm.py` `chat_json`. On an unparseable reply, one
+**JSON repair** — `backend/common/llm.py` `chat_json`. On an unparseable reply, one
 repair round is appended automatically as a **user** turn:
 
 ```
@@ -412,18 +463,14 @@ Reply with exactly {"ok": true} and nothing else.
 Three things look like prompts and are not. Worth knowing, because there is
 nothing to tune in them:
 
-- **`models/mt/bodhan_adapter.py`** and **`models/translit/bodhan_adapter.py`**
+- **`backend/translate/bodhan_adapter.py`** and **`backend/translate/translit/bodhan_adapter.py`**
   post `{"role": "user", "content": text}` with **no system message**. The
   raw line goes in; `target_language_code` and `target_script` are top-level
   API parameters. They are task endpoints wearing a chat-completions shape, so
   translation quality is the model's, not a prompt's.
-- **`models/tts/bodhan_adapter.py`** — the `instructions` field is a JSON blob,
+- **`backend/tts/bodhan_adapter.py`** — the `instructions` field is a JSON blob,
   `{"lang": "hi", "style": "educational lecture"}`, not natural language. An
   unknown style is a 422 on every segment.
-- **`scripts/build_voice_refs.py`** `PROMPT` — a fixed *spoken* sentence (hi/en)
-  used to render the 45 voice reference clips. Held constant across voices on
-  purpose, neutral register, so the clip reflects the voice rather than a
-  delivery.
 
 ---
 
@@ -433,9 +480,9 @@ nothing to tune in them:
 because `response_format={"type":"json_object"}` corrupted output on
 gemma-3-12b into valid-but-wrong JSON (CLAUDE.md §4).
 
-After editing #1, run `pytest tests/test_edit_agent.py` — the drift guards
-check that every registered op appears in the prompt and that the prompt
-advertises no op that does not exist. After editing #2–#5, there is no
+After editing #1, manually check that every registered op appears in the
+prompt and that the prompt advertises no op that does not exist — there's no
+automated drift guard. After editing #2–#5, there is no
 automatic check: they are free text, and the only guard is
 `_clean_rewrite`, which strips a leading colon, dash, bullet, quote or code
 fence from whatever comes back. That matters because an unstripped character

@@ -7,9 +7,11 @@ where it lives, when it fires, and what consumes the answer.
 through `backend/common/llm.py`, the single module here that talks to an LLM, so all
 of them are traced to Langfuse when it is configured.
 
-Generated from the source on **2026-10-20**. The bodies below are copied out
-of the running code, not retyped — but the code is the source of truth, and
-this file is hand-maintained (CLAUDE.md §5).
+Generated from the source on **2026-10-20**, updated **2026-10-31**. All
+system prompts now live in `backend/common/prompts/`, one file per prompt,
+exposed as `PROMPTS["key"]` from `backend.common.prompts`. The bodies below
+are copied from those files — they are the source of truth, and this file is
+hand-maintained (CLAUDE.md §5).
 
 ---
 
@@ -359,6 +361,41 @@ English source: {src}
 Current translation: {cur}
 Always keep these in English: {terms}      <- omitted when no terms given
 ```
+
+---
+
+## 5b. Merge cues — `backend/pipeline/edits.py` `_h_merge_cues`
+
+Added 2026-10-30. The handler merges two consecutive cues of the same speaker
+into one; the LLM's job is to produce a single translated line that reads as
+one utterance from the two originals plus the two current translations.
+Validation (adjacency, same speaker, ≤ 2.0s gap) runs in the handler, not in
+the prompt — the model is given a pair that has already passed those checks.
+
+**System prompt:**
+
+```
+You are a subtitle translator for a dubbing pipeline. Two CONSECUTIVE utterances by the SAME speaker are being merged into one cue. You are given both source lines and both current translations.
+
+Write ONE translated line in the target language that joins the two naturally, preserving the full meaning of both. Keep the approximate combined length so the merged cue still fits its time slot. Reply with the merged line ONLY: no quotes, no commentary, no alternatives.
+```
+
+**User turn:**
+
+```
+Target language: {lang}
+Speaker: {spk or 'unknown'}
+Original 1: {src_a}
+Original 2: {src_b}
+Current translation 1: {cur_a}
+Current translation 2: {cur_b}
+Write the merged {lang} line.
+```
+
+The length hint is load-bearing: the merged cue inherits cue1.start and
+cue2.end, so the slot it has to fit is the sum of the two originals plus the
+pause between them. A longer rewrite is re-fitted by the stretch layer in 9c,
+same as every other translation edit.
 
 ---
 

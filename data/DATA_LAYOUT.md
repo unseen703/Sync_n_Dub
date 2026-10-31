@@ -218,7 +218,7 @@ The reference's own accuracy is measured and published, per clip, in
 No video in the corpus carries an `hi-orig` auto-caption, so every Hindi word stream comes from a
 single producer (whisperx) with nothing independent to check it against. The measurable substitute
 is cue-level — manual `.hi.vtt` cue onsets against the CTC onset whisperx gave that cue's first word
-(shared text, independent timing): **185 ms median over 9 clips** (`scripts/hi_cue_floor.py`).
+(shared text, independent timing): **185 ms median over 9 clips**.
 
 **So 185 ms is an upper bound on the Hindi floor, and differences smaller than it are ties, not
 ranks.** The 55 ms figure is the English side, and is not the ranking's floor.
@@ -246,9 +246,9 @@ Full detail: `data/golden_reference_provenance.md`.
           metrics.json
 
 **Isolation is the point.** Every arm gets its own copy of the merged JSON and writes only inside
-its own directory. `tests/test_experiment_isolation.py` asserts the trees are disjoint — no arm's
-config may reference another arm's path, except `source_json` pointing at its declared TTS donor.
-That test protects the 8.2 GB of irreplaceable artifacts in `data/mt`, `data/tts`, `data/mix`.
+its own directory — the trees are meant to stay disjoint, with no arm's
+config referencing another arm's path except `source_json` pointing at its declared TTS donor.
+That protects the 8.2 GB of irreplaceable artifacts in `data/mt`, `data/tts`, `data/mix`.
 
 **Two TTS passes, not ten.** Only `ctl_naive_slot` and `m1_engine_speed` change what is
 *synthesised*; the other eight reuse the control's raw clips via `reuse_tts_from`. Within an
@@ -330,7 +330,6 @@ group (round-trip WER) and `mt` group were **not run** in this sweep.
 
 ## 2.6 Reproducing
 
-    bash scripts/run_sweep.sh                 # TIERS=A,B  DATA_DIR=data/exp/sweep1
     python -m backend.eval run --clip-id <id> --variant-id <arm> \
         --mt-json data/exp/sweep1/exp/<id>/<arm>/plan.mt.json --groups timing,pauses,rate
     python -m backend.eval report --results data/eval/sweepA --baseline base_global_tempo

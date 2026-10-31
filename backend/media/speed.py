@@ -1,11 +1,11 @@
 """The `--speed-mode` knob values, shared by the CLI and the frontend.
 
 `backend.cli.resolve_speed_setup` builds these from an argparse namespace;
-`frontend.presets` calls the same functions with no arguments and gets the
+`server.presets` calls the same functions with no arguments and gets the
 argparse defaults, so a bare CLI run and a UI run pace identically by
 construction.
 
-Deliberately dependency-free: `frontend/presets.py` is imported when the web
+Deliberately dependency-free: `server/presets.py` is imported when the web
 server starts, and routing this through `backend.cli` would drag argparse
 and all seven model registries into that import.
 

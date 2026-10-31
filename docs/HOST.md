@@ -22,13 +22,13 @@ in-env PyTorch port.
 
 ### Node is for the UI build only, and bare `npm` is broken
 
-`frontend/web/` (the operator UI) is a Vite app. Its toolchain lives in a separate
+`frontend//` (the operator UI) is a Vite app. Its toolchain lives in a separate
 conda env so it never reaches the Python server's PATH:
 
 ```
 conda create -n dubui nodejs=20     # 20.20.2 from pkgs/main
-conda run -n dubui npm --prefix frontend/web install
-conda run -n dubui npm --prefix frontend/web run build     # -> frontend/web-dist/
+conda run -n dubui npm --prefix frontend/ install
+conda run -n dubui npm --prefix frontend/ run build     # -> frontend/-dist/
 ```
 
 The route in is `conda run -n dubui`. The system has node **v12.22.9** on
@@ -40,7 +40,7 @@ escape hatch is naming the interpreter, same as everywhere else here:
 `envs/dubfrontend/bin/node envs/dubfrontend/lib/node_modules/npm/bin/npm-cli.js`.
 
 Node is a **build-time** dependency only — the server serves static files from
-`frontend/web-dist/` and never shells into node, which is why it is not in
+`frontend/-dist/` and never shells into node, which is why it is not in
 `requirements.txt`.
 
 **The conda `libstdc++` is preloaded, because imports otherwise break by

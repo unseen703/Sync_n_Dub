@@ -803,6 +803,11 @@ def run_post_mt_stages(
     # 9h lip sync
     lipsync_model: Optional[str] = None,
     lipsync_num_gpus: Optional[int] = None,
+    # Stop after the text stages (9b/9c/9c2/9b2) and return before 9d
+    # (voices). The gated UI flow runs these in phase one so the operator
+    # sees code-mixed, condensed, emotion-annotated text at the cast table;
+    # the cast route then picks up from 9d onward.
+    stop_before_voices: bool = False,
     # 9i face restoration over the render. A NAMED parameter, not a lookup
     # into a `config` dict — this function has no `config` in scope, and a
     # `config.get(...)` here raised NameError on every run that reached it.
@@ -928,7 +933,7 @@ def run_post_mt_stages(
             # checked 2026-10-22), so the audio cannot be made shorter after
             # the fact. The sentence has to be.
             #
-            # Marker on ONE line: `frontend/progress.py` scrapes these, so a
+            # Marker on ONE line: `server/progress.py` scrapes these, so a
             # wrapped marker loses its closing `===` and silently stops
             # matching.
             if condense_overlong_text:
@@ -983,6 +988,12 @@ def run_post_mt_stages(
                 log.warning("emotion stage failed (%s); continuing with the "
                             "global style only", e)
                 out.extra.setdefault("emotion", {})["error"] = str(e)
+
+    # Gate: the UI's phase one stops here. Everything above (9b, 9c/9c2,
+    # 9b2) has annotated the text; everything below (9d onward) needs the
+    # operator's cast choices.
+    if stop_before_voices:
+        return out
 
     # 9d. Voice assignment per speaker (plan §8).
     voice_engine = _default_voice_engine(voice_engine, tts_model)
@@ -1408,7 +1419,7 @@ def run_post_mt_stages(
                     # in stage 6b (for the gender face vote) before the MT
                     # gate; a marker inside the helper would fire there too
                     # and light the Lip-sync pill on a job that has not been
-                    # anywhere near a render. ONE line -- `frontend/progress.py`
+                    # anywhere near a render. ONE line -- `server/progress.py`
                     # scrapes it and the test greps the literal.
                     log.info("=== stage 6: active speaker detection (%s) ===", asd_model)
                     _run_asd_stage(
@@ -1810,7 +1821,7 @@ def _run_pipeline(
     duration_voice: str = "default",
     duration_safety_margin_s: float = 0.10,
     # 9c2. LLM rewrite of lines the tempo stretch cannot fit. Off by default
-    # on the CLI; the UI turns it ON (`frontend/presets.py`), since a UI run has no
+    # on the CLI; the UI turns it ON (`server/presets.py`), since a UI run has no
     # operator watching stage 9c's overrun warnings go past.
     condense_overlong_text: bool = False,
     condense_model: Optional[str] = None,
@@ -1924,7 +1935,7 @@ def _run_pipeline(
             "tts":             tts_model,
             "voice_engine":    voice_engine,
             "lipsync":         lipsync_model,
-            # 9i. Recorded because `frontend/progress.plan_stages` branches on it:
+            # 9i. Recorded because `server/progress.plan_stages` branches on it:
             # a switch the planner reads but the manifest does not hold means
             # a finished job re-plans to a different shape than it ran.
             "restore":         restore_model,
@@ -1933,12 +1944,12 @@ def _run_pipeline(
             "timing_producer": timing_producer,
             "variant_tag":     variant_tag,
             # Every OPTIONAL stage's switch, under the key name
-            # `frontend/progress.py::plan_stages` reads. These were missing, and
+            # `server/progress.py::plan_stages` reads. These were missing, and
             # the manifest is the only durable record of what a run did:
             # `_run_pipeline` re-allocates here and OVERWRITES whatever the
             # caller wrote at submission, so the UI's richer config lasted
             # until the pipeline started and no longer. Everything that
-            # reads the manifest afterwards — `frontend/spec.py`, `frontend/cost.py`,
+            # reads the manifest afterwards — `server/service/spec.py`, `server/service/cost.py`,
             # `_list_jobs`, `edit_agent._config` — therefore saw a run with
             # no resegmentation, no speaker refinement, no register, no
             # emotion, no visemes and no face detector, none of which was
@@ -2215,7 +2226,7 @@ def _run_pipeline(
                     allow_auto=captions_allow_auto)
         if caption_result is not None:
             cap = caption_result.extra.get("captions", {})
-            # ONE line, deliberately. `frontend/progress.py` scrapes these markers
+            # ONE line, deliberately. `server/progress.py` scrapes these markers
             # -- a marker split across two source lines is captured without
             # its closing `===` and silently stops being matched, which
             # freezes the progress bar.
@@ -2403,11 +2414,12 @@ def _run_pipeline(
         result.content_register = tts_style
         result.content_register_tier = tier
 
-    # 9b..9h — code-mix → duration → voices → TTS → VC → mix → lip-sync.
-    # The UI's staged flow stops phase one HERE, at MT, so the operator sets
-    # gender + voice per speaker before any audio is made; the cast route then
-    # calls run_post_mt_stages. A CLI run never stops (stop_after_mt False).
-    post = None if stop_after_mt else run_post_mt_stages(
+    # 9b..9h — code-mix → duration → condense → emotion → voices → TTS →
+    # mix → lip-sync. The UI's gated flow (`stop_after_mt`) runs the TEXT
+    # stages (9b, 9c/9c2, 9b2) in phase one so the operator sees final text
+    # at the cast table; the cast route picks up from 9d (voices) onward.
+    # A CLI run never stops (stop_after_mt False).
+    post = run_post_mt_stages(
         result.mt_json,
         source_video=video,
         me_stem=me_stem,
@@ -2470,11 +2482,17 @@ def _run_pipeline(
         lipsync_model=lipsync_model,
         lipsync_num_gpus=lipsync_num_gpus,
         lipsync_batch_size=lipsync_batch_size,
+        stop_before_voices=stop_after_mt,
         **adapter_kwargs,
     )
-    if post is None:
-        # Phase one stopped at MT (stop_after_mt). The cast route runs the
-        # rest; mark the job so the UI shows the gender/voice gate.
+    if stop_after_mt:
+        # Phase one ran the text stages (9b/9c/9c2/9b2) and stopped before
+        # voices. Copy their results, then mark the job for the cast table.
+        result.translit_model = post.translit_model
+        result.codemix_retained_terms = post.codemix_retained_terms
+        result.duration_model_language = post.duration_model_language
+        result.duration_model_voice = post.duration_model_voice
+        result.duration_estimated_violations = post.duration_estimated_violations
         result.awaiting_cast = True
     else:
         result.mt_json = post.mt_json

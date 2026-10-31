@@ -45,11 +45,12 @@ LatentSync/
 # scratch material dropped in by hand (note the trailing dot in the dir name)
 resourses_for_suggested_edits./
 
-# UI build output. `frontend/web/vite.config.ts` sets outDir to '../web-dist', so
-# the bundle lands OUTSIDE web/ and the scaffold's own frontend/web/.gitignore
+# UI build output. `frontend//vite.config.ts` sets outDir to '../web-dist', so
+# the bundle lands OUTSIDE web/ and the scaffold's own frontend//.gitignore
 # cannot reach it — its comment says it is "ignored there", and this is there.
-# Regenerate with: conda run -n dubui npm --prefix frontend/web run build
-frontend/web-dist/
+# Regenerate with: conda run -n dubui npm --prefix frontend/ run build
+frontend/-dist/
+web-dist/
 
 # run logs — every runner here writes logs/<task>_<stamp>.log, and the detached
 # tmux convention in the long-run skill means they accumulate per launch.
@@ -98,7 +99,7 @@ backend/asd/vendor/
 
 # Run logs, build output, model weights
 logs/
-frontend/web-dist/
+frontend/-dist/
 *.pth
 # `*.pt` matters more than it looks. LatentSync's UNet is a 4.7 GB `.pt`,
 # and it escaped git only because `third_party/` was ignored wholesale.

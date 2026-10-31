@@ -79,8 +79,8 @@ the UI shows **seven** phases, not 22 rows.
 | `7` | Transcribing | Transcribe |
 | `8` | Timing the words | Transcribe |
 | `9` | Translating | Translate |
-| `9b1` | Working out the tone | Speech generation |
-| `9b2` | Listening for emotion | Speech generation |
+| `9b1` | Working out the tone | Translate |
+| `9b2` | Listening for emotion | Translate |
 | `9c` | Fitting the text to the timing | Translate |
 | `9d` | Casting voices | Speech generation |
 | `9e` | Speaking the translation | Speech generation |
@@ -89,10 +89,11 @@ the UI shows **seven** phases, not 22 rows.
 | `9f2` | Planning the timing | Speech generation |
 | `9g` | Mixing the new soundtrack | Mix |
 
-Stage `9b` (transliteration) and `9f` (voice conversion) are **not** in a UI
-run. `9b` is absent because code-mixing is now the MT call's own job; `9f`
-because neither upstream repo is installed here, and it is an *alternative*
-to stage 9d rather than an addition — it would override the voice just cast.
+Stage `9f` (voice conversion) is **not** in a UI run — neither upstream repo
+is installed here, and it is an *alternative* to stage 9d rather than an
+addition. Stage `9b` (code-mix / transliteration) now runs before the cast
+gate as part of the translate phase, alongside 9c/9c2 (condense) and 9b2
+(emotion detection). The cast route picks up from 9d (voices) onward.
 
 ## 4. Every setting a UI run sets
 

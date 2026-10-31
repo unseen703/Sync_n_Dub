@@ -118,16 +118,17 @@ Why: [docs/STAGES.md](docs/STAGES.md).
 
 ## 3. Running things
 
-**frontend.** `frontend/server.py` (FastAPI, loopback only, port 7861) serves `frontend/web-dist/`. Jobs launch detached via
+**frontend.** `frontend/server.py` (FastAPI, loopback only, port 7861) serves `frontend/-dist/`. Jobs launch detached via
 `./ui_run_job.sh`, the one launcher that sets the libstdc++ preload. The progress bar is 5 pills:
 `Prepare`, `Translate`, `Dub audio`, `Lip-sync` (`progress.PHASE_GROUPS`) plus a synthetic `Finished`.
 
-**A UI job ends at the MT gate.** `frontend/runner.py` forces `stop_after_mt=True` on every submission — not a
-default, so no `request.json` can opt out; the CLI is unaffected because it never goes through the runner.
-Phase one runs through stage 9 plus 9b1 (the last marker before `run_post_mt_stages`), stamps
-`awaiting_cast` on the manifest, and exits `done`. Casting (`POST /api/jobs/{id}/cast` → `frontend.runner
---cast`) runs TTS + mix; lip-sync is a third, separate submission. **Trap:** the gate is
-`run_post_mt_stages`, not the `Translate` pill — 9b and 9c sit in that pill but run *after* the gate.
+**A UI job ends after emotion detection.** `server/runner.py` forces `stop_after_mt=True` on every
+submission; the CLI is unaffected. Phase one runs through stage 9 (MT) plus the text stages — 9b1
+(register), 9b (code-mix), 9c/9c2 (condense) and 9b2 (emotion) — via
+`run_post_mt_stages(..., stop_before_voices=True)`, stamps `awaiting_cast`, and exits `done`.
+The operator sees final, code-mixed, condensed, emotion-annotated text at the cast table.
+Casting (`POST /api/jobs/{id}/cast` → `server.runner --cast`) picks up from 9d (voices) onward;
+lip-sync is a third, separate submission.
 
 **Stage 6b predicts gender before the gate**, on the gated flow only, so the cast table has a gender to
 show at the moment it asks for a voice. All three voters run, which is why ASD runs here too — and that

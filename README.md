@@ -1,132 +1,226 @@
-# Dubbing Studio
+<div align="center">
 
-Indic video dubbing pipeline. Takes a video — a YouTube URL or a local file —
-transcribes it, translates it, synthesizes a dubbed track in an Indian language,
-mixes it against the original music and effects, and optionally lip-syncs the
-speaker's mouth to the new audio.
+# 🎬 Dubbing Studio
 
-- Design intent, the experiment plan and the current file structure: [plan.md](plan.md)
-- Host setup and working rules: [CLAUDE.md](CLAUDE.md)
-- Stage internals, the UI, speed modes, casting: [docs/STAGES.md](docs/STAGES.md)
-- Known bugs and incident history: [docs/ROUGH_EDGES.md](docs/ROUGH_EDGES.md)
+**Indic video dubbing pipeline — from raw video to lip-synced dubbed output in one command.**
 
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![CUDA 12.8](https://img.shields.io/badge/CUDA-12.8-76B900?logo=nvidia&logoColor=white)](https://developer.nvidia.com/cuda-toolkit)
+[![License](https://img.shields.io/badge/license-research-blue)](#)
+[![GitHub](https://img.shields.io/badge/GitHub-Sync__n__Dub-181717?logo=github)](https://github.com/unseen703/Sync_n_Dub)
 
-dev start cmd conda run --no-capture-output -n dubui npm --prefix frontend/web run dev
-server start cmd $PY -m frontend.server --port 7861
-## Quickstart
+Takes a video — a YouTube URL or a local file — transcribes it, translates it,
+synthesizes a dubbed track in an Indian language, mixes it against the original
+music and effects, and optionally lip-syncs the speaker's mouth to the new audio.
+
+**Pipeline:** Download → Diarize → Transcribe → Translate → TTS → Mix → Lip-sync → Restore
+
+</div>
+
+<!-- Screenshots — drop PNGs into docs/screenshots/ and uncomment:
+<div align="center">
+<img src="docs/screenshots/new-job.png" width="45%" alt="New job" />
+<img src="docs/screenshots/progress.png" width="45%" alt="Progress" />
+<br/>
+<img src="docs/screenshots/edit-panel.png" width="45%" alt="Edit panel" />
+<img src="docs/screenshots/speakers.png" width="45%" alt="Speaker casting" />
+</div>
+-->
+
+---
+
+## ✨ Features
+
+- Full end-to-end dubbing: transcription, translation, speech synthesis and audio mixing
+- Lip-sync with Wav2Lip, MuseTalk or LatentSync 1.5 (auto-selected by face size)
+- Per-cue pacing — each line is speed-fitted to its original slot
+- Active speaker detection picks the speaking face across multi-speaker scenes
+- Plain-language edit agent — fix one line without re-running the whole pipeline
+- Operator UI with job progress, speaker casting and voice/tone editing
+- Multi-GPU support with automatic free-card detection
+
+---
+
+## 📋 Prerequisites
+
+| Requirement | Detail |
+|---|---|
+| **OS** | Linux (tested on Ubuntu 22.04+) |
+| **GPU** | NVIDIA with ≥16 GiB VRAM, CUDA 12.8+, Blackwell (sm_120) safe |
+| **conda** | Miniconda or Anaconda on PATH |
+| **git** | For cloning vendor repos during asset fetch |
+| **HuggingFace token** | Required for pyannote diarization — accept the [model gate](https://hf.co/pyannote/speaker-diarization-community-1) first |
+| **Bodhan API keys** | ASR, MT, TTS and transliteration endpoints — see `.env.example` |
+| **OpenRouter key** | Optional — enables the LLM edit agent and text-rewriting ops |
+
+---
+
+## 🚀 Quick setup (script)
 
 ```bash
-PY=/data1/dipak_data/miniconda3/envs/dubbing/bin/python   # no `python` on PATH
+git clone git@github.com:unseen703/Sync_n_Dub.git dubbingstudio
+cd dubbingstudio
 
-bash setup.sh                                 # doctor, model fetch, 60s dry run
+./setup.sh                        # creates 4 conda envs, fetches vendor
+                                  # repos + weights, builds the UI, runs doctor
 
-$PY -m backend.cli --input <url-or-file> \
+cp .env.example .env && chmod 600 .env
+# Fill in HF_TOKEN, BODHAN_*_KEY, and optionally OPENROUTER_API_KEY
+
+./setup.sh --check-only           # verify everything is wired up
+```
+
+`setup.sh` delegates to `install.sh`, which is idempotent — re-running after a
+partial install only does the remaining work.
+
+### install.sh flags
+
+| Flag | Effect |
+|---|---|
+| `--skip-envs` | Skip conda env creation (assume they exist) |
+| `--skip-assets` | Skip vendor repo + weight fetch (e.g. rsynced in) |
+| `--skip-ui` | Skip the npm build |
+| `--include-optional` | Also fetch optional weights (~6 GB extra) |
+
+---
+
+## 🔧 Manual setup
+
+### 1. Create the conda environments
+
+Four envs, each from a YAML spec in `envs/`:
+
+```bash
+conda env create -f envs/dubbing.yml -n dubbing
+conda env create -f envs/musetalk.yml -n musetalk
+conda env create -f envs/latentsync.yml -n latentsync
+conda env create -f envs/dubui.yml -n dubui        # Node, for the UI build only
+```
+
+### 2. Install pip dependencies
+
+Each env has a matching `.pip.txt`. The PyTorch index must target your CUDA:
+
+```bash
+TORCH_INDEX="https://download.pytorch.org/whl/cu128"
+CONDA_BASE="$(conda info --base)"
+
+$CONDA_BASE/envs/dubbing/bin/python -m pip install \
+    -r envs/dubbing.pip.txt --extra-index-url "$TORCH_INDEX"
+
+$CONDA_BASE/envs/musetalk/bin/python -m pip install --no-deps \
+    -r envs/musetalk.pip.txt --extra-index-url "$TORCH_INDEX"
+
+$CONDA_BASE/envs/latentsync/bin/python -m pip install \
+    -r envs/latentsync.pip.txt --extra-index-url "$TORCH_INDEX"
+```
+
+MuseTalk also needs mmcv built from source (~20 min):
+
+```bash
+envs/build_mmcv_musetalk.sh "$CONDA_BASE/envs/musetalk/bin/python"
+```
+
+### 3. Fetch vendor repos and model weights
+
+```bash
+PY="$CONDA_BASE/envs/dubbing/bin/python"
+$PY ./fetch_assets.py --all                  # required weights
+$PY ./fetch_assets.py --all --include-optional   # +musetalk v1, syncnet (~6 GB)
+```
+
+Reads `models/assets.lock.json` — every repo commit, patch and weight checksum
+is pinned.
+
+### 4. Configure secrets
+
+```bash
+cp .env.example .env && chmod 600 .env
+```
+
+Fill in at minimum:
+- `HF_TOKEN` — HuggingFace token (pyannote gate must be accepted)
+- `BODHAN_ASR_KEY`, `BODHAN_MT_KEY`, `BODHAN_TTS_KEY`, `BODHAN_TRANSLIT_KEY`
+
+Optional:
+- `OPENROUTER_API_KEY` — enables the LLM edit agent
+- `LANGFUSE_PUBLIC_KEY` + `LANGFUSE_SECRET_KEY` — LLM tracing
+
+### 5. Build the frontend
+
+```bash
+conda run -n dubui npm --prefix frontend/ ci
+conda run -n dubui npm --prefix frontend/ run build
+```
+
+Output lands in `frontend/-dist/`. If missing, the server runs API-only.
+
+### 6. Run the doctor
+
+```bash
+$PY ./doctor.py               # full check
+$PY ./doctor.py --quick        # skip slow/import-heavy checks
+$PY ./doctor.py --json         # machine-readable output
+```
+
+---
+
+## 🎯 Usage
+
+There is no `python` on PATH — always use the dubbing env's interpreter:
+
+```bash
+PY=/data1/dipak_data/miniconda3/envs/dubbing/bin/python
+# or: PY="$(conda info --base)/envs/dubbing/bin/python"
+```
+
+### CLI
+
+```bash
+$PY -m backend.pipeline.cli --input <url-or-file> \
     --model pyannote --asr bodhan --align mms_fa \
     --mt bodhan --mt-target-language hi \
     --tts bodhan --mix --lipsync wav2lip
 
-$PY -m backend.jobs list                      # every run, newest first
+$PY -m backend.pipeline.jobs list          # every run, newest first
 ```
 
 One input per run. Each run becomes its own job folder under `data/jobs/`.
 
-## How a run is organised
-
-One run, one folder. Nothing a run produces is written outside it:
-
-```
-data/jobs/<job_id>/
-  manifest.json      status, config, argv, inventory of every file below
-  videos/ audio/ stems/ diarization/ faces/ asd/
-  asr/ align/ mt/ voices/ tts/ mix/ lipsync/ eval/ exp/
-```
-
-`<job_id>` is `<timestamp>__<input-slug>__<diar>.<asr>.<align>.<mt>.<lang>`, so
-runs sort chronologically and a re-run never overwrites an earlier one.
-`manifest.json` carries `status`: `running`, then `ok` or `failed`.
-
-Three inputs live outside job folders on purpose:
-`models/duration/<lang>.<voice>.json` (costly TTS calibration),
-`experiments/suites/*.json` (sweep definitions), and
-`data/voice_refs/<engine>/<voice>.wav` (one clip per catalog voice, used to
-match timbre during casting). The voice clips are gitignored.
-
-Full layout: [data/DATA_LAYOUT.md](data/DATA_LAYOUT.md).
-
-### Dubbing one window of one video
-
-`backend/pipeline/cli.py` runs whole files, so a time-window run means cutting first
-(see the `clip-run` skill). The common case: one window, driven by an
-already-downloaded YouTube dub track (MT and TTS skipped), cut on shot
-boundaries, lip-synced with MuseTalk only on shots where ASD finds a single
-speaking face, and spliced back to the original length. Every visual stage
-dumps what it detected so you can check it.
-
-## Defaults worth knowing
-
-| What | Default | Why / detail |
-|---|---|---|
-| MT script | `--mt-target-script codemix`: English terms stay in Latin, e.g. `weight सही है` | `native` re-scripts inconsistently, which TTS mispronounces. [STAGES.md](docs/STAGES.md) |
-| Pacing | `--speed-mode segment`: each cue fitted to its own slot, `--speed-cap` 1.8, `--speed-floor` 0.75 | `global` (one `atempo` over the whole file) is still available. [STAGES.md](docs/STAGES.md) |
-| Over-long lines | Stage 9c2 rewrites a line past 1.5× (`--condense-overlong`, on in the UI) | [ROUGH_EDGES.md](docs/ROUGH_EDGES.md) |
-| TTS | Bodhan `indic-speak` only; the voice catalog follows from `--tts`, there is no `--voice-engine` | Edge removed 2026-10-17, IndicF5 2026-10-28. [ROUGH_EDGES.md](docs/ROUGH_EDGES.md) |
-| Voice casting | Filter by predicted gender, rank by ECAPA timbre; fall back to target language + gender | [ROUGH_EDGES.md](docs/ROUGH_EDGES.md) |
-| Lip-sync model | wav2lip when the face is under 25% of frame height, MuseTalk above | [STAGES.md](docs/STAGES.md) |
-| Speaking face | Picked from stage 6 ASD scores via `run_lipsync(..., coord_list=…)` | [ROUGH_EDGES.md](docs/ROUGH_EDGES.md) |
-| Face restore | GFPGAN, in `backend/restore/` | The lip-synced mouth comes back soft. [ROUGH_EDGES.md](docs/ROUGH_EDGES.md) |
-
-## The operator UI
-
-The same pipeline with a screen on it: paste a YouTube link, pick a language
-and a part of the video, watch it run, then listen and recast voices.
+### Operator UI
 
 ```bash
-$PY -m frontend.server                       # http://127.0.0.1:7861
+./start_ui.sh                              # http://127.0.0.1:7861
+./start_ui.sh --port 7900                  # custom port
 ```
 
-It binds **loopback only** and has **no authentication**. Reach it over an SSH
-tunnel (`ssh -L 7861:localhost:7861 <host>`). Don't bind a public address: it
-runs yt-dlp on any URL it's given and starts GPU jobs.
+Binds **loopback only** — no authentication. Reach it over an SSH tunnel:
 
-| | |
+```bash
+ssh -L 7861:localhost:7861 <host>
+```
+
+| Feature | Detail |
 |---|---|
-| **New job** | URL, target language, whole video or a time range. The server pre-cuts the clip. |
-| **Progress** | Eight pills: Download video · Speaker annotation · Transcribe · Translate · Speech generation · Mix · Lip sync · Finished |
-| **Video / audio** | Original ⇄ lip-synced toggle; play and download both tracks |
+| **New job** | URL, target language, whole video or a time range |
+| **Progress** | Eight pills: Download → Speaker annotation → Transcribe → Translate → Speech generation → Mix → Lip sync → Finished |
+| **Playback** | Original ⇄ lip-synced toggle; play and download both tracks |
 | **Speakers** | Each speaker's voice and tone, changeable |
-| **Edit panel** | Plain-language edits, under the player (see below) |
-| **Jobs** | A rail of job cards titled by video title |
+| **Edit panel** | Plain-language edits under the player |
+| **Jobs** | Rail of job cards titled by video title |
 
-Two limits on purpose: lip-sync is capped at **20 minutes** of video (it runs
-at 3–21× clip length here), and a voice change **doesn't re-render** until you
-apply it, since it re-runs TTS, mix and lip-sync.
+Lip-sync is capped at **20 minutes** of video (3–21× real-time on 16 GiB cards).
 
-### Building the frontend
+### Edit agent
 
-Vite app in `frontend/web/`, built to `frontend/web-dist/`. Node lives in its own conda
-env, and bare `npm` is broken on this host (see [docs/HOST.md](docs/HOST.md)):
-
-```bash
-conda create -n dubui nodejs=20
-conda run -n dubui npm --prefix frontend/web install
-conda run -n dubui npm --prefix frontend/web run build
-```
-
-If `frontend/web-dist/` is missing, the server runs API-only and logs a warning.
-
-## Editing a finished dub in plain language
-
-Fixing one line shouldn't mean re-running the whole pipeline.
-[backend/edit_agent.py](backend/edit_agent.py) takes the change as a sentence:
+Fix a finished dub without re-running the whole pipeline:
 
 ```bash
 $PY -m backend.edit_agent -j <job_id> \
     "the speaker at 1:20 should sound female, and speed up 0:30 to 0:45 by 1.2x"
 ```
 
-It prints a plan and stops. `--apply` writes, `--run` re-renders, `--revert`
-undoes every edit. Only the stages the change broke are replayed; stages
-1..9a never re-run.
+Dry run by default. `--apply` writes, `--run` re-renders, `--revert` undoes.
 
 | Op | Example |
 |---|---|
@@ -137,169 +231,153 @@ undoes every edit. Only the stages the change broke are replayed; stages
 | `set_gender` | `the speaker at 1:20 should sound female` |
 | `set_voice` | `use Amit for SPEAKER_00` |
 | `set_speaker` | move a mis-attributed cue to another speaker |
-| `set_speed` | `speed up the audio between 0:30 and 0:45 by 1.2x` |
+| `set_speed` | `speed up 0:30 to 0:45 by 1.2x` |
 | `lipsync_window` | `lip-sync only from 1:00 to 1:30 with musetalk` |
 
-`--list-ops` prints every parameter. The LLM (Gemma 3 12B via OpenRouter)
-only parses the request and rewrites text; without a key a regex parser runs
-and the text-rewriting ops refuse. Full detail:
-[docs/EDIT_AGENT.md](docs/EDIT_AGENT.md).
+`--list-ops` prints every parameter. The LLM (Gemini 2.5 Flash via OpenRouter)
+parses the request; without a key, a regex parser runs and text-rewriting ops
+refuse. Full detail: [docs/EDIT_AGENT.md](docs/EDIT_AGENT.md).
 
-## Adding a model
+---
+
+## 📂 How a run is organised
+
+One run, one folder. Nothing is written outside it:
+
+```
+data/jobs/<job_id>/
+  manifest.json      status, config, argv, inventory of every file below
+  videos/ audio/ stems/ diarization/ faces/ asd/
+  asr/ align/ mt/ voices/ tts/ mix/ lipsync/ eval/ exp/
+```
+
+`<job_id>` is `<timestamp>__<input-slug>__<diar>.<asr>.<align>.<mt>.<lang>` —
+runs sort chronologically and a re-run never overwrites an earlier one.
+
+Three inputs live outside job folders on purpose:
+`models/duration/<lang>.<voice>.json` (TTS calibration),
+`experiments/suites/*.json` (sweep definitions), and
+`data/voice_refs/<engine>/<voice>.wav` (voice reference clips).
+
+Full layout: [data/DATA_LAYOUT.md](data/DATA_LAYOUT.md).
+
+---
+
+## ⚙️ Defaults worth knowing
+
+| What | Default | Detail |
+|---|---|---|
+| MT script | `--mt-target-script codemix` — English terms stay in Latin | [STAGES.md](docs/STAGES.md) |
+| Pacing | `--speed-mode segment` — per-cue fit, cap 1.8×, floor 0.75× | [STAGES.md](docs/STAGES.md) |
+| Over-long lines | Stage 9c2 rewrites past 1.5× (`--condense-overlong`) | [ROUGH_EDGES.md](docs/ROUGH_EDGES.md) |
+| TTS | Bodhan `indic-speak` only; voice catalog follows from `--tts` | [ROUGH_EDGES.md](docs/ROUGH_EDGES.md) |
+| Lip-sync | Wav2Lip under 25% face height, MuseTalk above | [STAGES.md](docs/STAGES.md) |
+| Face restore | GFPGAN post-processing on lip-synced mouth | [ROUGH_EDGES.md](docs/ROUGH_EDGES.md) |
+
+---
+
+## 🧩 Adding a model
 
 Write one adapter against the stage's `base.py` and add one line to
-`_REGISTRY_SPEC` in `models/<stage>/__init__.py`. The CLI picks it up
-automatically. The registered adapters per stage are listed in
-[plan.md §11](plan.md#11-repository-structure).
+`_REGISTRY_SPEC` in `backend/<stage>/__init__.py`. The CLI picks it up
+automatically. Worked example: `backend/lipsync/`.
 
-## Structure
+---
 
-Hand-written, not regenerated by any script. Update it when files are added,
-moved or removed. The same listing is in [plan.md §11](plan.md#11-repository-structure);
-keep the two in step.
+## 🏗️ Project structure
 
-*As built, 2026-10-27. Descriptions come from each file's own docstring.*
-**Scope:** `backend/` and `frontend/` (Python side). Not covered: the web
-frontends. The `backend/media/speed.py` and `backend/restore/restore.py` rows
-come from CLAUDE.md and the earlier README, not from reading those files.
+Hand-maintained, not auto-generated. Update when files are added, moved or
+removed.
+
+*As built, 2026-10-31.*
 
 ### Top level
 
 | Path | What it is |
-| --- | --- |
-| `README.md` | Quickstart, defaults, UI and edit-agent usage, and this structure listing |
-| `CLAUDE.md` | Host setup (interpreters, GPUs, ffmpeg builds), conventions, working rules for Claude Code |
-| `plan.md` | Design intent, experiment matrix, and the same structure listing |
-| `docs/` | Long-form docs: `HOST.md`, `STAGES.md`, `ROUGH_EDGES.md`, `EDIT_AGENT.md`, `PROMPTS.md`, `UI_RUN.md` |
-| `backend/` | The pipeline: one package per stage or concern (below), each with its adapters and `_REGISTRY_SPEC` |
+|---|---|
+| `CLAUDE.md` | Host setup, conventions, working rules for Claude Code |
+| `setup.sh` / `install.sh` | One-command install: conda envs, vendor assets, UI build, doctor |
+| `start_ui.sh` | Starts the operator UI server with correct interpreter and preload |
+| `doctor.py` | Health check: envs, imports, weights, secrets, GPUs |
+| `fetch_assets.py` | Downloads vendor repos + weights from `models/assets.lock.json` |
+| `backend/` | The pipeline: one package per stage, each with adapters and `_REGISTRY_SPEC` |
 | `frontend/` | FastAPI operator UI and its job runner |
-| `data/` | Job folders (`data/jobs/<job_id>/`), voice reference clips, layout doc `DATA_LAYOUT.md` |
+| `data/` | Job folders (`data/jobs/<job_id>/`), voice refs, `DATA_LAYOUT.md` |
+| `models/` | Vendored upstream repos and model weights |
+| `envs/` | Conda env specs (`.yml`) and pip deps (`.pip.txt`) for all four envs |
+| `docs/` | Long-form docs (see below) |
 | `experiments/` | Sweep suite definitions (`experiments/suites/*.json`) |
-| `third_party/` | Legacy clones of upstream repos (LatentSync, LipGAN, MuseTalk, TalkNet-ASD, Wav2Lip, Wav2Lip-HD, langfuse); lip-sync and ASD upstreams are moving into `backend/*/vendor/` |
-| `setup.sh`, `requirements.txt` | Doctor, model fetch and 60 s dry run; Python dependencies |
-| `comparison-results.md`, `lipsync-history.md` | Results notes: timing/stretch comparison and lip-sync history |
 
 ### `backend/` — pipeline modules
 
-Entry points and orchestration
+**Entry points and orchestration**
 
-| File | Features |
-| --- | --- |
-| `pipeline/cli.py` | `python -m backend.pipeline.cli`: argparse front end (79 flags) for a whole run |
-| `pipeline/pipeline.py` | End-to-end orchestrator, 26 logged stages from download to the 10b MT check; `run_post_mt_stages` (9b to 9h) is what edit replays re-run |
-| `pipeline/jobs.py` | Job-folder layout and `manifest.json` (status, config, stage inventory); `python -m backend.pipeline.jobs list/show` |
-| `experiment.py` | Runs one clip through several dubbing variants with the upstream prefix (download to MT) cached once and TTS reused where only placement changes |
-| `common/gpu.py` | GPU discovery, free-card check, and ffmpeg sharding helpers for multi-GPU lip-sync |
-| `common/tracing.py` | Langfuse tracing around the LLM client; never raises, flushes at exit |
+| Module | Purpose |
+|---|---|
+| `pipeline/cli.py` | Argparse front end (79 flags) for a whole run |
+| `pipeline/pipeline.py` | End-to-end orchestrator, 26 stages from download to MT check |
+| `pipeline/jobs.py` | Job-folder layout and `manifest.json` management |
+| `pipeline/edit_agent.py` | Plain-language edit CLI — parses a sentence into ops (LLM or regex) |
+| `pipeline/edits.py` | Typed `EditOp`s, deterministic handlers, no LLM |
+| `common/gpu.py` | GPU discovery, free-card check, multi-GPU sharding |
+| `common/llm.py` | OpenRouter chat client — the only LLM caller |
+| `common/tracing.py` | Langfuse tracing wrapper |
+| `common/registry.py` | `make_registry`: lazy adapter import, lister, kwarg filtering |
+| `common/bodhan.py` | `BodhanClientMixin`: env resolution, auth, pacing, `Retry-After` backoff |
+| `common/media_io.py` | ffmpeg/ffprobe wrapper: demux, extraction, duration and fps probes |
+| `common/prompts/` | Centralised LLM system prompts — `PROMPTS["key"]` dict |
 
-Input and audio prep (stages 1 to 3)
+**Stage packages (adapters)**
 
-| File | Features |
-| --- | --- |
-| `media/downloader.py` | yt-dlp download of video, captions and uploader metadata (`<stem>.meta.json`) |
-| `common/media_io.py` | ffmpeg/ffprobe wrapper: demux, 16 kHz mono extraction, duration and fps probes |
-| `media/stem_separation.py` | HTDemucs split into dialogue and music-and-effects stems |
+| Package | Adapter(s) | What it does |
+|---|---|---|
+| `media/align/` | **mms_fa** | CTC forced alignment, char-level |
+| `asd/` | **loconet** | Joint multi-speaker active speaker detection |
+| `asr/` | **bodhan** | Hosted Indic-Transcribe |
+| `diarize/` | **pyannote** | pyannote community-1 speaker diarization |
+| `emotion/` | **emotion2vec** | Per-segment delivery style from source emotion |
+| `faces/` | **retinaface**, **mediapipe** + **bytetrack** | Face detection and tracking |
+| `lipsync/` | **wav2lip**, **musetalk**, **latentsync15** | Lip-sync (each shells into its own conda env) |
+| `translate/` | **bodhan** + `translit/` | Hosted Indic-Translate + transliteration |
+| `restore/` | **gfpgan** | GFPGAN face restoration on lip-synced renders |
+| `tts/` | **bodhan** | Hosted Indic-Speak synthesis |
 
-Speakers and faces (stages 4 to 6)
+**Media processing**
 
-| File | Features |
-| --- | --- |
-| `diarize/diarize.py` | Entry point over the diarization registry (pyannote community-1) |
-| `media/segment.py` | Stage 4b: splits long turns at VAD gaps, merges short ones, caps length at energy valleys |
-| `speaker_id.py` | Stage 4c: ECAPA check that one label holds one person; splits impure labels |
-| `faces/faces.py` | Face detection and tracking entry point; preloads insightface before other libs claim shared C libraries |
-| `asd/asd.py` | Active speaker detection entry point (`score_asd`) |
-| `assign_faces.py` | Hungarian matching of diarized turns to face tracks; `speaker_face_tracks` picks each speaker's face |
-| `asd/lipsync_targets.py` | Per-frame speaking-face boxes from ASD scores, handed to MuseTalk as a saved-coordinate pickle |
+| Module | Purpose |
+|---|---|
+| `media/downloader.py` | yt-dlp download with metadata extraction |
+| `media/stem_separation.py` | HTDemucs dialogue / M&E stem split |
+| `media/segment.py` | Turn splitting at VAD gaps, merging, energy-valley capping |
+| `media/duration.py` | Fitted duration model, candidate ranking, WSOLA stretch |
+| `media/timing.py` | Timing-plan contract: `Piece`, `TimingPlan`, producers |
+| `media/speed.py` | `--speed-mode segment` knobs (cap, floor) |
+| `media/mix.py` | Overlay dub clips on M&E stem |
+| `media/condense.py` | Stage 9c2: LLM shortening of over-long translated lines |
+| `media/vad.py` | Speech / pause segmentation (pyannote, energy fallback) |
 
-Transcript and translation (stages 7 to 9b2)
+---
 
-| File | Features |
-| --- | --- |
-| `asr/asr.py` | ASR entry point (Bodhan Indic-Transcribe) |
-| `caption_asr.py` | Uses human-authored YouTube captions as the transcript, reshaped onto diarization turns |
-| `media/align/align.py` | CTC forced alignment, fills word timestamps per segment |
-| `translate/translate.py` | MT entry point (Bodhan Indic-Translate), writes the merged ASR+MT JSON |
-| `translate/sanitize.py` | Text clean-up at the ASR to MT, MT output and TTS boundaries |
-| `codemix.py` | Stage 9b: keeps English terms, transliterates them into the target script, normalises Latin leftovers |
-| `classify.py` | Stage 9b1: picks the whole-video TTS register from YouTube categories, channel, description, then LLM |
-| `emotion/emotion.py` | Stage 9b2: per-segment delivery style from source-speaker emotion, with confidence and run-length guards |
-| `asr/transcripts.py` | Parses ground-truth `.vtt`/`.srt` and scores ASR and MT (WER, CER, BLEU, chrF, ROUGE, METEOR) |
-| `common/llm.py` | OpenRouter chat client, the only LLM caller; falls back to deterministic paths with no key |
+## 📚 Documentation
 
-Duration, voices and synthesis (stages 9c to 9e)
+| Doc | Covers |
+|---|---|
+| [CLAUDE.md](CLAUDE.md) | Host setup, interpreters, GPUs, ffmpeg builds, conventions |
+| [docs/HOST.md](docs/HOST.md) | Env details, GPU busy policy, onnxruntime, Node, secrets |
+| [docs/STAGES.md](docs/STAGES.md) | Stage internals, UI flow, speed modes, casting, tracing |
+| [docs/ROUGH_EDGES.md](docs/ROUGH_EDGES.md) | Known bugs and incident history |
+| [docs/EDIT_AGENT.md](docs/EDIT_AGENT.md) | Edit agent ops, scopes, refusals |
+| [docs/PROMPTS.md](docs/PROMPTS.md) | LLM prompts — now in `backend/common/prompts/` |
+| [docs/UI_RUN.md](docs/UI_RUN.md) | What a UI submission sets per stage |
+| [data/DATA_LAYOUT.md](data/DATA_LAYOUT.md) | Job folder layout |
 
-| File | Features |
-| --- | --- |
-| `media/duration.py` | Stage 9c: fitted duration model, candidate ranking, WSOLA stretch with the ±10% cap |
-| `asd/gender.py` | Speaker gender by majority vote of wav2vec2, F0 pitch and face genderage |
-| `tts/voices.py` | Stage 9d: per-speaker voice casting (gender filter, screen time, ECAPA timbre rank) |
-| `tts/tts.py` | Stage 9e: per-segment Bodhan synthesis with per-segment overrides, writes `tts_audio` and stretch data |
+---
 
-Timing, mix and lip-sync (stages 9f2 to 9h)
+## ⚠️ Known issues
 
-| File | Features |
-| --- | --- |
-| `media/timing.py` | Timing-plan contract: `Piece`, `TimingPlan`, and the `naive_slot` and `pause_aware` producers |
-| `media/timing_advanced.py` | `word_anchored` (M4) and `dp` (M7) timing producers, registered onto `timing` |
-| `media/stretch.py` | Named time-stretch backends (rubberband, atempo, linear control) chosen by filter availability |
-| `media/mix.py` | Overlays dub clips on the M&E stem; strategies `global_tempo`, `no_tempo`, `timing_plan`; backs `--speed-mode` |
-| `media/speed.py` | `--speed-mode segment` knobs (cap, floor), dependency-free |
-| `media/vad.py` | Speech / internal-pause segmentation (pyannote, energy fallback); read by `pause_absorb.py`. Lifted out of the deleted `backend/eval/` on 2026-10-28 |
-| `lipsync/lipsync.py` | Stage 9h entry point: mux, shard over free GPUs, run the chosen adapter, concat; refuses to report success on a missing render |
-| `restore/restore.py` | Face restoration pass (GFPGAN) over a finished render |
+See [docs/ROUGH_EDGES.md](docs/ROUGH_EDGES.md) for the full list. The ones that bite most:
 
-Editing
-
-| File | Features |
-| --- | --- |
-| `pipeline/edits.py` | Typed `EditOp`s over the merged JSON and the stages each one invalidates; deterministic, no LLM |
-| `pipeline/edit_agent.py` | Plain-language edit CLI (`python -m backend.edit_agent` is still the entry point via a shim); parses a sentence into ops (LLM or regex), prints the plan, `--apply`, `--run`, `--revert` |
-
-### `backend/<stage>/` — adapters
-
-Each stage package holds a `base.py`, one adapter per model, and the `_REGISTRY_SPEC` dict in `__init__.py`. The shared infrastructure lives in `backend/common/`: `registry.py` (`make_registry`: lazy adapter import, lister, kwarg filtering, `get_*`), `bodhan.py` (env resolution, auth session, pacing floor, `Retry-After` backoff — retry loops stay in each adapter), `vendor.py` (`resolve_vendor_repo`: finds a vendored upstream under `backend/*/vendor/` or the legacy `third_party/`).
-
-Stages and adapters (registered names in bold)
-
-| Stage package | Adapter file | Features |
-| --- | --- | --- |
-| `media/align/` | `mms_fa_adapter.py` (**mms_fa**) | torchaudio MMS forced aligner, char-level CTC; romanizes Indic text with `uroman`, skips non-Latin segments if it's missing |
-| `asd/` | `loconet_adapter.py` (**loconet**) | Joint multi-speaker scoring over 112x112 crops plus VGGish audio -- the only ASD model here that weighs competing faces against each other. `_av_frontend.py` holds the shared crop and VRAM-windowing code |
-| `asr/` | `bodhan_adapter.py` (**bodhan**) | Hosted Indic-Transcribe over REST; `render_mode` native, mixed or roman; adapts concurrency from rate-limit headers |
-| `diarize/` | `pyannote_adapter.py` (**pyannote**) | pyannote community-1; needs an HF token and the gate accepted |
-| `emotion/` | `emotion2vec_adapter.py` (**emotion2vec**) | emotion2vec+ large via FunASR; utterance-level emotion labels |
-| `faces/` | `detect/` (**retinaface**, **mediapipe**), `track/` (**bytetrack**) | Per-frame detection, then ByteTrack identities; `base.py` holds `FaceBox`, `FaceDetections`, `FaceTracks` |
-| `lipsync/` | `base.py`, `wav2lip_adapter.py` (**wav2lip**), `musetalk_adapter.py` (**musetalk**), `latentsync_adapter.py` (**latentsync15**) | Each shells into its own conda env and returns a rendered video; LatentSync 1.5 is 256 px (~8 GB) |
-| `translate/` | `bodhan_adapter.py` (**bodhan**) + `translit/` sub-package | Hosted Indic-Translate, one call per segment; target script native, roman or codemix; the `translit/` sub-package carries the Bodhan transliteration adapter |
-| `restore/` | `gfpgan_adapter.py` (**gfpgan**) | GFPGAN v1.4 plus Real-ESRGAN over a finished render via `backend/restore/face_enhance.py`; stage 9i |
-| `tts/` | `bodhan_adapter.py` (**bodhan**) | Hosted Indic-Speak, returns WAV bytes; re-speaks at a different rate; the only stock-voice engine |
-
-Removed registry entries: `wav2lip_hd` and `lipgan` (2026-10-23; restoration is now `--restore gfpgan`), `latentsync` (1.6, on 2026-10-28 — ~18 GB against 16 GiB cards), `openvoice` and `vevo`, and `ts_talknet`. All three retired display rows were dropped from `frontend/lipsync_models.FACTS` on 2026-10-28 too, so the three `hd_*` job folders now label as plain Wav2Lip. Voice conversion went with them: `backend/vc/`, `backend/voice_convert.py`, stage 9f and the `--vc` flag were deleted on 2026-10-28, since the registry had been empty for five days and no run on disk ever set it. Adapter files for `asd/` and `faces/` and the Bodhan base classes were not opened; their rows come from the registry docstrings.
-
-### `frontend/` — operator UI (Python side)
-
-| File | Features |
-| --- | --- |
-| `server.py` | FastAPI app on loopback port 7861; serves `frontend/web-dist/` and the job APIs |
-| `runner.py` | Detached process that runs one job from `request.json`; fetch, cut, probe, then the pipeline; `--rerun` for edit replays |
-| `progress.py` | Logging handler that turns the pipeline's `=== stage N ===` markers into `progress.json` for the 8-pill bar |
-| `presets.py` | Three run presets (`draft`, `standard`, `best`), pipeline kwargs, runtime estimates |
-| `routes_create.py` | Job creation: URL host allowlist, probe, window and 20-minute lip-sync cap checks, launch |
-| `routes_edits.py` | Stage, price, apply and revert voice and tone edits |
-| `routes_enhance.py`, `enhance.py` | Stage 9i "Enhance resolution" on a finished render, run on a background thread with a poll endpoint |
-| `routes_talkinghead.py` | Talking Head page: photo face check, dialogue catalogue, render queue |
-| `_io.py` | Best-effort `read_json`, `env_int`, `env_float`, `data_dir` |
-| `media.py` | Picks the files the player gets (original and lip-synced video, original and dubbed audio) from the manifest first, then a ranked glob; returns `/files/...` URLs |
-| `speakers.py` | Rebuilds the speaker table (who speaks, which voice) from voices JSON, merged JSON, per-segment overrides, or a replay of stage 9d |
-| `jobqueue.py` | Serial job queue whose state is read from `progress.json` on disk, so a UI restart can't launch a second job onto a busy GPU (`DUBBING_UI_MAX_CONCURRENT`, default 1) |
-| `ytmeta.py` | Probes a URL before the job starts: title, duration, live-stream refusal, host re-check; caches the thumbnail |
-| `clip.py` | Cuts the chosen window with ffmpeg (re-encode, `-ss` before `-i`) so the pipeline gets a local clip |
-| `uploads.py` | Local video upload: extension and size limits, server-chosen filename, ffprobe check |
-| `langs.py` | Language list built from the adapters, so only languages the TTS engine can speak are offered |
-| `talking_head.py` | Talking Head logic: face check on the photo, downscale of large stills, dialogue catalogue from `data/talking_head/dialogues.json` |
-| `lipsync_models.py` | One table of per-model facts (runtime factors, cost rates, labels) the other UI modules read; retired models stay as display-only rows |
-| `spec.py` | The job's settings as plain label, value and hint lines, plus the raw config for an "Advanced" view |
-| `cost.py` | Turns an edit's dirty stages into what re-runs, what doesn't, and an estimated time |
-
-`frontend/auth.py` is deleted in the working tree. The frontends (`frontend/web/`, `frontend/web-dist/`) were not read, and there may be other `frontend/` modules I haven't seen.
+- `extra_margin` isn't plumbed through the MuseTalk adapter (only `bbox_shift`)
+- Bodhan outages return `internal_error` 5xx with no automatic fallback
+- ASD scores from before 2026-10-11 are worthless (float vs int16 MFCC bug)
+- LatentSync 1.6 removed — ~18 GB against 16 GiB cards

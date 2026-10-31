@@ -10,7 +10,7 @@ import logging
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
 from backend.common.media_io import probe_duration
 from backend.asr.transcripts import _require
@@ -19,9 +19,6 @@ log = logging.getLogger(__name__)
 
 _PYANNOTE_BUNDLE = "pyannote/speaker-diarization-community-1"
 _PYANNOTE_SEGMENTATION = "segmentation/pytorch_model.bin"
-
-SR = 16_000
-
 
 @dataclass
 class VadResult:
@@ -34,29 +31,6 @@ class VadResult:
     min_speech_s: float = 0.0
     duration_s: float = 0.0
     error: Optional[str] = None
-
-    def to_dict(self) -> Dict[str, Any]:
-        total_speech = sum(e - s for s, e in self.speech)
-        return {
-            "schema": "golden.vad/1",
-            "times": "clip-relative seconds; 0.0 == clip t0",
-            "backend": self.backend,
-            "min_pause_s": self.min_pause_s,
-            "min_speech_s": self.min_speech_s,
-            "duration_s": round(self.duration_s, 4),
-            "n_speech": len(self.speech),
-            "n_pauses": len(self.pauses),
-            "speech_s": round(total_speech, 4),
-            "speech_frac": round(total_speech / self.duration_s, 4) if self.duration_s else None,
-            # Pauses are INTERNAL gaps only; a clip boundary is not a pause
-            # the dub has to reproduce, so edge silence is reported separately.
-            "lead_silence_s": round(self.speech[0][0], 4) if self.speech else None,
-            "tail_silence_s": (round(self.duration_s - self.speech[-1][1], 4)
-                               if self.speech and self.duration_s else None),
-            "speech": [[round(s, 4), round(e, 4)] for s, e in self.speech],
-            "pauses": [[round(s, 4), round(e, 4)] for s, e in self.pauses],
-            "errors": [self.error] if self.error else [],
-        }
 
 
 def _read_wav(wav: Path) -> Tuple["Any", int]:
@@ -151,13 +125,10 @@ def vad(wav: Path, *, min_pause_s: float = 0.25, min_speech_s: float = 0.20,
     """
     wav = Path(wav)
     try:
-        duration = float(len(_read_wav(wav)[0])) / SR
-    except Exception:
-        duration = 0.0
-    try:
         duration = probe_duration(wav)
     except Exception as e:
-        log.warning("vad: probe_duration(%s) failed (%s); using sample count", wav.name, e)
+        log.warning("vad: probe_duration(%s) failed (%s)", wav.name, e)
+        duration = 0.0
 
     used, err = backend, None
     speech: List[Tuple[float, float]] = []

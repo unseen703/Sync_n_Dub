@@ -15,7 +15,7 @@ How it works:
   context so the model can verify meaning and spot ASR errors, but
   retranslating from the source throws away a translation that is usually
   correct and merely long.
-* **The prompt is `translate_agetn.prompt.txt` verbatim**, with
+* **The prompt is `backend/common/prompts/condense.py`**, with
   `{{target_language}}` and `{{source_language}}` filled in. It carries its
   own syllable arithmetic,
   a cheapest-first cutting strategy, the preservation rules (negation,
@@ -93,29 +93,15 @@ def _env_int(name: str, default: int) -> int:
         log.warning("%s=%r is not an integer; using %d", name, raw, default)
         return default
 
-#: The reference prompt, verbatim from `translate_agetn.prompt.txt` with
-#: `{{target_language}}` substituted at call time. Kept as one string so it
-#: can be diffed against that file.
-_SYSTEM_TEMPLATE = (Path(__file__).resolve().parent.parent
-                    / "translate_agetn.prompt.txt")
+from backend.common.prompts import PROMPTS as _PROMPTS
 
-#: Fallback if the file is missing, so a deployment that lost it still
-#: dubs. Deliberately terse -- the real prompt is the file.
-_FALLBACK_SYSTEM = """You are a bilingual dubbing QC reviewer on a dubbing pipeline that goes {{source_language}} -> {{target_language}}. Shorten machine-translated lines so each one fits its own audio slot, preserving meaning, tone and protected terminology.
-
-You receive a `segments` array of one or more segment objects, each with `segment_id`, `original_language_asr`, `mt_text`, `target_duration_s`, `est_duration_s`, `protected_terms` and `stretch_cap_pct`.
-
-Each segment is an independent rewrite. Use only that segment's own fields. Never move, borrow or blend wording between segments, and never use one segment as context for another. Echo `segment_id` exactly. Return exactly one output object per input segment, in input order, with the same count -- never merged, split, omitted or added.
-
-Rewrite `mt_text`, not `original_language_asr`. Use `original_language_asr` only to verify meaning. Preserve negation, modality, conditions, named entities, numbers, units, dates and every protected term exactly. Never add facts. Never pad to fill the slot. Keep natural spoken {{target_language}}, including code-mixing.
-
-Return exactly one JSON object: {"segments": [{"segment_id": "<echo>", "text": "<rewritten line>", "fits": false, "infeasible": false, "meaning_loss": "none", "adequacy": "ok", "adequacy_issues": [], "preserved_terms": [], "asr_suspect": false, "note": null}]}"""
+_SYSTEM_TEMPLATE = _PROMPTS["condense"]
 
 
 def _language_name(code: Optional[str], default: str) -> str:
     """ISO code -> English language name, or the code itself if unknown."""
     try:
-        from frontend.langs import english_name
+        from server.utils.langs import english_name
     except Exception:                                     # noqa: BLE001
         return code or default
     return english_name(code, default)
@@ -123,14 +109,9 @@ def _language_name(code: Optional[str], default: str) -> str:
 
 def _system_prompt(language: str, source_language: str) -> str:
     """The reference prompt with both languages filled in."""
-    try:
-        raw = _SYSTEM_TEMPLATE.read_text()
-    except OSError as e:                                  # noqa: BLE001
-        log.warning("condense: %s unreadable (%s); using the short fallback "
-                    "prompt", _SYSTEM_TEMPLATE.name, e)
-        raw = _FALLBACK_SYSTEM
-    return (raw.replace("{{target_language}}", language)
-               .replace("{{source_language}}", source_language))
+    return (_SYSTEM_TEMPLATE
+            .replace("{{target_language}}", language)
+            .replace("{{source_language}}", source_language))
 
 
 def _segment_payload(seg: Dict[str, Any], *, text: str, est_s: float,

@@ -8,7 +8,7 @@
 Each adapter wraps a repo clone under `models/lipsync/vendor/`; see
 `models/_vendor.py`.
 
-`frontend/lipsync_models.normalise()` matches on PREFIX, so a key that is a prefix
+`server/service/lipsync_models.normalise()` matches on PREFIX, so a key that is a prefix
 of another (`latentsync` of `latentsync15`) must never be added without its
 own row there, or the longer id silently downgrades to it.
 """

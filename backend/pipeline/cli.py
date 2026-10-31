@@ -88,7 +88,7 @@ def _tts_styles():
 
     Listed here so the CLI offers exactly what the UI dropdowns do.
     """
-    from backend.tts.tts import NEUTRAL_STYLE
+    from backend.tts import NEUTRAL_STYLE
     try:
         from backend.tts.bodhan_adapter import INDIC_SPEAK_STYLES
         return ("auto", NEUTRAL_STYLE) + tuple(INDIC_SPEAK_STYLES)
@@ -745,7 +745,7 @@ def resolve_speed_setup(args) -> "SpeedSetup":
         _speed.validate_absorb_bounds(
             args.speed_borrow_gap, args.speed_borrow_frac,
             args.absorb_max_frac)
-        # The values live in `backend/speed.py`, which `frontend/presets` also
+        # The values live in `backend/speed.py`, which `server/presets` also
         # calls, so the two cannot drift.
         _seg = _speed.segment_timing_kwargs(
             speed_cap=args.speed_cap,

@@ -1,6 +1,6 @@
 """GFPGAN v1.4 (+ Real-ESRGAN) face restoration over a finished render.
 
-Shells into `python -m backend.face_enhance` with the current interpreter.
+Shells into `python -m backend.restore.face_enhance` with the current interpreter.
 basicsr / gfpgan / facexlib / realesrgan were folded into the `dubbing` env
 on 2026-10-30, so no separate interpreter resolution is needed; the historical
 `torchvision.transforms.functional_tensor` incompatibility is patched inline
@@ -224,7 +224,7 @@ class GFPGANRestore(BaseRestore):
                                        after=Path(request.video),
                                        out=mask_path, ffprobe=ffprobe)
 
-        cmd = [py, "-m", "backend.face_enhance",
+        cmd = [py, "-m", "backend.restore.face_enhance",
                "--input", str(Path(request.video).resolve()),
                "--output", str(out.resolve()),
                "--weights-dir", str(self.weights_dir.resolve()),

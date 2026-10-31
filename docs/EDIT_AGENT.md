@@ -52,6 +52,7 @@ is replayed.
 | `lipsync_window` | lip-sync only a time window | — | `model` (`wav2lip`\|`musetalk`\|`latentsync15`) | `lipsync` |
 | `mute_cue` | silence scoped cues, release the slot as pause | — | — | `timing` |
 | `set_target_language` | switch the dub's output language via Bodhan MT | `target_language` (ISO code of a supported Indic language) | `target_script` | `codemix` (whole dub) or `tts` (per-cue) |
+| `merge_cues` | combine two consecutive same-speaker cues into one, LLM-rewritten | — (scope carries both ids) | — | `codemix` |
 
 Stage order for replay:
 `codemix → duration → voices → tts → timing → mix → lipsync`.
@@ -142,6 +143,12 @@ addresses the video timeline rather than cues.
 | `set_target_language` | `unknown or non-Indic target language 'xx'. Supported: as, bn, …` |
 | `set_target_language` | `set_target_language cannot scope to a speaker alone — add a time range …` |
 | `set_target_language` | `Bodhan MT refused the translation: <why>` — the API call failed; `BODHAN_MT_KEY` missing surfaces here |
+| `merge_cues` | `merge_cues needs exactly two cue ids in its scope` — the user named one or more-than-two |
+| `merge_cues` | `merge_cues: unknown cue(s): SEG_XXXX` — a named id is not in the live cue list |
+| `merge_cues` | `merge_cues: SEG_a and SEG_b are not consecutive` — they are not index-adjacent in the segments list |
+| `merge_cues` | `merge_cues: speakers differ (SPK_00 vs SPK_01)` — explicit same-speaker requirement |
+| `merge_cues` | `merge_cues: N.NNs gap between SEG_a and SEG_b (max 2.0s)` — pause between the cues is too long |
+| `merge_cues` | `merge_cues needs the LLM (OPENROUTER_API_KEY unset)` — the handler calls the LLM, no fallback |
 
 ### No LLM configured
 

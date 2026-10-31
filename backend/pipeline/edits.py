@@ -80,15 +80,15 @@ def tone_styles() -> Tuple[str, ...]:
     and NONE of those five is an engine value. A tone edit through the agent
     therefore wrote `tts_style="formal"`, which Bodhan does not know, so the
     one op whose whole purpose is to change delivery changed nothing. The
-    speaker dropdown never had the bug because `frontend.speakers.tone_vocabulary`
+    speaker dropdown never had the bug because `server.service.speakers.tone_vocabulary`
     already read the engine; this is the same read, placed where `backend/`
-    can use it without importing `frontend/`.
+    can use it without importing `server/`.
 
     `NEUTRAL_STYLE` leads the list: it is not an engine value but a sentinel
     `models.tts.resolve_style` turns back into "send no style".
     """
     try:
-        from backend.tts.tts import NEUTRAL_STYLE
+        from backend.tts import NEUTRAL_STYLE
         from backend.tts.bodhan_adapter import INDIC_SPEAK_STYLES
         return (NEUTRAL_STYLE,) + tuple(INDIC_SPEAK_STYLES)
     except Exception:                               # noqa: BLE001
@@ -98,6 +98,17 @@ def tone_styles() -> Tuple[str, ...]:
 
 def _tone_style_ids() -> str:
     return " | ".join(tone_styles())
+
+
+def _voice_ids() -> str:
+    """Flat list of every voice id in the indic-speak catalog.
+
+    Pulled from `backend.tts.voices.DEFAULT_INDIC_SPEAK` so the prompt and the
+    catalog cannot drift. Returned as a comma-separated string; the planner
+    prompt substitutes it into `{{voice_ids}}`.
+    """
+    from backend.tts.voices import DEFAULT_INDIC_SPEAK
+    return ", ".join(v.voice for v in DEFAULT_INDIC_SPEAK)
 
 
 #: The delivery styles the EDIT WORKSPACE offers, narrowed on purpose.
@@ -372,6 +383,8 @@ def classify_op(op: "EditOp", source_language: Optional[str] = None) -> str:
         return "llm" if op.params.get("replace") is None else "rule"
     if name == "set_target_language":
         return "script"
+    if name == "merge_cues":
+        return "llm"
     return "rule"
 
 
@@ -497,7 +510,7 @@ OP_SPECS: List[OpSpec] = [
                   "SPEAKER_01 is male, not female"],
     ),
     OpSpec(
-        name="create_speaker", dirty_from="voices",
+        name="create_speaker", dirty_from="",
         # The one op that MINTS a speaker id. Every other op refuses an
         # unknown speaker; this one carves out a hole for the case diarization
         # failed on -- two people merged into one SPK, or a wholly missed
@@ -556,7 +569,7 @@ OP_SPECS: List[OpSpec] = [
         # speaker's apparent gender follows the voice. A bare "make this
         # female" with no voice named is deliberately refused by the LLM
         # prompt and the regex, because set_gender's pool-pick path is
-        # reserved for the cast-table dropdown — see `frontend/routes_edits.py`.
+        # reserved for the cast-table dropdown — see `server/routes/routes_edits.py`.
         params={"voice": "engine voice id, e.g. Amit, Deepika, Chinmay",
                 "engine": "tts engine, only if it changes"},
         summary="Pin a specific TTS voice for the named speaker. Requires "
@@ -624,6 +637,23 @@ OP_SPECS: List[OpSpec] = [
         examples=["translate the whole dub to Marathi",
                   "retranslate 0:30 to 0:45 into Tamil",
                   "change the target language to Bengali"],
+    ),
+    OpSpec(
+        # Merges exactly TWO consecutive cues of the same speaker into one.
+        # The LLM is given both source lines AND both current translations
+        # and asked for a single merged target-language line, so the join
+        # reads naturally rather than being a string-concat of two cues.
+        # Refusals (apply time): ids missing, not index-adjacent, speakers
+        # differ, or the gap between cue1.end and cue2.start exceeds 2.0s.
+        name="merge_cues", dirty_from="codemix",
+        params={},
+        summary="Merge two consecutive cues from the same speaker into one. "
+                "The first cue absorbs the second: timing extends to the "
+                "second's end, originals are joined, and the translation is "
+                "rewritten by the LLM to read as a single utterance.",
+        examples=["merge cue 4 and cue 5",
+                  "combine SEG_0004 with SEG_0005"],
+        needs_llm=True,
     ),
 ]
 
@@ -810,6 +840,17 @@ USER_ACTIONS: Dict[str, Dict[str, Any]] = {
         "fill": "change the target language to <language>",
         "needs": "language",
     },
+    "merge_cues": {
+        "title": "Merge two consecutive cues",
+        "takes": "two adjacent cue ids from the same speaker",
+        "changes": "the two cues become one — timing extends to the second "
+                   "cue's end, the originals are joined, and the translation "
+                   "is rewritten so it reads as a single utterance",
+        # Typed-command only: not surfaced in the quick-action strip, and no
+        # `fill` so the workspace does not open a picker. The LLM parser
+        # still accepts it; the user names both ids in free text.
+        "category": "Cleanup", "scopes": ["segment"], "quick": False,
+    },
 }
 
 
@@ -817,7 +858,7 @@ def action_catalogue() -> List[Dict[str, Any]]:
     """Every op as plain language: what it is, takes, changes, and the cost.
 
     Served to the UI so the list cannot drift from the op registry. The repo
-    has paid for that before: `frontend/speakers.py` first shipped an invented
+    has paid for that before: `server/service/speakers.py` first shipped an invented
     tone vocabulary, and every tone change then failed at the API with
     nothing on screen to explain it.
     """
@@ -1033,6 +1074,34 @@ def apply_edits(
             # guessing a window; a silent whole-file rewrite is the expensive
             # kind of surprise.
             op.scope.all = True
+
+        # merge_cues is DESTRUCTIVE -- the handler removes the second cue from
+        # the segments list. The commit path then persists that to the merged
+        # JSON, and `server/runner.py::_run_rerun` re-applies the stored ops
+        # against the ALREADY-MUTATED document to compute `dirty_stages`.
+        # Scope.resolve would then raise "no such segment id(s): SEG_XXXX" on
+        # the vanished cue and the replay dies before TTS runs. Detect that
+        # state here and record the op as already-applied -- the mutation is
+        # baked into the file, so there is nothing to re-mutate, but the
+        # `dirty_from` still has to propagate so the post-MT stages replay.
+        if op.op == "merge_cues" and op.scope.segments:
+            present = {str(s.get("id")) for s in data.get("segments") or []}
+            wanted = list(op.scope.segments)
+            missing = [s for s in wanted if s not in present]
+            kept = [s for s in wanted if s in present]
+            if missing and kept:
+                applied = AppliedOp(
+                    op=op.op, scope=op.scope.describe(),
+                    params=dict(op.params), segments=wanted,
+                    dirty_from=spec.dirty_from)
+                applied.warnings.append(
+                    f"merge_cues: {', '.join(missing)} not in the cue list "
+                    f"(already merged into {', '.join(kept)}); re-apply "
+                    f"skipped, downstream replay unchanged")
+                res.applied.append(applied)
+                res.warnings.extend(applied.warnings)
+                continue
+
         seg_ids = op.scope.resolve(data)
         if not seg_ids and op.op != "lipsync_window":
             raise EditError(
@@ -1076,7 +1145,10 @@ def rerun_stages(dirty_from: Sequence[str],
     """
     if not dirty_from:
         return []
-    idx = min(STAGE_ORDER.index(s) for s in dirty_from if s in STAGE_ORDER)
+    known = [STAGE_ORDER.index(s) for s in dirty_from if s in STAGE_ORDER]
+    if not known:
+        return []
+    idx = min(known)
     out = list(STAGE_ORDER[idx:])
     if available is not None:
         keep = set(available)
@@ -1215,10 +1287,8 @@ def _h_replace_term(data, seg_ids, op, applied, ctx, res):
                 f"(OPENROUTER_API_KEY unset). Pass the replacement outright: "
                 f'replace "{find}" with "<your text>".')
         lang = ctx.target_language or "the target language"
-        system = (
-            "You translate ONE word or short phrase for a subtitle. Reply "
-            "with the translation ONLY — no quotes, no commentary, no "
-            "alternatives, no explanation, no transliteration in brackets.")
+        from backend.common.prompts import PROMPTS as _PROMPTS
+        system = _PROMPTS["term_translation"]
         user = (f"Target language: {lang}\n"
                 f"Translate this term: {find}")
         repl = _clean_rewrite(ctx.rewriter(system, user))
@@ -1317,17 +1387,8 @@ def _h_retranslate(data, seg_ids, op, applied, ctx, res):
         # ("translate the word 'conditional' into Hindi") with just that
         # word — `'.शर्तिया टेक्स्ट जेनरेटर'` in place of the whole
         # sentence, which is a destroyed cue rather than a failed one.
-        system = (
-            "You are a subtitle translator for a dubbing pipeline. You are "
-            "given a line that is ALREADY translated, plus an instruction "
-            "describing a change to it.\n\n"
-            "Apply the instruction to the current translation and reply with "
-            "the COMPLETE corrected line. Preserve every part of the line the "
-            "instruction does not mention — wording, word order and "
-            "punctuation. If the instruction concerns one word or phrase, "
-            "change only that and leave the rest identical.\n\n"
-            "Reply with the line ONLY: no quotes, no commentary, no "
-            "romanisation, no alternatives, and never a fragment.")
+        from backend.common.prompts import PROMPTS as _PROMPTS
+        system = _PROMPTS["retranslate"]
         user = (
             f"Source line (original language): {src}\n"
             f"Current translation ({lang}): {cur}\n"
@@ -1381,7 +1442,7 @@ def _h_set_tone(data, seg_ids, op, applied, ctx, res):
     # there is nothing for an LLM to rewrite the wording INTO -- asking it to
     # would get a paraphrase at best and, because a paraphrase is a different
     # length, a different timing fit for no stated reason.
-    from backend.tts.tts import NEUTRAL_STYLE
+    from backend.tts import NEUTRAL_STYLE
     if rewrite and tone.strip().lower() == NEUTRAL_STYLE:
         applied.warnings.append(
             "neutral removes the delivery style rather than setting one, so "
@@ -1400,10 +1461,8 @@ def _h_set_tone(data, seg_ids, op, applied, ctx, res):
             cur = _seg_text(seg)
             if not cur.strip():
                 continue
-            system = (
-                "You rewrite dubbing lines to a requested register. Keep the "
-                "meaning and the approximate length — the line has to fit the "
-                "same time slot. Reply with the rewritten line ONLY.")
+            from backend.common.prompts import PROMPTS as _PROMPTS
+            system = _PROMPTS["tone_rewrite"]
             user = (f"Language: {lang}\nRegister: {tone}\nLine: {cur}")
             new = _clean_rewrite(ctx.rewriter(system, user))
             if not new or new == cur:
@@ -1415,7 +1474,7 @@ def _h_set_tone(data, seg_ids, op, applied, ctx, res):
 def _language_name(code, default="the source language"):
     """ISO code -> English language name, or the code itself if unknown."""
     try:
-        from frontend.langs import english_name
+        from server.utils.langs import english_name
     except Exception:                                   # noqa: BLE001
         return code or default
     return english_name(code, default)
@@ -1494,12 +1553,9 @@ def _h_code_mix(data, seg_ids, op, applied, ctx, res):
             src = seg.get("text") or ""
             if not cur.strip():
                 continue
-            system = (
-                "You code-mix dubbing lines the way Indian lecturers actually "
-                "speak: the sentence stays in the target language, but "
-                f"technical terms, proper nouns, acronyms and units stay in "
-                f"their original {src_name} form and script. Keep the meaning "
-                "and the length. Reply with the rewritten line ONLY.")
+            from backend.common.prompts import PROMPTS as _PROMPTS
+            system = (_PROMPTS["code_mix"]
+                      .replace("{{source_language}}", src_name))
             user = (f"Target language: {lang}\n"
                     f"Source line ({src_name}): {src}\n"
                     f"Current translation: {cur}\n"
@@ -1843,6 +1899,48 @@ def _h_create_speaker(data, seg_ids, op, applied, ctx, res):
     if gender:
         res.gender_overrides[new_id] = gender
 
+    # Edit-only op: 9d is NOT replaying, so the voices/*.voices.json file the
+    # cast panel reads will not grow a row for `new_id` on its own. Write the
+    # assignment where `_from_speaker_voice_map` already looks for it -- the
+    # merged JSON's `extra.speaker_voice_map` -- and patch every on-disk
+    # `voices/*.gender.json` with the new speaker's gender, so the cast table
+    # shows the voice and gender immediately rather than "needs a voice".
+    svm = data.setdefault("extra", {}).setdefault("speaker_voice_map", {})
+    svm[new_id] = {"engine": engine, "voice": voice,
+                   "gender": gender, "source": "edit:create_speaker"}
+
+    if not ctx.dry_run:
+        voices_dir = res.merged_json.parent.parent / "voices"
+        if voices_dir.is_dir() and gender:
+            for gpath in sorted(voices_dir.glob("*.gender.json")):
+                try:
+                    doc = json.loads(gpath.read_text())
+                    if not isinstance(doc, dict):
+                        continue
+                    doc[new_id] = {
+                        "gender": gender,
+                        # `pipeline.py` builds a vote entry for every speaker
+                        # from this field and then reads `v["gender"]`. Without
+                        # it the dict defaults to `{}` and run_post_mt_stages
+                        # crashes with KeyError('gender') the next time
+                        # TTS/mix replays.
+                        "gender_vote": {
+                            "gender": gender,
+                            "decided_by": "override",
+                            "votes": {},
+                            "tally": {"male": 0, "female": 0},
+                        },
+                        "gender_basis": "edit",
+                        "source": "edit:create_speaker",
+                    }
+                    tmp = gpath.with_suffix(".json.tmp")
+                    tmp.write_text(json.dumps(doc, indent=2,
+                                              ensure_ascii=False))
+                    tmp.replace(gpath)
+                except (OSError, ValueError) as e:
+                    log.warning("create_speaker: could not patch %s: %s",
+                                gpath, e)
+
     applied.changes.append(
         f"{new_id}: minted, voice={voice}"
         + (f", gender={gender}" if gender else "")
@@ -1859,7 +1957,12 @@ def _h_create_speaker(data, seg_ids, op, applied, ctx, res):
         applied.warnings.append(
             f"{gone} now has no cues and will disappear from the cast")
 
-    applied.dirty_from = "voices"
+    # Edit-only op: the speaker map is updated, nothing else runs. The user
+    # triggers TTS + mix separately via the "Start TTS & mix" button.
+    applied.dirty_from = ""
+    applied.warnings.append(
+        "speaker map updated; TTS and mix were NOT re-rendered. "
+        "Run them from the cast panel when ready.")
 
 
 def _known_voice(voice: str, *, engine: Optional[str],
@@ -2032,7 +2135,7 @@ def _h_set_target_language(data, seg_ids, op, applied, ctx, res):
     # One source of truth for the catalogue: the same table the home-page
     # dropdown reads from. Avoids a second list drifting the first time an
     # adapter gains or loses support for a language.
-    from frontend.langs import LANGUAGES
+    from server.utils.langs import LANGUAGES
     meta = LANGUAGES.get(iso)
     indic = sorted(k for k, v in LANGUAGES.items() if v["script"] != "latn")
     if meta is None or meta["script"] == "latn":
@@ -2153,6 +2256,123 @@ def _h_set_target_language(data, seg_ids, op, applied, ctx, res):
             f"pinned {pinned} native voice(s)")
 
 
+#: Maximum silence between two cues that still counts as "consecutive" for a
+#: merge. Beyond this the user asked to splice across a real pause -- a merge
+#: here would widen one cue over a stretch where the picture shows nobody
+#: speaking, so `_h_merge_cues` refuses.
+MERGE_MAX_GAP_S = 2.0
+
+
+def _h_merge_cues(data, seg_ids, op, applied, ctx, res):
+    """Merge two consecutive cues of the same speaker into one.
+
+    Refuses (as EditError) unless all of the following hold:
+
+      * exactly two cue ids are in scope;
+      * both ids exist in the cue list;
+      * they are INDEX-adjacent in `data["segments"]` (not merely time-close);
+      * `speaker` matches on both;
+      * `cue2.start - cue1.end <= MERGE_MAX_GAP_S` (2.0s).
+
+    The first cue absorbs the second: originals are space-joined, timing
+    extends to `cue2.end`, and the translation is rewritten by the LLM from
+    both originals plus both translations so it reads as a single utterance
+    in the target language. The first cue keeps its id, speaker, register
+    and tone. Cue2 is removed from the live segments list.
+
+    Dirties from `codemix`, so the replay re-runs 9c/9c2, TTS, mix and
+    lip-sync for the merged window — same scope as `retranslate`.
+    """
+    if len(seg_ids) != 2:
+        raise EditError(
+            "merge_cues needs exactly two cue ids in its scope")
+    segs = data.get("segments", [])
+    idx_by_id = {str(s.get("id")): i for i, s in enumerate(segs)}
+    missing = [s for s in seg_ids if s not in idx_by_id]
+    if missing:
+        raise EditError(
+            f"merge_cues: unknown cue(s): {', '.join(missing)}")
+
+    sid_a, sid_b = seg_ids[0], seg_ids[1]
+    i_a, i_b = idx_by_id[sid_a], idx_by_id[sid_b]
+    # Accept the pair in either order from the scope; normalise to
+    # earlier-then-later so the merge direction is deterministic.
+    if i_b < i_a:
+        i_a, i_b = i_b, i_a
+        sid_a, sid_b = sid_b, sid_a
+    if i_b != i_a + 1:
+        raise EditError(
+            f"merge_cues: {sid_a} and {sid_b} are not consecutive")
+
+    seg_a, seg_b = segs[i_a], segs[i_b]
+    spk_a = str(seg_a.get("speaker") or "")
+    spk_b = str(seg_b.get("speaker") or "")
+    if spk_a != spk_b:
+        raise EditError(
+            f"merge_cues: speakers differ "
+            f"({spk_a or '?'} vs {spk_b or '?'})")
+
+    gap = _seg_start(seg_b) - _seg_end(seg_a)
+    if gap > MERGE_MAX_GAP_S:
+        raise EditError(
+            f"merge_cues: {gap:.2f}s gap between {sid_a} and {sid_b} "
+            f"(max {MERGE_MAX_GAP_S:.1f}s)")
+
+    if ctx.rewriter is None:
+        raise EditError(
+            "merge_cues needs the LLM (OPENROUTER_API_KEY unset)")
+
+    src_a = (seg_a.get("text") or "").strip()
+    src_b = (seg_b.get("text") or "").strip()
+    cur_a = _seg_text(seg_a).strip()
+    cur_b = _seg_text(seg_b).strip()
+    lang = (ctx.target_language
+            or data.get("target_language")
+            or "the target language")
+
+    from backend.common.prompts import PROMPTS as _PROMPTS
+    system = _PROMPTS["merge_cues"]
+    user = (
+        f"Target language: {lang}\n"
+        f"Speaker: {spk_a or 'unknown'}\n"
+        f"Original 1: {src_a}\n"
+        f"Original 2: {src_b}\n"
+        f"Current translation 1: {cur_a}\n"
+        f"Current translation 2: {cur_b}\n"
+        f"Write the merged {lang} line.")
+    merged = _clean_rewrite(ctx.rewriter(system, user))
+    if not merged:
+        raise EditError("merge_cues: model returned no text")
+
+    # Backup the fields a revert needs. Cue2 is backed up wholesale so the
+    # versioned snapshot in `mt/versions/` is the only recovery path for the
+    # deletion; the live revert() can at least restore cue1's shape.
+    for key in ("text", "end", "end_s"):
+        _backup(seg_a, key)
+
+    # Join originals and extend timing to cue2's end. Both end keys are kept
+    # in sync when either side carried them, so downstream readers (speed
+    # fit, TTS, mix) see a coherent cue regardless of which key they prefer.
+    seg_a["text"] = (src_a + " " + src_b).strip()
+    _set_segment_text(seg_a, merged)
+    end_b = _seg_end(seg_b)
+    if "end" in seg_a or "end" in seg_b:
+        seg_a["end"] = end_b
+    if "end_s" in seg_a or "end_s" in seg_b:
+        seg_a["end_s"] = end_b
+
+    # Remove cue2 from the live list. The op's `applied.segments` records
+    # both ids so the journal shows what disappeared.
+    segs.pop(i_b)
+
+    applied.changes.append(
+        f"{sid_a} + {sid_b} -> {sid_a}: "
+        f"{cur_a!r} + {cur_b!r} -> {merged!r} "
+        f"(end={end_b:.2f}s)")
+    applied.warnings.append(
+        f"{sid_b} was removed from the cue list; use mt/versions/ to revert")
+
+
 _HANDLERS: Dict[str, Callable] = {
     "set_text": _h_set_text,
     "retranslate": _h_retranslate,
@@ -2167,6 +2387,7 @@ _HANDLERS: Dict[str, Callable] = {
     "lipsync_window": _h_lipsync_window,
     "mute_cue": _h_mute_cue,
     "set_target_language": _h_set_target_language,
+    "merge_cues": _h_merge_cues,
 }
 
 assert set(_HANDLERS) == set(OPS), "handler/spec drift"

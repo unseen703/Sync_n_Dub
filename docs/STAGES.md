@@ -196,7 +196,7 @@ after parsing, so `resolve_speed_setup` is the accurate source.
 
 **There is an operator UI, and it is a second entry point into the pipeline.**
 `frontend/server.py` (FastAPI, loopback-only, port 7861) serves a built Vite app from
-`frontend/web-dist/` (API-only, with a warning, when no build exists). Jobs submitted from it are launched DETACHED through
+`frontend/-dist/` (API-only, with a warning, when no build exists). Jobs submitted from it are launched DETACHED through
 `ui_run_job.sh`, which is the only launcher that exports the
 `libstdc++` preload — starting `frontend.runner` with a bare `Popen` walks stage 9h
 into the cv2/insightface import-order trap in section 1.
@@ -438,7 +438,7 @@ the relabelled turn list.
 **There is a second page now: Talking Head (`#/talking-head`).** Added
 2026-10-20. A still portrait plus a chosen line, rather than a video plus its
 own soundtrack — `frontend/talking_head.py`, `frontend/routes_talkinghead.py`, and
-`frontend/web/src/components/talkinghead/`. Three gates in order: a photo WITH a
+`frontend//src/components/talkinghead/`. Three gates in order: a photo WITH a
 face, a language, a line.
 
 **The lines are DATA, not code** — `data/talking_head/dialogues.json`, five

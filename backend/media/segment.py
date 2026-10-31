@@ -7,7 +7,6 @@ new `DiarizationResult` of the same `Turn` type.
 from __future__ import annotations
 
 import logging
-from dataclasses import replace
 from pathlib import Path
 from typing import List, Optional, Tuple
 

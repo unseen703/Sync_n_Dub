@@ -78,6 +78,40 @@ def write_label(job_root: Path, speaker_id: str, label: Optional[str]) -> Dict[s
     return labels
 
 
+#: Which of `face_crop_paths`'s (up to 3) candidates the operator picked for
+#: a speaker. A separate file from `LABELS_FILE` rather than a richer value
+#: there, so `read_labels` keeps its flat str->str contract and nothing that
+#: reads a speaker's display name has to learn a new shape.
+PHOTO_CHOICE_FILE = "speaker_photo_choice.json"
+
+
+def read_photo_choices(job_root: Path) -> Dict[str, int]:
+    """`{speaker_id: candidate_index}` for an operator-confirmed face photo."""
+    doc = _read_json(Path(job_root) / PHOTO_CHOICE_FILE)
+    out: Dict[str, int] = {}
+    if isinstance(doc, dict):
+        for k, v in doc.items():
+            try:
+                out[str(k)] = int(v)
+            except (TypeError, ValueError):
+                continue
+    return out
+
+
+def write_photo_choice(job_root: Path, speaker_id: str, index: int) -> Dict[str, int]:
+    """Set one speaker's chosen candidate photo. Returns the full map.
+
+    Display only, same as `write_label` -- it dirties no pipeline stage.
+    """
+    job_root = Path(job_root)
+    choices = read_photo_choices(job_root)
+    choices[str(speaker_id)] = int(index)
+    tmp = job_root / (PHOTO_CHOICE_FILE + ".tmp")
+    tmp.write_text(json.dumps(choices, indent=2, ensure_ascii=False))
+    tmp.replace(job_root / PHOTO_CHOICE_FILE)
+    return choices
+
+
 def supports_tone(config: Dict[str, Any]) -> bool:
     eng = (config.get("tts") or config.get("voice_engine") or "").lower()
     return eng in TONE_ENGINES
@@ -307,6 +341,7 @@ def build_table(job_root: Path, config: Dict[str, Any], *,
     voices = resolve_speaker_voices(job_root, config, merged)
     genders = speaker_genders(job_root, merged)
     labels = read_labels(job_root)
+    photo_choices = read_photo_choices(job_root)
     refs = _reference_clips(job_root)
     stats = _from_merged_segments(merged)
     rttm = _from_rttm(job_root)
@@ -342,8 +377,14 @@ def build_table(job_root: Path, config: Dict[str, Any], *,
             # the old one and seeing whose face it is being put on.
             "dub_sample_url": (_files_url(Path(dubs[sid]), data_dir)
                                if dubs.get(sid) else None),
-            "face_crop_url": (_files_url(crops[sid], data_dir)
-                              if crops.get(sid) else None),
+            # Up to 3 ASD-ranked candidates (`face_crop_paths`); the operator
+            # confirms one via `write_photo_choice`, defaulting to the
+            # highest-ranked (index 0) until they do.
+            "face_crop_urls": [_files_url(p, data_dir) for p in crops.get(sid, [])],
+            "face_crop_url": (_files_url(
+                crops[sid][min(photo_choices.get(sid, 0), len(crops[sid]) - 1)],
+                data_dir) if crops.get(sid) else None),
+            "face_photo_index": photo_choices.get(sid, 0) if crops.get(sid) else None,
         })
     # Protagonist first, the way `assign_voices` already ranks speakers.
     rows.sort(key=lambda r: -r["speech_s"])

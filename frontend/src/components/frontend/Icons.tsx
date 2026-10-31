@@ -182,3 +182,38 @@ export const IconStop = (p: P) => (
     <rect x="6" y="6" width="12" height="12" rx="2" />
   </svg>
 );
+
+export const IconMic = (p: P) => (
+  <svg {...base(p)}>
+    <rect x="9" y="2.5" width="6" height="12" rx="3" />
+    <path d="M5.5 11.5a6.5 6.5 0 0 0 13 0" />
+    <path d="M12 18v3.5" />
+    <path d="M8.5 21.5h7" />
+  </svg>
+);
+
+export const IconMute = (p: P) => (
+  <svg {...base(p)}>
+    <path d="M4 9.5v5h4l5 4v-13l-5 4H4Z" />
+    <path d="m16 10 5 5m0-5-5 5" />
+  </svg>
+);
+
+export const IconFaceScan = (p: P) => (
+  <svg {...base(p)}>
+    <path d="M4 8V6a2 2 0 0 1 2-2h2" />
+    <path d="M16 4h2a2 2 0 0 1 2 2v2" />
+    <path d="M20 16v2a2 2 0 0 1-2 2h-2" />
+    <path d="M8 20H6a2 2 0 0 1-2-2v-2" />
+    <path d="M9 10.5v1M15 10.5v1" />
+    <path d="M9 15a3 3 0 0 0 6 0" />
+  </svg>
+);
+
+export const IconMore = (p: P) => (
+  <svg {...base(p)} fill="currentColor" stroke="none">
+    <circle cx="5" cy="12" r="1.7" />
+    <circle cx="12" cy="12" r="1.7" />
+    <circle cx="19" cy="12" r="1.7" />
+  </svg>
+);

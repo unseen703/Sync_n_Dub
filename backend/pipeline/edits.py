@@ -590,15 +590,10 @@ OP_SPECS: List[OpSpec] = [
     ),
     OpSpec(
         name="lipsync_window", dirty_from="lipsync",
-        # Read FROM the registry, not transcribed from it. Spelling it out by
-        # hand is what left `wav2lip_hd` and `lipgan` unadvertised for three
-        # days after they were registered.
         params={"model": f"{_lipsync_model_ids()}, only if it changes"},
         summary="Lip-sync only the scoped time window instead of the whole "
                 "video, splicing the render back into the full timeline.",
-        examples=["lip-sync only from 1:00 to 1:30",
-                  "run musetalk on the last 20 seconds",
-                  "redo the lip-sync with wav2lip"],
+        examples=[],
     ),
     OpSpec(
         # `timing`, not `tts`, because `_h_mute_cue` sets exactly that on
@@ -810,14 +805,6 @@ USER_ACTIONS: Dict[str, Dict[str, Any]] = {
         "category": "Timing & audio", "scopes": ["segment"], "quick": True,
         "fill": "make this line 1.1 times faster",
     },
-    "lipsync_window": {
-        "title": "Lip-sync only part of the video",
-        "takes": "a time range, and optionally which lip-sync model",
-        "changes": "only that stretch has its mouth re-animated and is "
-                   "spliced back into the full timeline",
-        "category": "Lip-sync & video", "scopes": ["segment"], "quick": False,
-        "fill": "apply lip-sync from <start time> to <end time>",
-    },
     "mute_cue": {
         "title": "Mute a cue",
         "takes": "a time range or segment id",
@@ -891,7 +878,7 @@ def action_catalogue() -> List[Dict[str, Any]]:
 def sample_prompts(per_op: int = 2) -> List[Tuple[str, str]]:
     """`(phrasing, what it does)` pairs, in user language, for every op.
 
-    The op names (`lipsync_window`, `set_speaker`) are the agent's
+    The op names (`set_speaker`, `mute_cue`) are the agent's
     vocabulary, not a person's. Listing them when a request fails to parse
     tells the user what the CODE is called, which is not what they asked.
     Each OpSpec already carries worked `examples` written as someone would
@@ -2044,11 +2031,6 @@ def _h_lipsync_window(data, seg_ids, op, applied, ctx, res):
     res.lipsync_window = (start, end)
     model = op.params.get("model") or ctx.lipsync_model
     if model:
-        # Checked HERE rather than at the render. An unregistered name used
-        # to travel all the way to `get_lipsync`, which raises only after the
-        # replay has been committed and launched — so a typo or an invented
-        # model (a 12B model writing structured output does invent them)
-        # surfaced as a failed background job rather than a refused edit.
         from backend.lipsync.lipsync import available_models
         known = available_models()
         if str(model) not in known:

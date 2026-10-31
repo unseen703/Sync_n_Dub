@@ -11,13 +11,17 @@ import { useStore } from '../../store/useStore';
 export function AppShell() {
   const railOpen = useStore((s) => s.railOpen);
   const setRailOpen = useStore((s) => s.setRailOpen);
+  const selected = useStore((s) => s.selected);
+  const talkingHead = useStore((s) => s.talkingHead);
 
   const railInline = railOpen;
   const railDrawer = railOpen;
 
+  const isLanding = !selected && !talkingHead;
+
   return (
     <div className="flex h-screen w-full flex-col overflow-hidden">
-      <BrandBar />
+      <BrandBar showNewDub={!isLanding} />
 
       <div className="flex min-h-0 flex-1 overflow-hidden">
 

@@ -15,7 +15,7 @@
   --c-ink: 242 245 249;
   --c-ink-2: 199 209 223;
   --c-ink-3: 159 172 191;
-  --c-ink-4: 126 140 160;
+  --c-ink-4: 140 154 174;
 
   --c-brand: 79 70 229;
   --c-brand-soft: 99 102 241;
@@ -49,7 +49,7 @@
   --c-ink: 11 18 32;
   --c-ink-2: 51 65 85;
   --c-ink-3: 74 90 112;
-  --c-ink-4: 92 107 130;
+  --c-ink-4: 82 97 120;
 
   --c-brand: 67 56 202;
   --c-brand-soft: 99 102 241;
@@ -134,22 +134,22 @@ body {
 @layer components {
 
   .t-title {
-    @apply text-[15px] font-semibold leading-tight text-ink;
+    @apply text-[16px] font-semibold leading-tight text-ink;
   }
   .t-body {
-    @apply text-[13.5px] leading-relaxed text-ink2;
+    @apply text-[14px] leading-relaxed text-ink2;
   }
   .t-sm {
-    @apply text-[12.5px] leading-normal text-ink3;
+    @apply text-[13px] leading-normal text-ink2;
   }
   .t-xs {
-    @apply text-[11.5px] leading-normal text-ink4;
+    @apply text-[12px] leading-normal text-ink3;
   }
   .eyebrow {
-    @apply text-[11px] font-semibold uppercase tracking-[0.08em] text-ink4;
+    @apply text-[12px] font-semibold uppercase tracking-[0.08em] text-ink3;
   }
   .mono {
-    @apply font-mono text-[11.5px] tracking-tight;
+    @apply font-mono text-[12.5px] tracking-tight;
   }
 
   .card {
@@ -160,7 +160,7 @@ body {
   }
 
   .field {
-    @apply h-9 w-full rounded-xl border border-edge/70 bg-canvas/60 px-3 text-[13px]
+    @apply h-10 w-full rounded-xl border border-edge/70 bg-canvas/60 px-3 text-[14px]
            text-ink placeholder:text-ink4 transition-colors;
   }
   .field:hover {

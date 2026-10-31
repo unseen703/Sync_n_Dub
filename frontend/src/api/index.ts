@@ -56,6 +56,9 @@ export const rerunDub = live.rerunDub;
 export const setSpeakerLabel: typeof live.setSpeakerLabel = mockWrites
   ? mock.setSpeakerLabel
   : live.setSpeakerLabel;
+export const setSpeakerPhoto: typeof live.setSpeakerPhoto = mockWrites
+  ? mock.setSpeakerPhoto
+  : live.setSpeakerPhoto;
 
 export const getLipsyncReadiness = live.getLipsyncReadiness;
 export const startLipsync = live.startLipsync;

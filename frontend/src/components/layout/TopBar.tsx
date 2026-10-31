@@ -31,8 +31,8 @@ export function TopBar() {
         {title ? (
           <h1
             className={cn(
-              'truncate text-[14px] font-semibold leading-tight',
-              degraded ? 'font-mono text-[12px] text-ink3' : 'text-ink',
+              'truncate text-[15px] font-semibold leading-tight',
+              degraded ? 'font-mono text-[13px] text-ink3' : 'text-ink',
             )}
             title={title}
           >
@@ -42,7 +42,7 @@ export function TopBar() {
           <div className="h-3.5 w-48 rounded bg-ink/[0.08]" />
         )}
         {selected ? (
-          <div className="truncate text-[11.5px] text-ink4" title={selected}>
+          <div className="truncate text-[12.5px] text-ink4" title={selected}>
             {selected}
           </div>
         ) : null}
@@ -51,7 +51,7 @@ export function TopBar() {
       {progress ? (
         <div className="flex shrink-0 items-center gap-2.5">
           {running ? (
-            <span className="hidden font-mono text-[12px] tabular-nums text-ink3 sm:inline">
+            <span className="hidden font-mono text-[13px] tabular-nums text-ink3 sm:inline">
               {progress.pct}% · {fmtElapsed(progress.started_at, now)}
             </span>
           ) : null}

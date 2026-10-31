@@ -38,8 +38,8 @@ export function Select({
       <RS.Trigger
         aria-label={ariaLabel}
         className={cn(
-          'inline-flex h-9 w-full items-center justify-between gap-2 rounded-xl',
-          'border border-edge/70 bg-surface/70 px-3 text-[13px] text-ink',
+          'inline-flex h-10 w-full items-center justify-between gap-2 rounded-xl',
+          'border border-edge/70 bg-surface/70 px-3 text-[14px] text-ink',
           'transition-colors hover:border-edge data-[placeholder]:text-ink4',
           'disabled:cursor-not-allowed disabled:opacity-50',
           className,
@@ -76,14 +76,14 @@ export function Select({
                     value={it.value}
                     disabled={it.disabled}
                     className="relative flex cursor-pointer select-none items-center gap-2 rounded-lg
-                               px-2 py-1.5 pr-8 text-[13px] text-ink2 outline-none
+                               px-2 py-1.5 pr-8 text-[14px] text-ink2 outline-none
                                data-[highlighted]:bg-brand/25 data-[highlighted]:text-ink
                                data-[disabled]:opacity-45"
                   >
                     <div className="min-w-0 flex-1">
                       <RS.ItemText>{it.label}</RS.ItemText>
                       {it.hint ? (
-                        <div className="truncate text-[11.5px] text-ink4">{it.hint}</div>
+                        <div className="truncate text-[12.5px] text-ink4">{it.hint}</div>
                       ) : null}
                     </div>
                     <RS.ItemIndicator className="absolute right-2">

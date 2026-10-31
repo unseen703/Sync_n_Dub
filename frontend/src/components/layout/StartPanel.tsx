@@ -3,7 +3,7 @@ import { Button } from '../frontend/Button';
 import { Select } from '../frontend/Select';
 import { Eyebrow } from '../frontend/Card';
 import { RangePicker } from '../newjob/RangePicker';
-import { IconAlert, IconFilm, IconSpinner } from '../frontend/Icons';
+import { IconAlert, IconExternal, IconFilm, IconSpinner } from '../frontend/Icons';
 import { useStore } from '../../store/useStore';
 import * as api from '../../api';
 import { ensureScriptFont, langClass } from '../../lib/lang';
@@ -116,133 +116,157 @@ export function StartPanel() {
   };
 
   return (
-    <section className="card p-4 sm:p-5">
-      <div className="text-[13.5px] font-semibold text-ink">Add your source video</div>
+    <section className="card divide-y divide-line">
+      {/* ── Section 1: Add your video ── */}
+      <div className="p-4 sm:p-5">
+        <div className="flex items-baseline justify-between">
+          <h3 className="text-[14px] font-semibold text-ink">
+            <span className="mr-1.5 text-ink4">1.</span>Add your video
+          </h3>
+          <span className="text-[11.5px] font-medium text-ink3">Required</span>
+        </div>
 
-      <div className="mt-3 flex flex-col gap-2 sm:flex-row">
-        <input
-          id="start-url"
-          value={url}
-          onChange={(e) => setUrl(e.target.value)}
-          onKeyDown={(e) => { if (e.key === 'Enter') void check(); }}
-          placeholder="Paste a YouTube or video link"
-          aria-label="Video link"
-          className="min-w-0 flex-1 rounded-lg border border-edge/70 bg-canvas/60 px-3 py-2
-                     text-[13px] text-ink placeholder:text-ink4"
-        />
-        <Button onClick={() => void check()} disabled={!url.trim() || busy !== null}>
-          {busy === 'probe' ? <IconSpinner /> : null} Check
-        </Button>
-
-        <input
-          ref={fileRef}
-          type="file"
-          accept="video/mp4,video/quicktime,video/x-matroska,video/webm,.mp4,.mov,.mkv,.webm,.m4v,.avi"
-          className="sr-only"
-          onChange={(e) => {
-            const f = e.target.files?.[0];
-            if (f) void upload(f);
-            e.target.value = '';
+        <div
+          className="mt-4 flex cursor-pointer flex-col items-center gap-2 rounded-xl
+                     border-2 border-dashed border-edge/60 bg-canvas/40 px-4 py-8
+                     transition-colors hover:border-brand/40 hover:bg-brand/[0.03]"
+          onClick={() => {
+            if (!url.trim()) fileRef.current?.click();
           }}
-        />
-        <Button
-          variant="outline"
-          onClick={() => fileRef.current?.click()}
-          disabled={busy !== null}
         >
-          {busy === 'upload' ? <IconSpinner /> : null} Upload a file
-        </Button>
+          <IconExternal width={20} height={20} className="text-ink3" />
+          <p className="text-[13.5px] font-medium text-ink">
+            Paste a YouTube link or upload a video
+          </p>
+          <p className="text-[12px] text-ink4">
+            MP4, MOV, MKV, WebM, M4V or AVI &middot; Up to 4 GB
+          </p>
+        </div>
+
+        <div className="mt-3 flex flex-col gap-2 sm:flex-row">
+          <input
+            id="start-url"
+            value={url}
+            onChange={(e) => setUrl(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') void check(); }}
+            placeholder="Paste a YouTube or video link"
+            aria-label="Video link"
+            className="min-w-0 flex-1 rounded-lg border border-edge/70 bg-canvas/60 px-3 py-2
+                       text-[13px] text-ink placeholder:text-ink4"
+          />
+          <Button onClick={() => void check()} disabled={!url.trim() || busy !== null}>
+            {busy === 'probe' ? <IconSpinner /> : null} Check
+          </Button>
+
+          <input
+            ref={fileRef}
+            type="file"
+            accept="video/mp4,video/quicktime,video/x-matroska,video/webm,.mp4,.mov,.mkv,.webm,.m4v,.avi"
+            className="sr-only"
+            onChange={(e) => {
+              const f = e.target.files?.[0];
+              if (f) void upload(f);
+              e.target.value = '';
+            }}
+          />
+          <Button
+            variant="outline"
+            onClick={() => fileRef.current?.click()}
+            disabled={busy !== null}
+          >
+            {busy === 'upload' ? <IconSpinner /> : null} Upload a file
+          </Button>
+        </div>
+
+        {error ? (
+          <p className="mt-2 flex items-start gap-1.5 text-[12.5px] text-warn">
+            <IconAlert width={13} height={13} className="mt-0.5 flex-none" />
+            <span>{error}</span>
+          </p>
+        ) : null}
       </div>
 
-      <p className="mt-1.5 text-[11.5px] text-ink4">
-        Accepts MP4, MOV, MKV, WebM, M4V or AVI up to 4 GB.
-      </p>
+      {/* ── Section 2: Choose your languages ── */}
+      <div className="p-4 sm:p-5">
+        <h3 className="text-[14px] font-semibold text-ink">
+          <span className="mr-1.5 text-ink4">2.</span>Choose your languages
+        </h3>
 
-      {error ? (
-        <p className="mt-2 flex items-start gap-1.5 text-[12.5px] text-warn">
-          <IconAlert width={13} height={13} className="mt-0.5 flex-none" />
-          <span>{error}</span>
-        </p>
-      ) : null}
-
-      <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-            <div>
-
-              <Eyebrow className="mb-2">Original language</Eyebrow>
-              <Select
-                ariaLabel="Original language"
-                value={spoken}
-                onValueChange={setSpoken}
-                items={[
-                  { value: 'auto', label: detectedLang
-                    ? `Automatic detection — ${detectedLang.language || detectedLang.code}`
-                    : 'Automatic detection',
-                    hint: detectedLang
-                      ? `Detected via ${detectedLang.method === 'yt_metadata' ? 'video metadata' : 'audio analysis'}`
-                      : 'Detected from video metadata or a short audio sample' },
-                  { value: 'en', label: 'English' },
-                  ...(options?.languages ?? []).map((l) => ({
-                    value: l.code,
-                    label: l.english,
-                  })),
-                ]}
-              />
-            </div>
-            <div>
-              <Eyebrow className="mb-2">Indian language to dub into</Eyebrow>
-              <Select
-                ariaLabel="Target language"
-                value={language}
-                onValueChange={setLanguage}
-                items={(options?.languages ?? []).map((l) => ({
+        <div className="mt-3 grid gap-3 sm:grid-cols-2">
+          <div>
+            <Eyebrow className="mb-2">Original language</Eyebrow>
+            <Select
+              ariaLabel="Original language"
+              value={spoken}
+              onValueChange={setSpoken}
+              items={[
+                { value: 'auto', label: detectedLang
+                  ? `Automatic detection — ${detectedLang.language || detectedLang.code}`
+                  : 'Automatic detection',
+                  hint: detectedLang
+                    ? `Detected via ${detectedLang.method === 'yt_metadata' ? 'video metadata' : 'audio analysis'}`
+                    : 'Detected from video metadata or a short audio sample' },
+                { value: 'en', label: 'English' },
+                ...(options?.languages ?? []).map((l) => ({
                   value: l.code,
-                  label: (
-                    <span>
-                      {l.english}
-                      {l.native ? (
-                        <span className={`ml-1.5 text-ink3 ${langClass(l.code)}`}>{l.native}</span>
-                      ) : null}
-                    </span>
-                  ),
-                }))}
-              />
-            </div>
-            <div>
-              <Eyebrow className="mb-2">Delivery style</Eyebrow>
-              <Select
-                ariaLabel="Delivery style"
-                value={style}
-                onValueChange={setStyle}
-                items={[
-                  { value: 'auto', label: 'Work it out from the video',
-                    hint: 'Automatically detected from the video' },
-                  ...(options?.styles ?? []).map((s) => ({ value: s.value, label: s.label })),
-                ]}
-              />
-            </div>
-            <div>
-              <Eyebrow className="mb-2">Code-mix</Eyebrow>
-              <Select
-                ariaLabel="Code-mix"
-                value={targetScript}
-                onValueChange={setTargetScript}
-                items={[
-                  { value: 'codemix', label: 'Code-mix' },
-                  { value: 'native', label: 'Native' },
-                ]}
-              />
-            </div>
-      </div>
+                  label: l.english,
+                })),
+              ]}
+            />
+          </div>
+          <div>
+            <Eyebrow className="mb-2">Dub into</Eyebrow>
+            <Select
+              ariaLabel="Target language"
+              value={language}
+              onValueChange={setLanguage}
+              items={(options?.languages ?? []).map((l) => ({
+                value: l.code,
+                label: (
+                  <span>
+                    {l.english}
+                    {l.native ? (
+                      <span className={`ml-1.5 text-ink3 ${langClass(l.code)}`}>{l.native}</span>
+                    ) : null}
+                  </span>
+                ),
+              }))}
+            />
+          </div>
+        </div>
 
-      <p className="mt-3 rounded-lg border border-line bg-surface/60 px-3 py-2
-                    text-[12px] text-ink3">
-        Audio dubbing runs first. You review the result, adjust voices and — when
-        you're ready — add lip-sync from the job page.
-      </p>
+        <div className="mt-3 grid gap-3 sm:grid-cols-2">
+          <div>
+            <Eyebrow className="mb-2">Delivery style</Eyebrow>
+            <Select
+              ariaLabel="Delivery style"
+              value={style}
+              onValueChange={setStyle}
+              items={[
+                { value: 'auto', label: 'Work it out from the video',
+                  hint: 'Automatically detected from the video' },
+                ...(options?.styles ?? []).map((s) => ({ value: s.value, label: s.label })),
+              ]}
+            />
+          </div>
+          <div>
+            <Eyebrow className="mb-2">Code-mix</Eyebrow>
+            <Select
+              ariaLabel="Code-mix"
+              value={targetScript}
+              onValueChange={setTargetScript}
+              items={[
+                { value: 'codemix', label: 'Code-mix' },
+                { value: 'native', label: 'Native' },
+              ]}
+            />
+          </div>
+        </div>
+      </div>
 
       {src ? (
-        <>
-          <div className="mt-3 flex items-center gap-2 rounded-lg border border-line
+        <div className="p-4 sm:p-5">
+          <div className="flex items-center gap-2 rounded-lg border border-line
                           bg-surface/60 px-3 py-2 text-[12.5px]">
             <IconFilm width={14} height={14} className="flex-none text-ink3" />
             <span className="min-w-0 flex-1 truncate text-ink">{title}</span>
@@ -283,13 +307,12 @@ export function StartPanel() {
               {busy === 'create' ? <IconSpinner /> : null} Create dubbed video
             </Button>
             <span className="text-[12px] text-ink3">
-
               {Object.values(
                 (src.kind === 'url' ? src.probe.estimates : src.upload.estimates) ?? {},
               )[0]?.text}
             </span>
           </div>
-        </>
+        </div>
       ) : null}
     </section>
   );

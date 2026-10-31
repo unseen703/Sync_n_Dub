@@ -27,6 +27,7 @@ import type {
   Progress,
   Spec,
   SpeakerLabels,
+  SpeakerPhotoChoices,
   SpeakerTable,
 } from './types';
 
@@ -147,6 +148,12 @@ export const setSpeakerLabel = (id: string, speakerId: string, label: string) =>
   req<SpeakerLabels>(`/api/jobs/${enc(id)}/speakers/${enc(speakerId)}/label`, {
     method: 'POST',
     body: JSON.stringify({ label }),
+  });
+
+export const setSpeakerPhoto = (id: string, speakerId: string, index: number) =>
+  req<SpeakerPhotoChoices>(`/api/jobs/${enc(id)}/speakers/${enc(speakerId)}/photo`, {
+    method: 'POST',
+    body: JSON.stringify({ index }),
   });
 
 export const stageScript = (id: string, edits: ScriptEdit[]) =>

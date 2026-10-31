@@ -73,19 +73,19 @@ export function VoicePicker({
                      rounded-xl border border-line bg-raised shadow-2xl shadow-black/70"
         >
           {options.length === 0 ? (
-            <p className="px-3 py-4 text-[12.5px] leading-relaxed text-ink3">
+            <p className="px-3 py-4 text-[13px] leading-relaxed text-ink3">
               This engine does not publish a voice list, so the adapter&rsquo;s own default is
               used for every speaker.
             </p>
           ) : (
             <>
               <div className="border-b border-line px-3 py-2.5">
-                <div className="text-[12.5px] font-medium text-ink">
+                <div className="text-[13px] font-medium text-ink">
                   {showAll || !hasRecommendation
                     ? `All ${options.length} voices`
                     : `Suggested for ${speaker.label ?? speaker.id}`}
                 </div>
-                <p className="mt-0.5 text-[11.5px] leading-snug text-ink3">
+                <p className="mt-0.5 text-[12.5px] leading-snug text-ink3">
                   {hasRecommendation
                     ? showAll
                       ? 'Every voice this engine offers in the target language.'
@@ -137,7 +137,7 @@ export function VoicePicker({
                                   </span>
                                 ) : null}
                               </div>
-                              <div className="truncate text-[11.5px] text-ink4">
+                              <div className="truncate text-[12.5px] text-ink4">
                                 {[genderWord(o.gender), o.age, o.language]
                                   .filter(Boolean)
                                   .join(' · ') || o.voice}
@@ -158,7 +158,7 @@ export function VoicePicker({
                 <button
                   type="button"
                   onClick={() => setShowAll((v) => !v)}
-                  className="border-t border-line px-3 py-2.5 text-left text-[12.5px]
+                  className="border-t border-line px-3 py-2.5 text-left text-[13px]
                              font-medium text-brand-ink transition-colors hover:bg-ink/[0.05]"
                 >
                   {showAll

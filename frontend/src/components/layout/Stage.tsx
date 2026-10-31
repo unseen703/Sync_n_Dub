@@ -5,8 +5,6 @@ import { EditPanel } from '../agent/EditPanel';
 import { TalkingHeadPage } from '../talkinghead/TalkingHeadPage';
 import { ResultHeader } from '../progress/ResultHeader';
 import { FailureCard } from '../progress/FailureCard';
-import { VideoStage } from '../video/VideoStage';
-import { SpeakerTable } from '../speakers/SpeakerTable';
 import { Eyebrow, Skeleton } from '../frontend/Card';
 import { Button } from '../frontend/Button';
 import { IconAlert } from '../frontend/Icons';
@@ -68,7 +66,7 @@ export function Stage() {
           {jobError ? (
             <div className="flex items-center gap-3 rounded-xl border border-line bg-surface/70 px-3.5 py-2.5">
               <IconAlert width={15} height={15} className="shrink-0 text-warn" />
-              <p className="min-w-0 flex-1 text-[12.5px] leading-relaxed text-ink2">
+              <p className="min-w-0 flex-1 text-[13px] leading-relaxed text-ink2">
                 We lost touch with the studio server, so this page may be out of date.
               </p>
               <Button size="sm" onClick={() => void refreshProgress()}>
@@ -91,7 +89,7 @@ export function Stage() {
             <EditPanel jobId={selected} />
           )}
 
-          <div className="h-4" />
+          <div className="h-2" />
         </div>
       </div>
     </MotionConfig>

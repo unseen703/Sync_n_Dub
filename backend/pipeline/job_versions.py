@@ -444,8 +444,7 @@ def backfill(job_root: Path) -> int:
         except (OSError, ValueError):
             continue
         ops = doc.get("ops") or []
-        kind = ("lipsync" if ops and all(o.get("op") == "lipsync_window"
-                                         for o in ops) else "edit")
+        kind = "edit"
         res = doc.get("result") or {}
         add(kind, rec.stem,
             {**link_transcript(root, rec.stem), **link_mix(root, rec.stem)},

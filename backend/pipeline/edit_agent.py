@@ -753,30 +753,6 @@ def _rule_parse(nlq: str, *,
             ops.append(EditOp(op="replace_term", scope=scope, params=params,
                               note=f"replace {params['find']!r} in place"))
 
-    # lip-sync window
-    #
-    # The model is resolved first, from the REGISTRY, and a named model is
-    # itself a trigger. The old condition needed the literal word "lipsync",
-    # so "run musetalk on the last 20 seconds" — an advertised example —
-    # matched nothing. LONGEST first, so "wav2lip_hd" is not read as the
-    # plain model: that silent downgrade is what this loop exists to stop.
-    from backend.lipsync.lipsync import available_models
-    probe = low.replace("-", "_").replace(" ", "_")
-    ls_model = None
-    for name in sorted(available_models(), key=len, reverse=True):
-        if name in probe:
-            ls_model = name
-            break
-    if re.search(r"lip[\s-]?sync|lipsync", low) or (
-            ls_model and re.search(r"\b(run|use|redo|rerun|re-?run|with|on)\b",
-                                   low)):
-        sc = scope
-        if sc.is_empty():
-            sc = Scope(all=True)
-        ops.append(EditOp(op="lipsync_window", scope=sc,
-                          params={k: v for k, v in (("model", ls_model),) if v},
-                          note="lip-sync the named window only"))
-
     # speed
     if re.search(r"\bspeed\s*(?:up|down)?\b|\bfaster\b|\bslower\b|\bslow\s*down\b",
                  low):
@@ -1096,10 +1072,6 @@ class EditPlan:
             for w in a.warnings:
                 L.append(f"      ! {w}")
         L.append("")
-        if r.lipsync_window:
-            s, e = r.lipsync_window
-            L.append(f"lip-sync window  {_hhmmss(s)}–{_hhmmss(e)} "
-                     f"({e - s:.1f}s)")
         L.append(f"stages to re-run  {' → '.join(r.dirty_stages) or '(none)'}")
         L.append(f"cost              {_cost_note(r.dirty_stages, r)}")
         L.append("stages NOT re-run  download, diarization, faces, ASD, ASR, "
@@ -1116,11 +1088,7 @@ def _cost_note(stages: List[str], r: EditResult) -> str:
     if "mix" in stages:
         bits.append("an ffmpeg mix + mux")
     if "lipsync" in stages:
-        if r.lipsync_window:
-            s, e = r.lipsync_window
-            bits.append(f"a GPU lip-sync render of {e - s:.0f}s")
-        else:
-            bits.append("a GPU lip-sync render of the WHOLE video")
+        bits.append("a GPU lip-sync render of the WHOLE video")
     return "; ".join(bits) or "nothing to re-render"
 
 
@@ -1240,8 +1208,7 @@ def commit(plan: EditPlan) -> EditResult:
             ops_d = [o.to_dict() for o in plan.ops]
             _jv.append(
                 plan.view.root,
-                ("lipsync" if ops_d and all(o["op"] == "lipsync_window"
-                                            for o in ops_d) else "edit"),
+                "edit",
                 edit_id=f"edit_{stamp:03d}", nlq=plan.nlq, ops=ops_d,
                 dirty_stages=res.dirty_stages,
                 artifacts=_jv.link_transcript(plan.view.root,
@@ -1516,7 +1483,6 @@ def rerun(plan: EditPlan, *, device: Optional[str] = None,
         lipsync_model=((res.lipsync_model or cfg.get("lipsync"))
                        if "lipsync" in stages else None),
         lipsync_num_gpus=num_gpus if num_gpus is not None else nsget("lipsync_num_gpus"),
-        lipsync_window=res.lipsync_window,
     )
     log.info("edit rerun: stages %s", " → ".join(res.dirty_stages))
     post = run_post_mt_stages(view.merged_json, **kwargs)
@@ -1583,8 +1549,7 @@ def _rerun_lipsync_only(plan: EditPlan, *, num_gpus: Optional[int]) -> Dict[str,
     video = view.video
     if video is None:
         raise EditError(f"no source video in {view.root / 'videos'}")
-    log.info("edit rerun: lip-sync only (%s)%s", model,
-             f", window {res.lipsync_window}" if res.lipsync_window else "")
+    log.info("edit rerun: lip-sync only (%s)", model)
     # Rebuild the render settings from THIS job's manifest config. This
     # path is how the UI finishes a draft (`POST .../lipsync`), and it used
     # to pass no kwargs at all -- so the adapter fell back to its own
@@ -1665,7 +1630,7 @@ def _rerun_lipsync_only(plan: EditPlan, *, num_gpus: Optional[int]) -> Dict[str,
         view.merged_json, model=model, source_video=video,
         driving_audio=wavs[-1], out_dir=view.root / "lipsync",
         pre_muxed_video=(mp4s[-1] if mp4s else None),
-        num_gpus=num_gpus, window=res.lipsync_window,
+        num_gpus=num_gpus,
         lipsync_kwargs=ls_kwargs,
         coord_list=(_targets[0] if _targets else None),
         targets_npz=_targets_npz,

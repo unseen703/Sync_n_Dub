@@ -293,6 +293,7 @@ def speaker_face_tracks(
     tracks,                           # FaceTracks
     *,
     min_on_screen_s: float = 1.0,
+    with_track_id: bool = False,
 ) -> Dict[str, Tuple[np.ndarray, np.ndarray]]:
     """Return `{speaker: (frames, bboxes)}` for the face each speaker owns.
 
@@ -304,6 +305,11 @@ def speaker_face_tracks(
 
     A speaker under `min_on_screen_s` is left out rather than guessed at, which
     reads as "no face evidence" instead of "no faces found".
+
+    `with_track_id=True` returns `{speaker: (track_id, frames, bboxes)}`
+    instead -- for a caller that needs to look the track back up elsewhere
+    (e.g. matching it against stage 6's per-frame ASD scores). Opt-in so the
+    other five callers of this function keep their existing tuple shape.
     """
     by_id = tracks.by_id() if callable(getattr(tracks, "by_id", None)) \
         else {t.track_id: t for t in tracks.tracks}
@@ -329,7 +335,9 @@ def speaker_face_tracks(
                      spk, secs, trk)
             continue
         t = by_id[trk]
-        out[spk] = (np.asarray(t.frames), np.asarray(t.bboxes))
+        out[spk] = ((trk, np.asarray(t.frames), np.asarray(t.bboxes))
+                    if with_track_id else
+                    (np.asarray(t.frames), np.asarray(t.bboxes)))
         log.info("faces: %s -> %s (%.1f s on screen, %d frames)",
                  spk, trk, secs, len(t.frames))
     return out

@@ -230,7 +230,11 @@ export function EditPanel({ jobId }: { jobId: string }) {
         </div>
       </div>
 
-      <LipsyncPanel jobId={jobId} onStarted={() => void load()} />
+      <LipsyncPanel
+        jobId={jobId}
+        onStarted={() => void load()}
+        cueCount={script?.segments?.length ?? 0}
+      />
 
       <HistoryPanel jobId={jobId} />
     </div>
@@ -243,7 +247,22 @@ interface Diff {
   after: string;
 
   pending?: boolean;
+  meta?: string;
 }
+
+const OP_LABELS: Record<string, string> = {
+  set_text: 'Text modification',
+  replace_term: 'Term replacement',
+  set_speed: 'Speed change',
+  set_voice: 'Voice change',
+  set_gender: 'Gender change',
+  set_tone: 'Delivery change',
+  retranslate: 'Retranslation',
+  code_mix: 'Code-mix',
+  mute_cue: 'Mute',
+  set_lipsync: 'Lip-sync model change',
+  lipsync: 'Lip-sync model change',
+};
 
 function opDiffs(
   op: Record<string, unknown>,
@@ -285,46 +304,57 @@ function opDiffs(
   const spkName = spk?.label || (scope.speaker ? String(scope.speaker) : tgt);
   const firstText = rows[0]?.text ?? '';
 
+  const cueLabel = rows.length === 1 ? `Cue #${rows[0].cue_no}` : null;
+  const speakerLabel = rows[0]?.speaker ?? (scope.speaker ? spkName : null);
+  const meta = [cueLabel, speakerLabel, OP_LABELS[name] ?? name].filter(Boolean).join(' · ');
+
+  let diffs: Diff[];
   switch (name) {
     case 'set_text':
-      return [{ object: tgt, before: firstText, after: String(params.text ?? '') }];
+      diffs = [{ object: tgt, before: firstText, after: String(params.text ?? '') }];
+      break;
     case 'replace_term': {
       const find = String(params.find ?? params.term ?? params.search ?? '');
       const repl = String(params.replace ?? params.with ?? '');
-      return [{
+      diffs = [{
         object: tgt,
         before: find ? `"${find}"` : firstText,
         after: repl ? `"${repl}"` : '(removed)',
       }];
+      break;
     }
     case 'set_speed': {
       const factor = Number(params.factor ?? params.speed);
       const before = rows[0]?.speed != null ? `${rows[0].speed.toFixed(2)}×` : '1.00×';
-      return [{
+      diffs = [{
         object: `${tgt} · speed`,
         before,
         after: Number.isFinite(factor) ? `${factor.toFixed(2)}×` : '—',
       }];
+      break;
     }
     case 'set_voice':
-      return [{
+      diffs = [{
         object: `${spkName} · voice`,
         before: spk?.voice.current ?? '—',
         after: String(params.voice ?? spk?.voice.staged ?? '—'),
       }];
+      break;
     case 'set_gender':
-      return [{
+      diffs = [{
         object: `${spkName} · gender`,
         before: spk?.gender.current ?? '—',
         after: String(params.gender ?? spk?.gender.staged ?? '—'),
       }];
+      break;
     case 'set_tone':
-      return [{
+      diffs = [{
         object: `${spkName} · delivery`,
         before: spk?.tone.current ?? '—',
         after: String(params.tone ?? spk?.tone.staged ?? '—'),
         pending: Boolean(params.rewrite_text),
       }];
+      break;
     case 'retranslate': {
       const kind = String((op as Record<string, unknown>).kind ?? '');
       const tgtLang = String(params.target_language ?? '').trim();
@@ -334,44 +364,52 @@ function opDiffs(
       // round trip. Show the actual before→after if we have the ASR text.
       if (kind === 'script') {
         if (!srcText) {
-          return [{
+          diffs = [{
             object: tgt,
             before: firstText,
             after: 'source cue is empty — no change applied',
           }];
+          break;
         }
-        return [{
+        diffs = [{
           object: tgt + (tgtLang ? ` · ${tgtLang}` : ''),
           before: firstText,
           after: srcText,
         }];
+        break;
       }
-      return [{
+      diffs = [{
         object: tgt + (tgtLang ? ` · ${tgtLang}` : ''),
         before: firstText,
         after: 're-translated on apply',
         pending: true,
       }];
+      break;
     }
     case 'code_mix':
-      return [{
+      diffs = [{
         object: tgt,
         before: firstText,
         after: `code-mixed${params.mode ? ` (${String(params.mode)})` : ''}`,
         pending: true,
       }];
+      break;
     case 'mute_cue':
-      return [{ object: tgt, before: firstText || 'this cue', after: 'muted', pending: true }];
+      diffs = [{ object: tgt, before: firstText || 'this cue', after: 'muted', pending: true }];
+      break;
     case 'set_lipsync':
     case 'lipsync':
-      return [{
+      diffs = [{
         object: 'Lip-sync model',
         before: '—',
         after: String(params.model ?? params.lipsync ?? '—'),
       }];
+      break;
     default:
-      return [{ object: tgt, before: '', after: name || 'change' }];
+      diffs = [{ object: tgt, before: '', after: name || 'change' }];
   }
+
+  return diffs.map((d) => ({ ...d, meta }));
 }
 
 function sourceLabel(source: string): string {
@@ -438,19 +476,29 @@ function StagedChanges({
 
   const segById = new Map((script?.segments ?? []).map((r) => [r.id, r]));
 
+  const changeCount = turns.reduce(
+    (n, t) => n + t.ops.flatMap((op) => opDiffs(op, segById, speakers)).length,
+    0,
+  );
+
   return (
     <section className="card p-4">
-      <Eyebrow className="mb-2">
-        Pending edits{turns.length ? ` · ${turns.length}` : ''}
-      </Eyebrow>
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <Eyebrow>Pending edits</Eyebrow>
+        {changeCount > 0 ? (
+          <span className="rounded-full bg-amber-500/15 px-2 py-0.5 text-[12px] font-medium text-amber-700">
+            {changeCount} change{changeCount === 1 ? '' : 's'}
+          </span>
+        ) : null}
+      </div>
       {turns.length > 0 && (
-        <p className="mb-2 text-[11px] text-amber-600">
+        <p className="mb-2 text-[12px] text-amber-600">
           Not yet included in the rendered video.
         </p>
       )}
 
       {turns.length === 0 ? (
-        <p className="text-[11.5px] text-ink4">
+        <p className="text-[12.5px] text-ink4">
           Changes appear here. Nothing re-renders until you apply.
         </p>
       ) : (
@@ -469,10 +517,10 @@ function StagedChanges({
                 >
                   <div className="flex items-start gap-2">
                     <div className="min-w-0 flex-1">
-                      <div className="text-[12.5px] text-ink">{t.message}</div>
-                      <div className="mt-0.5 flex items-center gap-1.5 text-[11px] text-ink4">
+                      <div className="text-[13px] text-ink">{t.message}</div>
+                      <div className="mt-0.5 flex items-center gap-1.5 text-[12px] text-ink4">
                         <span
-                          className={`inline-block rounded px-1.5 py-px text-[10px] font-medium ${
+                          className={`inline-block rounded px-1.5 py-px text-[11px] font-medium ${
                             t.source === 'script'
                               ? 'bg-emerald-500/15 text-emerald-700'
                               : 'bg-violet-500/15 text-violet-700'
@@ -498,7 +546,7 @@ function StagedChanges({
                       }
                       title={armed ? 'Click again to remove' : 'Remove this change'}
                       className={`flex flex-none items-center justify-center gap-1 self-start
-                                  rounded-lg px-2.5 py-1.5 text-[12px] font-medium text-white
+                                  rounded-lg px-2.5 py-1.5 text-[13px] font-medium text-white
                                   transition-colors disabled:opacity-50 ${
                                     armed
                                       ? 'bg-danger-fill ring-1 ring-danger'
@@ -524,7 +572,7 @@ function StagedChanges({
                           <span
                             key={k}
                             title={kindTitle(kind)}
-                            className={`inline-flex items-center gap-1 rounded px-1.5 py-px text-[10px] font-medium ${kindChipClass(kind)}`}
+                            className={`inline-flex items-center gap-1 rounded px-1.5 py-px text-[11px] font-medium ${kindChipClass(kind)}`}
                           >
                             <span className="uppercase tracking-wide">{kind}</span>
                             <span className="font-normal text-ink3">·</span>
@@ -538,15 +586,27 @@ function StagedChanges({
                   <div className="mt-2 space-y-1.5">
                     {diffs.map((d, k) => (
                       <div key={k} className="rounded-md bg-canvas/50 px-2.5 py-1.5">
-                        <div className="font-mono text-[11px] text-ink3">{d.object}</div>
+                        {d.meta ? (
+                          <div className="mb-1 text-[12px] font-medium text-ink3">{d.meta}</div>
+                        ) : (
+                          <div className="mb-1 font-mono text-[12px] text-ink3">{d.object}</div>
+                        )}
                         {d.before ? (
-                          <div className="mt-0.5 text-[12px] text-ink4 line-through">
-                            {d.before}
-                          </div>
+                          <>
+                            <div className="text-[11px] font-semibold uppercase tracking-wide text-ink4">
+                              Original
+                            </div>
+                            <div className="mb-1 text-[13px] text-ink4 line-through">
+                              {d.before}
+                            </div>
+                          </>
                         ) : null}
+                        <div className="text-[11px] font-semibold uppercase tracking-wide text-ink4">
+                          Proposed
+                        </div>
                         <div
-                          className={`mt-0.5 text-[12.5px] ${
-                            d.pending ? 'italic text-ink3' : 'text-ink'
+                          className={`text-[13px] ${
+                            d.pending ? 'italic text-ink3' : 'text-emerald-700'
                           }`}
                         >
                           {d.after}
@@ -569,15 +629,15 @@ function StagedChanges({
             <Button variant="ghost" onClick={onDiscard} disabled={busy}>
               Discard edits
             </Button>
-            <span className="text-[12px] text-ink3">
-              re-runs {dirtyStages.join(' → ')}
+            <span className="text-[13px] text-ink3">
+              {dirtyStages.length ? `Will rerun: ${dirtyStages.join(' → ')}` : 'No re-render needed'}
               {cost?.total_est_s ? ` · about ${fmtClock(cost.total_est_s)}` : ''}
               {cost?.gpu_required ? ' · uses the GPU' : ''}
             </span>
           </div>
 
           {(cost?.warnings ?? []).map((w, i) => (
-            <p key={i} className="flex items-start gap-1.5 text-[12px] text-warn">
+            <p key={i} className="flex items-start gap-1.5 text-[13px] text-warn">
               <span aria-hidden="true">⚠</span>
               <span>{w}</span>
             </p>
@@ -619,7 +679,7 @@ function StagedChanges({
               {turns.map((t, i) => (
                 <li key={i} className="flex items-baseline gap-2 text-[12.5px]">
                   <span
-                    className={`inline-block rounded px-1.5 py-px text-[10px] font-medium ${
+                    className={`inline-block rounded px-1.5 py-px text-[11px] font-medium ${
                       t.source === 'script'
                         ? 'bg-emerald-500/15 text-emerald-700'
                         : 'bg-violet-500/15 text-violet-700'

@@ -819,10 +819,6 @@ def run_post_mt_stages(
     # parameter -- anything reaching `**adapter_kwargs` fails deep inside
     # an adapter instead of at the boundary.
     lipsync_batch_size: Optional[int] = None,
-    # Render only this (start_s, end_s) slice and splice it back into the
-    # full timeline. None -- the default -- renders the whole video, exactly
-    # as before. `backend.edits.lipsync_window` is what sets it.
-    lipsync_window: Optional[Tuple[float, float]] = None,
     **adapter_kwargs,
 ) -> PostMTResult:
     """Run stages 9b..9h against one merged ASR+MT JSON.
@@ -1456,7 +1452,7 @@ def run_post_mt_stages(
                     out_dir=lipsync_dir,
                     pre_muxed_video=out.mix_mp4,
                     num_gpus=lipsync_num_gpus,
-                    window=lipsync_window,
+                    window=None,
                     coord_list=_coords,
                     targets_npz=_targets_npz,
                     lipsync_kwargs={

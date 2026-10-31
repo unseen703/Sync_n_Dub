@@ -4,7 +4,7 @@ import { IconKeyboard, IconMoon, IconPlus, IconSun } from '../frontend/Icons';
 import { Tooltip } from '../frontend/Tooltip';
 import { MOCKED } from '../../api';
 
-export function BrandBar() {
+export function BrandBar({ showNewDub = true }: { showNewDub?: boolean }) {
   const setNewJobOpen = useStore((s) => s.setNewJobOpen);
   const theme = useStore((s) => s.theme);
   const toggleTheme = useStore((s) => s.toggleTheme);
@@ -56,11 +56,13 @@ export function BrandBar() {
           </button>
         </Tooltip>
 
-        <Button variant="primary" size="sm" onClick={() => setNewJobOpen(true)}>
-          <IconPlus width={14} height={14} />
-          New dub
-          {MOCKED.newJob ? <DemoChip /> : null}
-        </Button>
+        {showNewDub ? (
+          <Button variant="primary" size="sm" onClick={() => setNewJobOpen(true)}>
+            <IconPlus width={14} height={14} />
+            New dub
+            {MOCKED.newJob ? <DemoChip /> : null}
+          </Button>
+        ) : null}
 
         <Tooltip label={theme === 'dark' ? 'Switch to light' : 'Switch to dark'}>
           <button

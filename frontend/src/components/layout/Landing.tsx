@@ -1,6 +1,5 @@
 import { useMemo } from 'react';
-import { Button } from '../frontend/Button';
-import { IconFilm, IconGlobe, IconSparkle, IconWave } from '../frontend/Icons';
+import { IconFilm, IconGlobe, IconSparkle } from '../frontend/Icons';
 import { useStore } from '../../store/useStore';
 import { LANGUAGES } from '../../lib/lang';
 import { StartPanel } from './StartPanel';
@@ -8,23 +7,18 @@ import { StartPanel } from './StartPanel';
 const STEPS = [
   {
     Icon: IconFilm,
-    title: 'Point it at a video',
-    body: 'Paste a YouTube link and choose the whole thing or just a section.',
-  },
-  {
-    Icon: IconWave,
-    title: 'It works out who is speaking',
-    body: 'Speakers are separated, transcribed and timed, so each line keeps its own voice.',
+    title: 'Identify',
+    body: 'Detect speakers and dialogue.',
   },
   {
     Icon: IconGlobe,
-    title: 'Translated and re-voiced',
-    body: 'The script is translated, cast to a voice per speaker and mixed over the original audio.',
+    title: 'Dub',
+    body: 'Translate and generate voices.',
   },
   {
     Icon: IconSparkle,
-    title: 'Mouths matched to the new audio',
-    body: 'Optional lip-sync re-renders the speaker’s mouth to match the new audio.',
+    title: 'Lip-sync',
+    body: 'Lip-sync and resolution enhancement.',
   },
 ];
 
@@ -35,13 +29,13 @@ export function Landing() {
 
   const langs = useMemo(() => {
     const all = Object.values(LANGUAGES).filter((l) => l.script !== 'latn');
-    return { count: all.length, sample: all.slice(0, 9) };
+    return { count: all.length, all };
   }, []);
 
   const recent = jobs.slice(0, 3);
 
   return (
-    <div className="mx-auto w-full max-w-4xl px-1 py-8 sm:py-12">
+    <div className="mx-auto w-full max-w-5xl px-3 py-4 sm:px-6 sm:py-8 lg:px-10" >
       <div className="flex flex-col items-start gap-5">
         <span
           className="inline-flex items-center gap-2 rounded-full border border-line
@@ -64,25 +58,13 @@ export function Landing() {
           Transcribe, translate and re-voice your video in any supported Indian language.
         </p>
 
-        <div className="flex flex-wrap items-center gap-3">
-          <Button
-            variant="primary"
-            size="lg"
-            onClick={() => document.querySelector<HTMLInputElement>('#start-url')?.focus()}
-          >
-            Create dubbed video
-          </Button>
-          <span className="text-[12.5px] text-ink3">
-            add your source below — or press <Kbd>N</Kbd> from anywhere
-          </span>
-        </div>
       </div>
 
-      <div className="mt-8">
+      <div className="mt-5">
         <StartPanel />
       </div>
 
-      <ol className="mt-10 grid gap-3 sm:grid-cols-2">
+      <ol className="mt-6 grid gap-3 sm:grid-cols-3">
         {STEPS.map(({ Icon, title, body }, i) => (
           <li key={title} className="card flex gap-3 p-4">
             <span
@@ -111,7 +93,7 @@ export function Landing() {
           Technical terms can stay in English where that is how people actually say them.
         </p>
         <ul className="mt-3 flex flex-wrap gap-1.5">
-          {langs.sample.map((l) => (
+          {langs.all.map((l) => (
             <li
               key={l.native}
               className={`rounded-lg border border-line bg-canvas/50 px-2.5 py-1 text-[12.5px] text-ink2 lang-${l.script}`}
@@ -119,9 +101,6 @@ export function Landing() {
               {l.native}
             </li>
           ))}
-          <li className="rounded-lg border border-line bg-canvas/50 px-2.5 py-1 text-[12.5px] text-ink4">
-            +{langs.count - langs.sample.length} more
-          </li>
         </ul>
       </section>
 

@@ -55,19 +55,39 @@ def dub_sample_paths(merged: Dict[str, Any]) -> Dict[str, str]:
     return {k: v[1] for k, v in best.items()}
 
 
+#: Candidates must be at least this many frames apart, or the top-3 by ASD
+#: score collapse onto the same instant (speech bursts cluster, and three
+#: near-identical frames defeat the point of offering a choice).
+CANDIDATE_MIN_GAP_FRAMES = 15
+
+#: How many candidate crops to offer per speaker, when ASD scores let us rank.
+CANDIDATES_PER_SPEAKER = 3
+
+_CROP_NAME = re.compile(r"^(?P<spk>.+)\.(?P<idx>\d+)\.jpg$")
+
+
 def face_crop_paths(job_root: Path, *, video: Optional[Path] = None,
-                    regenerate: bool = False) -> Dict[str, Path]:
-    """`{speaker: crop.jpg}`, writing any that are missing.
+                    regenerate: bool = False) -> Dict[str, List[Path]]:
+    """`{speaker: [crop.0.jpg, crop.1.jpg, ...]}`, writing any that are missing.
+
+    Up to `CANDIDATES_PER_SPEAKER` frames, ranked by stage 6's own ASD score
+    for the speaker's winning track -- a frame ASD is confident is mid-speech
+    beats the middle-of-track frame picked blind, and three options let the
+    operator correct for an awkward expression ASD can't see. Falls back to
+    the single middle frame when no `*.scores.npz` is on disk (an older job,
+    or an ASD model that did not write one): one honest candidate beats none.
 
     Returns only what exists on disk afterwards. Stage 6 omits a speaker whose
     on-screen total is too short to trust, so inventing a crop would assert
     evidence the pipeline refused to.
     """
     out_dir = job_root / CROP_SUBDIR
-    existing = {}
+    existing: Dict[str, List[Path]] = {}
     if out_dir.is_dir() and not regenerate:
-        for p in out_dir.glob("*.jpg"):
-            existing[p.stem] = p
+        for p in sorted(out_dir.glob("*.jpg")):
+            m = _CROP_NAME.match(p.name)
+            if m:
+                existing.setdefault(m.group("spk"), []).append(p)
         if existing:
             return existing
 
@@ -82,45 +102,83 @@ def face_crop_paths(job_root: Path, *, video: Optional[Path] = None,
         return existing
 
     try:
-        import cv2
         import numpy as np
 
         from backend.faces.faces import speaker_face_tracks
         from backend.faces.faces import FaceTracks
 
         tracks = FaceTracks.load_npz(npz)
-        owned = speaker_face_tracks(_read(assign) or [], tracks)
+        owned = speaker_face_tracks(_read(assign) or [], tracks,
+                                    with_track_id=True)
     except Exception as e:                              # noqa: BLE001
         log.warning("speaker crops: could not resolve faces (%s)", e)
         return existing
 
+    # Best-effort: a speaker simply gets the middle-frame fallback if this
+    # can't be loaded, never a hard failure for the whole crop pass.
+    asd_scores = {}
+    try:
+        from backend.asd.asd import find_scores_npz, load_scores_npz
+        scores_path = find_scores_npz(job_root / "asd")
+        if scores_path is not None:
+            asd_scores = load_scores_npz(scores_path).per_track
+    except Exception as e:                              # noqa: BLE001
+        log.info("speaker crops: no ASD scores available (%s); "
+                 "falling back to middle-frame crops", e)
+
+    def _pick_frames(trk: str, frames: "np.ndarray") -> List[int]:
+        sc = asd_scores.get(trk)
+        if sc is None or len(sc.frames) == 0:
+            # No ASD evidence for this track -- the one middle frame, as before.
+            return [int(frames[len(frames) // 2])]
+        valid = set(int(f) for f in frames)
+        ranked = sorted(
+            ((float(s), int(f)) for f, s in zip(sc.frames, sc.scores)
+             if int(f) in valid),
+            reverse=True,
+        )
+        picked: List[int] = []
+        for _, f in ranked:
+            if all(abs(f - p) >= CANDIDATE_MIN_GAP_FRAMES for p in picked):
+                picked.append(f)
+            if len(picked) == CANDIDATES_PER_SPEAKER:
+                break
+        return picked or [int(frames[len(frames) // 2])]
+
     out_dir.mkdir(parents=True, exist_ok=True)
+    import cv2
     cap = cv2.VideoCapture(str(video))
-    for spk, (frames, bboxes) in sorted(owned.items()):
+    for spk, (trk, frames, bboxes) in sorted(owned.items()):
         frames = np.asarray(frames)
         bboxes = np.asarray(bboxes)
         if frames.size == 0:
             continue
-        # The middle of the track: it usually starts mid-pan or mid-cut,
-        # where the face is most likely blurred.
-        k = len(frames) // 2
-        cap.set(cv2.CAP_PROP_POS_FRAMES, int(frames[k]))
-        ok, frame = cap.read()
-        if not ok:
-            continue
-        h, w = frame.shape[:2]
-        x1, y1, x2, y2 = [float(v) for v in bboxes[k][:4]]
-        mx, my = (x2 - x1) * CROP_MARGIN, (y2 - y1) * CROP_MARGIN
-        cx1, cy1 = max(0, int(x1 - mx)), max(0, int(y1 - my))
-        cx2, cy2 = min(w, int(x2 + mx)), min(h, int(y2 + my))
-        if cx2 - cx1 < 8 or cy2 - cy1 < 8:
-            continue
-        dst = out_dir / f"{spk}.jpg"
-        cv2.imwrite(str(dst), frame[cy1:cy2, cx1:cx2],
-                    [int(cv2.IMWRITE_JPEG_QUALITY), 88])
-        existing[spk] = dst
+        frame_to_idx = {int(f): i for i, f in enumerate(frames)}
+        paths: List[Path] = []
+        for idx, frame_no in enumerate(_pick_frames(trk, frames)):
+            bi = frame_to_idx.get(frame_no)
+            if bi is None:
+                continue
+            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_no)
+            ok, frame = cap.read()
+            if not ok:
+                continue
+            h, w = frame.shape[:2]
+            x1, y1, x2, y2 = [float(v) for v in bboxes[bi][:4]]
+            mx, my = (x2 - x1) * CROP_MARGIN, (y2 - y1) * CROP_MARGIN
+            cx1, cy1 = max(0, int(x1 - mx)), max(0, int(y1 - my))
+            cx2, cy2 = min(w, int(x2 + mx)), min(h, int(y2 + my))
+            if cx2 - cx1 < 8 or cy2 - cy1 < 8:
+                continue
+            dst = out_dir / f"{spk}.{idx}.jpg"
+            cv2.imwrite(str(dst), frame[cy1:cy2, cx1:cx2],
+                        [int(cv2.IMWRITE_JPEG_QUALITY), 88])
+            paths.append(dst)
+        if paths:
+            existing[spk] = paths
     cap.release()
-    log.info("speaker crops: %d written to %s", len(existing), out_dir)
+    log.info("speaker crops: %d speaker(s) written to %s",
+             len(existing), out_dir)
     return existing
 
 

@@ -672,6 +672,22 @@ def api_set_speaker_label(job_id: str, speaker_id: str,
     return {"job_id": root.name, "labels": labels}
 
 
+@app.post("/api/jobs/{job_id}/speakers/{speaker_id}/photo")
+def api_set_speaker_photo(job_id: str, speaker_id: str,
+                          body: dict | None = Body(None)) -> dict[str, Any]:
+    """Pick one of the (up to 3) ASD-ranked face crops as this speaker's photo.
+
+    Display only -- it dirties no pipeline stage, same as the label route.
+    """
+    from .service.speakers import write_photo_choice
+    root = _job_root_or_404(job_id)
+    index = (body or {}).get("index")
+    if not isinstance(index, int) or index < 0:
+        raise HTTPException(400, "index must be a non-negative integer")
+    choices = write_photo_choice(root, speaker_id, index)
+    return {"job_id": root.name, "photo_choices": choices}
+
+
 @app.get("/api/jobs/{job_id}/spec")
 def api_spec(job_id: str) -> dict[str, Any]:
     from .progress import read_progress

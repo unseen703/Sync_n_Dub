@@ -140,6 +140,13 @@ export interface Speaker {
   tone: string | null;
   reference_url: string | null;
   color: string;
+
+  /** The operator-confirmed (or default, index 0) face photo. */
+  face_crop_url: string | null;
+  /** Up to 3 ASD-ranked candidates; empty when stage 5/6 found no face. */
+  face_crop_urls: string[];
+  /** Which of `face_crop_urls` is `face_crop_url`; null when there are none. */
+  face_photo_index: number | null;
 }
 
 export interface ToneOption {
@@ -424,6 +431,11 @@ export interface ApplyResult {
 export interface SpeakerLabels {
   job_id: string;
   labels: Record<string, string>;
+}
+
+export interface SpeakerPhotoChoices {
+  job_id: string;
+  photo_choices: Record<string, number>;
 }
 
 export interface RevertResult {

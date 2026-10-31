@@ -119,8 +119,8 @@ export function NowPlayingCues({
       style={matchHeight ? { height: matchHeight } : undefined}
     >
       <div className="mb-2 flex items-center gap-2">
-        <Eyebrow>Cues{rows.length ? ` · ${rows.length}` : ''}</Eyebrow>
-        <span className="text-[11px] text-ink4">
+        <Eyebrow>Script{rows.length ? ` · ${rows.length} cues` : ''}</Eyebrow>
+        <span className="text-[12px] text-ink4">
           Click text to rewrite
         </span>
         <button
@@ -132,7 +132,7 @@ export function NowPlayingCues({
               : `See the ${sourceLangName} line under each cue (read-only)`
           }
           aria-pressed={showEnglish}
-          className={`ml-auto flex items-center gap-1 rounded-lg border px-2 py-1 text-[11px] transition-colors ${
+          className={`ml-auto flex items-center gap-1 rounded-lg border px-2 py-1 text-[12px] transition-colors ${
             showEnglish
               ? 'border-brand/50 text-brand-ink'
               : 'border-edge/60 text-ink3 hover:border-edge hover:text-ink'
@@ -145,7 +145,7 @@ export function NowPlayingCues({
           onClick={scrollToCurrent}
           title="Scroll to the cue matching the current playback position"
           className="flex items-center gap-1 rounded-lg border border-edge/60 px-2 py-1
-                     text-[11px] text-ink3 transition-colors hover:border-edge hover:text-ink"
+                     text-[12px] text-ink3 transition-colors hover:border-edge hover:text-ink"
         >
           <span aria-hidden="true">⏱</span> Go to current
         </button>
@@ -153,10 +153,10 @@ export function NowPlayingCues({
 
       {dirty.length ? (
         <div className="mb-2 flex flex-wrap items-center gap-3 rounded-lg bg-amber-400/10 px-3 py-2 ring-1 ring-amber-400/40">
-          <span className="text-[12.5px] text-ink">
+          <span className="text-[13px] text-ink">
             {dirty.length} line{dirty.length === 1 ? '' : 's'} rewritten
           </span>
-          <span className="text-[11px] text-ink4">
+          <span className="text-[12px] text-ink4">
             Replays speech, mix and lip-sync.
           </span>
           <div className="ml-auto flex gap-2">
@@ -177,7 +177,7 @@ export function NowPlayingCues({
       ) : null}
 
       {rows.length === 0 ? (
-        <p className="text-[12.5px] text-ink4">
+        <p className="text-[13px] text-ink4">
           Cues appear here once there is a transcript.
         </p>
       ) : (
@@ -201,41 +201,45 @@ export function NowPlayingCues({
                     if (el) rowRefs.current.set(r.id, el);
                     else rowRefs.current.delete(r.id);
                   }}
-                  className={`rounded-lg px-2.5 py-1.5 text-[12.5px] transition-colors ${
+                  onClick={() => requestSeek(r.start)}
+                  title={`Jump video to ${fmtClock(r.start)}`}
+                  className={`cursor-pointer rounded-lg border-l-2 px-3 py-2 text-[13px] transition-colors ${
                     isSelected
-                      ? 'bg-brand/10 ring-2 ring-brand'
+                      ? 'border-brand bg-brand/10 ring-2 ring-brand'
                       : isCurrent
-                        ? 'bg-brand/10 ring-1 ring-brand/40'
+                        ? 'border-brand bg-brand/10 ring-1 ring-brand/40'
                         : drafts[r.id] !== undefined
-                          ? 'bg-amber-400/10 ring-1 ring-amber-400/40'
+                          ? 'border-transparent bg-amber-400/10 ring-1 ring-amber-400/40'
                           : r.staged
-                            ? 'bg-brand/5 ring-1 ring-brand/20'
-                            : 'odd:bg-surface/40'
+                            ? 'border-transparent bg-brand/5 ring-1 ring-brand/20'
+                            : 'border-transparent odd:bg-surface/40'
                   }`}
                 >
                   <div className="flex items-baseline gap-2">
 
                     <button
                       type="button"
-                      onClick={() => {
-
+                      onClick={(e) => {
+                        e.stopPropagation();
                         setSelectedCue(isSelected ? null : r.id);
                         try {
                           void navigator.clipboard?.writeText(`cue ${r.cue_no}`);
                         } catch {}
                       }}
                       title={`${r.id} — click to aim edits at cue ${r.cue_no}`}
-                      className={`flex-none font-mono text-[11px] rounded px-1 -mx-1 hover:bg-brand/10 ${
+                      className={`flex-none font-mono text-[12px] rounded px-1 -mx-1 hover:bg-brand/10 ${
                         isSelected ? 'text-brand-ink font-semibold' : 'text-brand hover:text-brand-ink'
                       }`}
                     >
                       #{r.cue_no}
                     </button>
-                    <span className="flex-none font-mono text-[11px] text-ink4">
+                    <span className="flex-none font-mono text-[12px] text-ink4">
                       {fmtClock(r.start)}
                     </span>
                     {r.speaker ? (
-                      <span className="flex-none font-mono text-[11px] text-ink3">{r.speaker}</span>
+                      <span className="flex-none rounded-md bg-surface px-1.5 py-0.5 font-mono text-[12px] text-ink3">
+                        {r.speaker}
+                      </span>
                     ) : null}
 
                     {editing === r.id ? (
@@ -248,6 +252,7 @@ export function NowPlayingCues({
                         }}
                         className="min-w-0 flex-1 rounded border border-brand/40 bg-surface px-1.5 py-0.5 text-ink outline-none"
                         defaultValue={shown}
+                        onClick={(e) => e.stopPropagation()}
                         onBlur={(e) => {
                           const next = e.currentTarget.value.trim();
                           const before = r.staged_text ?? r.text;
@@ -272,14 +277,17 @@ export function NowPlayingCues({
                         type="button"
                         className="min-w-0 flex-1 cursor-text text-left text-ink hover:underline decoration-dotted underline-offset-2"
                         title="Click to edit this line"
-                        onClick={() => setEditing(r.id)}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setEditing(r.id);
+                        }}
                       >
                         {shown || <em className="text-ink4">—</em>}
                       </button>
                     )}
 
                     {r.staged_speed != null && r.staged_speed !== r.speed ? (
-                      <span className="ml-auto flex-none font-mono text-[11px]">
+                      <span className="ml-auto flex-none font-mono text-[12px]">
                         <StagedValue
                           current={`${r.speed.toFixed(2)}×`}
                           staged={`${r.staged_speed.toFixed(2)}×`}
@@ -288,7 +296,7 @@ export function NowPlayingCues({
                       </span>
                     ) : r.speed !== 1 ? (
                       <span
-                        className="ml-auto flex-none font-mono text-[11px] text-ink3"
+                        className="ml-auto flex-none font-mono text-[12px] text-ink3"
                         title="How fast this cue is spoken"
                       >
                         {r.speed.toFixed(2)}×
@@ -296,27 +304,33 @@ export function NowPlayingCues({
                     ) : null}
 
                     {was !== null ? (
-                      <span className="flex-none text-[11px] text-blue-ink">
+                      <span className="flex-none text-[12px] text-blue-ink">
                         {drafts[r.id] !== undefined ? 'edited' : 'staged'}
                       </span>
                     ) : r.staged ? (
-                      <span className="flex-none text-[11px] text-blue-ink">staged</span>
+                      <span className="flex-none text-[12px] text-blue-ink">staged</span>
                     ) : null}
 
                     <button
                       type="button"
-                      onClick={() => requestSeek(r.start)}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        requestSeek(r.start);
+                      }}
                       title={`Jump video to ${fmtClock(r.start)}`}
                       aria-label={`Seek to cue at ${fmtClock(r.start)}`}
                       className="flex-none rounded p-0.5 text-ink4 hover:text-brand
                                  transition-colors"
                     >
-                      <span aria-hidden="true" className="text-[11px]">▶</span>
+                      <span aria-hidden="true" className="text-[12px]">▶</span>
                     </button>
 
                     <button
                       type="button"
-                      onClick={() => onMute(r.id, !mutedIds.has(r.id))}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onMute(r.id, !mutedIds.has(r.id));
+                      }}
                       disabled={busy}
                       title={mutedIds.has(r.id) ? 'This cue is muted (staged) — click to unmute' : 'Mute this cue — it will be silent in the dub'}
                       aria-label={`${mutedIds.has(r.id) ? 'Unmute' : 'Mute'} cue at ${fmtClock(r.start)}`}
@@ -334,7 +348,7 @@ export function NowPlayingCues({
 
                   {showEnglish && r.src_text ? (
                     <p
-                      className="mt-1 pl-[3.75rem] text-[11.5px] italic leading-snug text-ink4"
+                      className="mt-1 pl-[3.75rem] text-[12.5px] italic leading-snug text-ink4"
                       title={`Original ${sourceLangName} line (read-only)`}
                     >
                       {r.src_text}

@@ -93,6 +93,7 @@ interface State {
   setNewJobOpen: (v: boolean) => void;
   setShortcutsOpen: (v: boolean) => void;
   renameSpeaker: (speakerId: string, label: string) => Promise<void>;
+  setSpeakerPhoto: (speakerId: string, index: number) => Promise<void>;
 
   setVideoTrack: (t: VideoTrack) => void;
   setVideoTime: (t: number) => void;
@@ -438,6 +439,38 @@ export const useStore = create<State>()((set, get) => ({
       get().pushToast({
         kind: 'error',
         title: 'That name was not saved',
+        body: (e as Error).message,
+      });
+    }
+  },
+
+  async setSpeakerPhoto(speakerId, index) {
+    const id = get().selected;
+    const table = get().speakers;
+    if (!id || !table) return;
+    const sp = table.speakers.find((s) => s.id === speakerId);
+    if (!sp || !sp.face_crop_urls[index]) return;
+    const before = sp.face_photo_index;
+    const patch = (idx: number | null) => {
+      const t = get().speakers;
+      if (!t || t.job_id !== id) return;
+      set({
+        speakers: {
+          ...t,
+          speakers: t.speakers.map((s) => (s.id === speakerId
+            ? { ...s, face_photo_index: idx, face_crop_url: idx !== null ? s.face_crop_urls[idx] : null }
+            : s)),
+        },
+      });
+    };
+    patch(index);
+    try {
+      await api.setSpeakerPhoto(id, speakerId, index);
+    } catch (e) {
+      patch(before);
+      get().pushToast({
+        kind: 'error',
+        title: 'That photo was not saved',
         body: (e as Error).message,
       });
     }

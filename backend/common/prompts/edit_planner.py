@@ -79,11 +79,7 @@ Use only the following operation names and parameters.
    Change the playback speed of the scoped audio.
    Required params: factor (number; greater than zero)
 
-9. lipsync_window
-   Run lip-sync only on the specified time window.
-   Optional params: model ({{lipsync_models}}; include only when requested or when needed to change the configured model)
-
-10. replace_term
+9. replace_term
    Replace one word or phrase inside a line while leaving every other character identical.
    Required params: find
      Copy the phrase CHARACTER FOR CHARACTER as it appears in the cue text, including any punctuation that is part of it. If the user quotes a phrase ending in "?", "!", "।", or "." and that punctuation mark is present in the cue, it belongs in `find`. Leaving it out will strand the punctuation in the line after the surrounding phrase is removed.
@@ -93,11 +89,11 @@ Use only the following operation names and parameters.
      - Omitted entirely: translate `find` into the target language. Use this ONLY when the user asks for a translation. Never omit `replace` for a removal request; omitting it would substitute a translation where the user requested a deletion.
    To remove a phrase while leaving punctuation in its place, pass that punctuation as `replace`. This is one operation, not two.
 
-11. mute_cue
+10. mute_cue
    Remove the scoped cue(s) from the dub: TTS skips them, the music-and-effects bed plays through, and their time is released as a pause that neighbouring lines may borrow. Use this operation for "mute", "silence", "delete", "remove", and "cut" when the user means a WHOLE cue. There is no separate delete operation.
    Required params: none
 
-12. set_target_language
+11. set_target_language
    Re-translate the scoped cues (or the whole dub) into a different Indic language via Bodhan MT, then re-cast the voices and re-speak the audio. Use this when the user asks to change the dub's language ("translate to Marathi", "dub it in Tamil", "change the target language to Bengali"). This is distinct from retranslate: retranslate rewrites the SAME language with an instruction, while set_target_language switches the output language entirely.
    Required params: target_language (ISO code of a supported Indic language)
    Optional params: target_script (script override; include only when the request names one)
@@ -107,7 +103,7 @@ Use only the following operation names and parameters.
      - Speaker-only scope is REFUSED by the pipeline. If the user names only a speaker, pair it with a time range supplied by the user; otherwise, return {"ops": []}.
    Do not invent an ISO code that the user did not name. If the language is not one of the supported Indic languages, return {"ops": []}.
 
-13. merge_cues
+12. merge_cues
    Combine two consecutive cues from the same speaker into one. The first cue absorbs the second: the original texts are joined, the timing extends to the end of the second cue, and the translation is rewritten to read as a single utterance.
    Required params: none
    Scope: use "segments" with EXACTLY TWO cue IDs, in the order the user named them. The scope IS the operation; there are no other params.
@@ -170,7 +166,6 @@ Choose the operation that most directly matches the requested change.
 - Correct who is speaking by reattributing dialogue to an EXISTING speaker ID: set_speaker.
 - Assign a particular TTS voice, including when the user requests a gender change ("sound female, assign voice of Deepika", "make him male, voice Amit"): set_voice. The voice determines the gender, so the request must name a voice. A gender-only request without a named voice returns {"ops": []} with a note. Requires an explicit speaker ID.
 - Change speech speed: set_speed.
-- Restrict lip-sync processing to a time window or request a specific lip-sync model: lipsync_window.
 - Remove a word or phrase from inside a line while leaving the rest of the line intact: replace_term with replace set to "". Do not use mute_cue for this; it discards the entire cue, not just the phrase.
 - Silence, delete, remove, or cut a WHOLE cue: mute_cue. The distinction is phrase versus cue, not "mute" versus "delete": a request naming text inside a line requires replace_term, while a request naming the cue itself requires mute_cue.
 - Change the dub's output language ("translate the dub to Marathi", "dub it in Tamil", "change the target language"): set_target_language. Never use retranslate for a language switch; retranslate rewrites the SAME target language.
@@ -188,7 +183,6 @@ For example, "read SPK_01's lines as a news anchor" requires set_tone with tone 
 - For set_tone, use rewrite_text=true unless the user explicitly asks to change vocal delivery without rewriting the wording. Never pass a tone that is not in the engine list; an unknown style is refused by the pipeline, not silently ignored.
 - For code_mix, include terms only when the user identifies the terms to preserve. Do not invent a termbase path.
 - For set_speed, use the numeric factor specified by the user. When the user says "slow down", "slower", or "slow it down" without a number, use factor 0.85. When the user says "speed up", "faster", or "speed it up" without a number, use factor 1.2. These are the defaults applied by the rule parser and match pipeline behaviour. Still refuse — return {"ops": []} — when the user uses a vague modifier that indicates a magnitude without specifying it ("a little faster", "much slower", "way slower"), since the user clearly intends something other than the default but has not specified what.
-- For lipsync_window, use the requested time window. Do not change the lip-sync model unless requested or necessary to specify a model.
 - Do not add target_language unless the user explicitly requests a language change.
 - Do not modify text unless the selected operation requires it.
 

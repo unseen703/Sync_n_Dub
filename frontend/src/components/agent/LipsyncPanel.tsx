@@ -1,12 +1,27 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Button } from '../frontend/Button';
 import { Eyebrow } from '../frontend/Card';
-import { IconSpinner } from '../frontend/Icons';
+import { IconFaceScan, IconSparkle, IconSpinner, IconWave } from '../frontend/Icons';
+import { CastConfirmDialog } from '../speakers/CastConfirmDialog';
 import { useStore } from '../../store/useStore';
 import * as api from '../../api';
 import type {
   EnhanceReadiness, EnhanceStatus, LipsyncReadiness,
 } from '../../api/types';
+
+function Badge({ children, tone = 'muted' }: { children: React.ReactNode; tone?: 'muted' | 'done' }) {
+  return (
+    <span
+      className={`flex-none rounded-full px-2 py-0.5 text-[12px] font-medium ${
+        tone === 'done'
+          ? 'bg-emerald-500/15 text-emerald-700'
+          : 'bg-ink1/10 text-ink3'
+      }`}
+    >
+      {children}
+    </span>
+  );
+}
 
 const ENHANCE_POLL_MS = 4000;
 
@@ -27,9 +42,10 @@ function fmtEstimate(band: [number, number] | null | undefined): string | null {
  *  row below the model choices (folded in from the standalone EnhancePanel
  *  on 2026-10-28 — it had no other caller). Input: job id and optional
  *  start callback. Output: readiness details and a render action. */
-export function LipsyncPanel({ jobId, onStarted }: {
+export function LipsyncPanel({ jobId, onStarted, cueCount = 0 }: {
   jobId: string;
   onStarted?: () => void;
+  cueCount?: number;
 }) {
   const pushToast = useStore((s) => s.pushToast);
   const [ready, setReady] = useState<LipsyncReadiness | null>(null);
@@ -37,6 +53,45 @@ export function LipsyncPanel({ jobId, onStarted }: {
   const [error, setError] = useState<string | null>(null);
 
   const [confirmDiscard, setConfirmDiscard] = useState(false);
+
+  // -- render dubbed audio (cast → voices → TTS → mix), folded in as the
+  // first "next step" — the one call-to-action a viewer sees before anything
+  // else is possible, and the same gate SpeakerTable used to render inline.
+  const table = useStore((s) => s.speakers);
+  const staged = useStore((s) => s.staged);
+  const applying = useStore((s) => s.applying);
+  const awaitingCast = useStore((s) => Boolean(s.progress?.milestones?.awaiting_cast));
+  const mixDone = useStore((s) => Boolean(s.progress?.milestones?.mix_done));
+  const selected = useStore((s) => s.selected);
+  const stageState = useStore((s) => s.progress?.state);
+  const stateEditable = stageState !== 'running' && stageState !== 'queued';
+  const [confirmCastOpen, setConfirmCastOpen] = useState(false);
+  const [rerunning, setRerunning] = useState(false);
+  const [rerunMsg, setRerunMsg] = useState<string | null>(null);
+
+  const unsetVoices = table
+    ? table.speakers.filter((sp) => {
+      const st = staged[sp.id];
+      return !(st?.voice !== undefined ? st.voice : sp.voice);
+    })
+    : [];
+  const chosenVoices = table ? table.speakers.length - unsetVoices.length : 0;
+
+  const startRerun = async () => {
+    if (!selected) return;
+    setRerunning(true);
+    setRerunMsg(null);
+    try {
+      const r = await api.rerunDub(selected);
+      setRerunMsg(r.rerun.launched
+        ? 'Re-render launched'
+        : `Could not launch: ${r.rerun.error ?? 'unknown error'}`);
+    } catch (e) {
+      setRerunMsg(`Could not launch: ${(e as Error).message}`);
+    } finally {
+      setRerunning(false);
+    }
+  };
 
   // Hard-pinned: the UI only offers LatentSync 1.5 now, so there is no
   // selection to make. MuseTalk and Wav2Lip are still in the backend
@@ -166,14 +221,15 @@ export function LipsyncPanel({ jobId, onStarted }: {
   if (error && !ready) {
     return (
       <section className="card p-4">
-        <Eyebrow className="mb-2">Lipsync and Enhance</Eyebrow>
-        <p className="text-[12px] text-ink4">{error}</p>
+        <Eyebrow className="mb-2">Next steps</Eyebrow>
+        <p className="text-[13px] text-ink4">{error}</p>
       </section>
     );
   }
 
   const lipBlocked = (ready ? !ready.can_start : true) || busy;
   const lipEstimate = ready?.estimates?.[LIPSYNC_MODEL];
+  const showLipButton = !lipBlocked || busy;
 
   // Disabled until there is a lip-sync render to clean up — `enh` is null
   // before the first readiness response, same "not yet known" start as
@@ -182,45 +238,123 @@ export function LipsyncPanel({ jobId, onStarted }: {
   const enhRunning = enhStatus?.state === 'running';
   const enhBlocked = !enh?.can_start || enhBusy || enhRunning;
   const enhEst = fmtEstimate(enh?.estimate_s);
+  const showEnhButton = !enhBlocked || enhBusy || enhRunning;
 
   return (
     <section id="lipsync-panel" className="card p-4">
-      <Eyebrow className="mb-3">Lipsync and Enhance</Eyebrow>
+      <Eyebrow className="mb-3">Next steps</Eyebrow>
 
       <div className="space-y-1.5">
+        {/* Render dubbed audio — the cast gate SpeakerTable used to render
+            inline, folded in here as step one of three so the whole pipeline
+            reads as a single list of next steps. */}
+        {awaitingCast && table ? (
+          <div className="rounded-lg border border-brand/30 bg-brand/5 px-3 py-3">
+            <div className="flex items-start gap-2.5">
+              <span className="mt-0.5 flex-none text-ink3"><IconWave width={18} height={18} /></span>
+              <div className="min-w-0 flex-1">
+                <div className="font-medium text-ink">Ready to generate?</div>
+                <p className="text-[12px] text-ink3">
+                  {table.speakers.length} speaker{table.speakers.length === 1 ? '' : 's'}
+                  {' · '}{cueCount} cue{cueCount === 1 ? '' : 's'}
+                </p>
+                <p className="mt-1 text-[12px] leading-snug text-ink3">
+                  Generates speech, fits timing and mixes the final dubbed soundtrack.
+                </p>
+              </div>
+            </div>
+            <div className="mt-2.5 flex items-center justify-between gap-2">
+              <span className="text-[12px] tabular-nums text-ink4">
+                {chosenVoices} of {table.speakers.length} voices chosen
+              </span>
+              <button
+                type="button"
+                onClick={() => setConfirmCastOpen(true)}
+                disabled={applying || unsetVoices.length > 0}
+                title={unsetVoices.length
+                  ? `${unsetVoices.length} speaker${unsetVoices.length === 1 ? '' : 's'} still need a voice: ${unsetVoices.map((sp) => sp.label || sp.id).join(', ')}`
+                  : undefined}
+                className="shrink-0 rounded-lg bg-ink px-3.5 py-2 text-[13px] font-semibold
+                           text-white transition-colors hover:bg-ink/90 disabled:opacity-60"
+              >
+                {applying ? 'Casting…' : 'Render dubbed audio'}
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div
+            className={`flex items-center justify-between gap-3 rounded-lg border px-3 py-2.5
+                        text-[13px] ${
+                          mixDone ? 'border-ok/35 bg-ok/10' : 'border-line bg-surface/40 opacity-60'
+                        }`}
+          >
+            <div className="flex min-w-0 items-start gap-2.5">
+              <span className="mt-0.5 flex-none text-ink3"><IconWave width={18} height={18} /></span>
+              <div className="flex min-w-0 flex-col gap-0.5">
+                <span className="font-medium text-ink">Render dubbed audio</span>
+                <span className="text-[12px] leading-snug text-ink3">
+                  Generates speech, fits timing and mixes the final dubbed soundtrack.
+                </span>
+                {rerunMsg ? <span className="text-[12px] text-ink3">{rerunMsg}</span> : null}
+              </div>
+            </div>
+            {mixDone ? (
+              stateEditable && selected ? (
+                <button
+                  type="button"
+                  disabled={rerunning}
+                  onClick={() => void startRerun()}
+                  className="flex-none rounded-lg border border-line bg-surface px-3 py-1.5
+                             text-[12px] font-medium text-ink hover:bg-surface-hover
+                             disabled:opacity-60"
+                  title="Re-run TTS and mix for the latest committed edit. Lip-sync is skipped — run it separately."
+                >
+                  {rerunning ? 'Starting…' : 'Start TTS & mix'}
+                </button>
+              ) : (
+                <Badge tone="done">Rendered</Badge>
+              )
+            ) : (
+              <Badge>Waiting on casting</Badge>
+            )}
+          </div>
+        )}
+
         {/* Lip-sync as a non-selectable card, mirroring the Enhance row below.
             One model (LatentSync 1.5), one action — no radio, no choose-a-model
             prompt. */}
         <div
-          className={`flex items-center justify-between gap-3 rounded-lg border px-3 py-2
+          className={`flex items-center justify-between gap-3 rounded-lg border px-3 py-2.5
                       text-[12.5px] border-line bg-surface/40
                       ${lipBlocked && !busy ? 'opacity-60' : ''}`}
         >
-          <div className="flex min-w-0 flex-col gap-0.5">
-            <span className="font-medium text-ink">
-              LipSync 
-            </span>
-            <span className="text-[11px] leading-snug text-ink3">
-              Lip-syncs the dubbed audio to the speaker's mouth.
-            </span>
-            {lipEstimate ? (
-              <span className="text-[11px] text-ink4">
-                Expected time {lipEstimate} (5× clip length)
+          <div className="flex min-w-0 items-start gap-2.5">
+            <span className="mt-0.5 flex-none text-ink3"><IconFaceScan width={18} height={18} /></span>
+            <div className="flex min-w-0 flex-col gap-0.5">
+              <span className="font-medium text-ink">Lip-sync</span>
+              <span className="text-[12px] leading-snug text-ink3">
+                Match the speaker's mouth to the dubbed audio.
               </span>
-            ) : null}
-            {ready?.blockers?.length ? (
-              <span className="text-[11px] text-ink4">{ready.blockers[0]}</span>
-            ) : null}
-            {error ? <span className="text-[11px] text-warn">{error}</span> : null}
+              {lipEstimate ? (
+                <span className="text-[12px] text-ink4">
+                  Expected time {lipEstimate} (5× clip length)
+                </span>
+              ) : null}
+              {error ? <span className="text-[12px] text-warn">{error}</span> : null}
+            </div>
           </div>
-          <Button
-            size="sm"
-            busy={busy}
-            onClick={() => void start()}
-            disabled={lipBlocked}
-          >
-            {busy ? <IconSpinner /> : null} Start lip-sync
-          </Button>
+          {showLipButton ? (
+            <Button
+              size="sm"
+              busy={busy}
+              onClick={() => void start()}
+              disabled={lipBlocked}
+            >
+              {busy ? <IconSpinner /> : null} Start lip-sync
+            </Button>
+          ) : (
+            <Badge>{ready?.blockers?.[0] ?? 'Available after rendering'}</Badge>
+          )}
         </div>
 
         {/* Not a choice among the models above — an action on whichever one
@@ -228,48 +362,54 @@ export function LipsyncPanel({ jobId, onStarted }: {
             thing you can do here" rather than a second screen, and disabled
             until there is something to clean up. */}
         <div
-          className={`flex items-center justify-between gap-3 rounded-lg border px-3 py-2
-                      text-[12.5px] ${
+          className={`flex items-center justify-between gap-3 rounded-lg border px-3 py-2.5
+                      text-[13px] ${
                         enhStatus?.state === 'done'
                           ? 'border-ok/35 bg-ok/10'
                           : 'border-line bg-surface/40'
                       } ${enhBlocked && !enhBusy && !enhRunning ? 'opacity-60' : ''}`}
         >
-          <div className="flex min-w-0 flex-col gap-0.5">
-            <span className="font-medium text-ink">Enhance resolution</span>
-            <span className="text-[11px] leading-snug text-ink3">
-              Restores facial detail on the lip-synced render.
-            </span>
-            {enh?.frames ? (
-              <span className="text-[11px] text-ink4">
-                {enh.width}×{enh.height} · {enh.frames} frames
-                {enhEst ? ` · ${enhEst}` : ''}
+          <div className="flex min-w-0 items-start gap-2.5">
+            <span className="mt-0.5 flex-none text-ink3"><IconSparkle width={18} height={18} /></span>
+            <div className="flex min-w-0 flex-col gap-0.5">
+              <span className="font-medium text-ink">Enhance resolution</span>
+              <span className="text-[12px] leading-snug text-ink3">
+                Restore facial detail in the lip-synced video.
               </span>
-            ) : null}
-            {!enhRunning && enh?.blockers?.length ? (
-              <span className="text-[11px] text-ink4">{enh.blockers[0]}</span>
-            ) : null}
-            {enhStatus?.state === 'done' ? (
-              <span className="text-[11px] text-ink3">
-                Restored {enhStatus.restored ?? 0} of {enhStatus.frames ?? 0} frames
-                {enhStatus.passed_through ? `, ${enhStatus.passed_through} passed through` : ''}.
-              </span>
-            ) : null}
-            {enhStatus?.state === 'failed' ? (
-              <span className="text-[11px] text-warn">{enhStatus.error}</span>
-            ) : null}
-            {enhError ? <span className="text-[11px] text-warn">{enhError}</span> : null}
+              {enh?.frames ? (
+                <span className="text-[12px] text-ink4">
+                  {enh.width}×{enh.height} · {enh.frames} frames
+                  {enhEst ? ` · ${enhEst}` : ''}
+                </span>
+              ) : null}
+              {enhStatus?.state === 'done' ? (
+                <span className="text-[12px] text-ink3">
+                  Restored {enhStatus.restored ?? 0} of {enhStatus.frames ?? 0} frames
+                  {enhStatus.passed_through ? `, ${enhStatus.passed_through} passed through` : ''}.
+                </span>
+              ) : null}
+              {enhStatus?.state === 'failed' ? (
+                <span className="text-[12px] text-warn">{enhStatus.error}</span>
+              ) : null}
+              {enhError ? <span className="text-[12px] text-warn">{enhError}</span> : null}
+            </div>
           </div>
-          <Button
-            size="sm"
-            busy={enhBusy || enhRunning}
-            onClick={() => void startEnhance()}
-            disabled={enhBlocked}
-          >
-            {enhRunning ? `Enhancing${enhEst ? ` (${enhEst})` : ''}` : 'Enhance'}
-          </Button>
+          {showEnhButton ? (
+            <Button
+              size="sm"
+              busy={enhBusy || enhRunning}
+              onClick={() => void startEnhance()}
+              disabled={enhBlocked}
+            >
+              {enhRunning ? `Enhancing${enhEst ? ` (${enhEst})` : ''}` : 'Enhance'}
+            </Button>
+          ) : (
+            <Badge>{enh?.blockers?.[0] ?? 'After lip-sync'}</Badge>
+          )}
         </div>
       </div>
+
+      <CastConfirmDialog open={confirmCastOpen} onOpenChange={setConfirmCastOpen} />
 
       {/* Pending-edit discard still belongs below — it is the one thing a
           viewer may need to resolve before the Start button becomes active. */}
@@ -294,7 +434,7 @@ export function LipsyncPanel({ jobId, onStarted }: {
               ? `Discard ${ready.pending_edits} edit(s)?`
               : 'Continue without them'}
           </button>
-          <span className="text-[11.5px] text-ink4">
+          <span className="text-[12.5px] text-ink4">
             {confirmDiscard
               ? 'This cannot be undone from here.'
               : 'Drops the staged edits so lip-sync can start.'}

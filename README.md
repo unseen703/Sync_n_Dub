@@ -46,7 +46,7 @@ music and effects, and optionally lip-syncs the speaker's mouth to the new audio
 | Requirement | Detail |
 |---|---|
 | **OS** | Linux (tested on Ubuntu 22.04+) |
-| **GPU** | NVIDIA with ≥16 GiB VRAM, CUDA 12.8+, Blackwell (sm_120) safe |
+| **GPU** | NVIDIA with ≥16 GiB VRAM, CUDA 12.8+ |
 | **conda** | Miniconda or Anaconda on PATH |
 | **git** | For cloning vendor repos during asset fetch |
 | **HuggingFace token** | Required for pyannote diarization — accept the [model gate](https://hf.co/pyannote/speaker-diarization-community-1) first |
@@ -103,30 +103,31 @@ Each env has a matching `.pip.txt`. The PyTorch index must target your CUDA:
 
 ```bash
 TORCH_INDEX="https://download.pytorch.org/whl/cu128"
-CONDA_BASE="$(conda info --base)"
 
-$CONDA_BASE/envs/dubbing/bin/python -m pip install \
-    -r envs/dubbing.pip.txt --extra-index-url "$TORCH_INDEX"
+conda activate dubbing
+python -m pip install -r envs/dubbing.pip.txt --extra-index-url "$TORCH_INDEX"
 
-$CONDA_BASE/envs/musetalk/bin/python -m pip install --no-deps \
-    -r envs/musetalk.pip.txt --extra-index-url "$TORCH_INDEX"
+conda activate musetalk
+python -m pip install --no-deps -r envs/musetalk.pip.txt --extra-index-url "$TORCH_INDEX"
 
-$CONDA_BASE/envs/latentsync/bin/python -m pip install \
-    -r envs/latentsync.pip.txt --extra-index-url "$TORCH_INDEX"
+conda activate latentsync
+python -m pip install -r envs/latentsync.pip.txt --extra-index-url "$TORCH_INDEX"
 ```
 
 MuseTalk also needs mmcv built from source (~20 min):
 
 ```bash
-envs/build_mmcv_musetalk.sh "$CONDA_BASE/envs/musetalk/bin/python"
+conda activate musetalk
+envs/build_mmcv_musetalk.sh
 ```
 
 ### 3. Fetch vendor repos and model weights
 
 ```bash
-PY="$CONDA_BASE/envs/dubbing/bin/python"
-$PY setup/fetch_assets.py --all                  # required weights
-$PY setup/fetch_assets.py --all --include-optional   # +musetalk v1, syncnet (~6 GB)
+conda activate dubbing
+
+python setup/fetch_assets.py --all                  # required weights
+python setup/fetch_assets.py --all --include-optional   # +musetalk v1, syncnet (~6 GB)
 ```
 
 Reads `models/assets.lock.json` — every repo commit, patch and weight checksum
@@ -141,9 +142,10 @@ cp .env.example .env && chmod 600 .env
 Fill in at minimum:
 - `HF_TOKEN` — HuggingFace token (pyannote gate must be accepted)
 - `BODHAN_ASR_KEY`, `BODHAN_MT_KEY`, `BODHAN_TTS_KEY`, `BODHAN_TRANSLIT_KEY`
+- `OPENROUTER_API_KEY` — enables the LLM edit agent
 
 Optional:
-- `OPENROUTER_API_KEY` — enables the LLM edit agent
+
 - `LANGFUSE_PUBLIC_KEY` + `LANGFUSE_SECRET_KEY` — LLM tracing
 
 ### 5. Build the frontend
@@ -158,31 +160,32 @@ Output lands in `frontend/-dist/`. If missing, the server runs API-only.
 ### 6. Run the doctor
 
 ```bash
-$PY setup/doctor.py               # full check
-$PY setup/doctor.py --quick        # skip slow/import-heavy checks
-$PY setup/doctor.py --json         # machine-readable output
+python setup/doctor.py               # full check
+python setup/doctor.py --quick        # skip slow/import-heavy checks
+python setup/doctor.py --json         # machine-readable output
 ```
 
 ---
 
 ## 🎯 Usage
 
-There is no `python` on PATH — always use the dubbing env's interpreter:
+Activate the dubbing environment once — all commands below assume it's active:
 
 ```bash
-PY=/data1/dipak_data/miniconda3/envs/dubbing/bin/python
-# or: PY="$(conda info --base)/envs/dubbing/bin/python"
+conda activate dubbing
 ```
+
+> **Note:** There is no system-wide `python` on this host. `conda activate dubbing` puts the right interpreter on PATH.
 
 ### CLI
 
 ```bash
-$PY -m backend.pipeline.cli --input <url-or-file> \
+python -m backend.pipeline.cli --input <url-or-file> \
     --model pyannote --asr bodhan --align mms_fa \
     --mt bodhan --mt-target-language hi \
     --tts bodhan --mix --lipsync wav2lip
 
-$PY -m backend.pipeline.jobs list          # every run, newest first
+python -m backend.pipeline.jobs list       # every run, newest first
 ```
 
 One input per run. Each run becomes its own job folder under `data/jobs/`.
@@ -216,7 +219,7 @@ Lip-sync is capped at **20 minutes** of video (3–21× real-time on 16 GiB card
 Fix a finished dub without re-running the whole pipeline:
 
 ```bash
-$PY -m backend.edit_agent -j <job_id> \
+python -m backend.edit_agent -j <job_id> \
     "the speaker at 1:20 should sound female, and speed up 0:30 to 0:45 by 1.2x"
 ```
 

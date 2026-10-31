@@ -13,6 +13,7 @@ import type {
   Progress,
   Spec,
   SpeakerLabels,
+  SpeakerPhotoChoices,
   SpeakerTable,
 } from './types';
 
@@ -411,23 +412,27 @@ export async function getSpeakers(id: string): Promise<SpeakerTable> {
 
         voice_rationale: { gender_match: 1.0, embed_cos: 0.81 },
         tone: 'educational lecture', reference_url: null, color: '#6366f1',
+        face_crop_url: null, face_crop_urls: [], face_photo_index: null,
       },
       {
         id: 'SPEAKER_01', label: null, speech_s: 110.0, n_segments: 14,
         gender: 'male', voice: 'Amit', voice_source: 'derived', voice_score: null,
         voice_rationale: null, tone: null, reference_url: null, color: '#06b6d4',
+        face_crop_url: null, face_crop_urls: [], face_photo_index: null,
       },
       {
         id: 'SPEAKER_02', label: null, speech_s: 18.5, n_segments: 5,
 
         gender: null, voice: null, voice_source: null, voice_score: null,
         voice_rationale: null, tone: null, reference_url: null, color: '#f59e0b',
+        face_crop_url: null, face_crop_urls: [], face_photo_index: null,
       },
     ],
   };
 }
 
 const MOCK_LABELS: Record<string, string> = { SPEAKER_00: 'Prof. Mitra' };
+const MOCK_PHOTO_CHOICES: Record<string, number> = {};
 
 export async function setSpeakerLabel(
   id: string,
@@ -438,6 +443,16 @@ export async function setSpeakerLabel(
   if (label.trim()) MOCK_LABELS[speakerId] = label.trim();
   else delete MOCK_LABELS[speakerId];
   return { job_id: id, labels: { ...MOCK_LABELS } };
+}
+
+export async function setSpeakerPhoto(
+  id: string,
+  speakerId: string,
+  index: number,
+): Promise<SpeakerPhotoChoices> {
+  await sleep(120);
+  MOCK_PHOTO_CHOICES[speakerId] = index;
+  return { job_id: id, photo_choices: { ...MOCK_PHOTO_CHOICES } };
 }
 
 export async function getSpec(id: string): Promise<Spec> {

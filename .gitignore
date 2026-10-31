@@ -90,13 +90,12 @@ data/talking_head/*
 third_party/
 !patches/
 
-# The lip-sync adapters' vendored upstreams, moved out of third_party/ on
-# 2026-10-23 so the adapters stop reaching outside models/. Same deal: the
-# CODE is upstream's and the WEIGHTS are tens of GB, so neither is tracked.
-# ~21 GB lives here (LatentSync 12G, MuseTalk 8.7G, Wav2Lip 517M).
+# Vendored upstreams live under backend/<stage>/vendor/. The CODE is
+# upstream's and the WEIGHTS are tens of GB, so neither is tracked.
+# fetch_assets.py clones repos and downloads weights into these dirs.
 backend/lipsync/vendor/
-# TalkNet followed on the same day, for the same reason.
 backend/asd/vendor/
+backend/faces/vendor/
 
 # Run logs, build output, model weights
 logs/

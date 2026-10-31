@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # One-command install: the four conda envs (envs/*.yml), the vendored
-# lip-sync/ASD repos and their weights (models/assets.lock.json via
-# ./fetch_assets.py), the UI build, then ./doctor.py to report
+# lip-sync/ASD repos and their weights (setup/assets.lock.json via
+# setup/fetch_assets.py), the UI build, then setup/doctor.py to report
 # what's left.
 #
 #   ./install.sh                  # everything
@@ -135,10 +135,10 @@ fi
 # 2. vendor repos + weights
 # ---------------------------------------------------------------------------
 if [ "$SKIP_ASSETS" -eq 0 ]; then
-  say "vendor repos + weights (models/assets.lock.json)"
+  say "vendor repos + weights (setup/assets.lock.json)"
   OPT_FLAG=""
   [ "$INCLUDE_OPTIONAL" -eq 1 ] && OPT_FLAG="--include-optional"
-  "$PY_DUBBING" ./fetch_assets.py --all $OPT_FLAG
+  "$PY_DUBBING" setup/fetch_assets.py --all $OPT_FLAG
 else
   say "skipping asset fetch (--skip-assets)"
 fi
@@ -162,6 +162,6 @@ if [ ! -f .env ]; then
   warn ".env does not exist yet -- copy .env.example to .env and fill in keys, then re-run the doctor:"
   warn "  cp .env.example .env && chmod 600 .env"
 fi
-"$PY_DUBBING" ./doctor.py || true
+"$PY_DUBBING" setup/doctor.py || true
 
-say "done. Fix anything FAIL/WARN above, then: ./start_frontend.sh"
+say "done. Fix anything FAIL/WARN above, then: setup/start_ui.sh"

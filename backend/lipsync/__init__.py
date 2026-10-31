@@ -5,8 +5,8 @@
   - latentsync15: bytedance/LatentSync 1.5 — audio-conditioned latent
                   diffusion at 256x256, ~8 GB
 
-Each adapter wraps a repo clone under `models/lipsync/vendor/`; see
-`models/_vendor.py`.
+Each adapter wraps a repo clone under `backend/lipsync/vendor/`; see
+`backend/common/vendor.py`.
 
 `server/service/lipsync_models.normalise()` matches on PREFIX, so a key that is a prefix
 of another (`latentsync` of `latentsync15`) must never be added without its

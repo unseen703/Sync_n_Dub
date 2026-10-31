@@ -130,7 +130,7 @@ python setup/fetch_assets.py --all                  # required weights
 python setup/fetch_assets.py --all --include-optional   # +musetalk v1, syncnet (~6 GB)
 ```
 
-Reads `models/assets.lock.json` — every repo commit, patch and weight checksum
+Reads `setup/assets.lock.json` — every repo commit, patch and weight checksum
 is pinned.
 
 ### 4. Configure secrets

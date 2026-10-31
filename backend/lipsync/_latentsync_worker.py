@@ -86,7 +86,10 @@ def main() -> int:
     dtype = torch.float16 if is_fp16 else torch.float32
 
     scheduler = DDIMScheduler.from_pretrained("configs")
-    if config.model.cross_attention_dim == 768:
+    env_whisper = os.getenv("LATENTSYNC_WHISPER_MODEL")
+    if env_whisper:
+        whisper_model_path = env_whisper
+    elif config.model.cross_attention_dim == 768:
         whisper_model_path = "checkpoints/whisper/small.pt"
     elif config.model.cross_attention_dim == 384:
         whisper_model_path = "checkpoints/whisper/tiny.pt"

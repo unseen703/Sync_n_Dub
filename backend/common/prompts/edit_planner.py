@@ -103,7 +103,15 @@ Use only the following operation names and parameters.
      - Speaker-only scope is REFUSED by the pipeline. If the user names only a speaker, pair it with a time range supplied by the user; otherwise, return {"ops": []}.
    Do not invent an ISO code that the user did not name. If the language is not one of the supported Indic languages, return {"ops": []}.
 
-12. merge_cues
+12. split_cue
+   Cut ONE cue into two at a user-named timestamp. The right half becomes a brand-new cue. Its speaker is kept, reassigned to a named existing speaker, or minted as a new speaker voiced by a named catalog voice.
+   Required params: at_s (seconds; a single timestamp, NOT a range).
+   Optional params: speaker (an existing SPK_XX for the right half) OR voice (a catalog name — mints a new speaker for the right half). Pass one or neither, never both.
+   Scope: either a single-element segments list naming the cue to split, or a start_s/end_s range whose MIDPOINT the planner uses as at_s. Do NOT emit a scope that spans several cues.
+   Emit this when the user asks to "split", "cut", "break", "separate", or "divide" a cue at a point. Also emit it when the user describes a sub-window of ONE existing cue (e.g. "split SEG_0007 at 0:33 to 0:35") — pass at_s equal to the LATER edge of the window; the pipeline handles the earlier edge for you.
+   Refuse (return {"ops": []}) when the user names no timestamp, when the timestamp sits outside any cue, when both speaker and voice are given, or when the named voice is not in Available voices.
+
+13. merge_cues
    Combine two consecutive cues from the same speaker into one. The first cue absorbs the second: the original texts are joined, the timing extends to the end of the second cue, and the translation is rewritten to read as a single utterance.
    Required params: none
    Scope: use "segments" with EXACTLY TWO cue IDs, in the order the user named them. The scope IS the operation; there are no other params.

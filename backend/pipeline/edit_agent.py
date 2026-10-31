@@ -488,6 +488,7 @@ def parse_request(nlq: str, *, data: Dict[str, Any],
         try:
             ops = _llm_parse(nlq, client=client)
             ops = _dedup_create_speaker_set_voice(ops)
+            ops = _coerce_user_voice(ops, nlq)
             if ops:
                 return ops, "llm"
             log.warning(
@@ -518,6 +519,54 @@ def parse_request(nlq: str, *, data: Dict[str, Any],
         "understood.\n\n"
         "  Try one of these shapes:\n\n"
         + sample_prompts_text(per_op=2, indent="    "))
+
+def _coerce_user_voice(ops: List[EditOp], nlq: str) -> List[EditOp]:
+    """Override an LLM-chosen voice when the user NAMED a different one.
+
+    The LLM has drifted on this: given "voice of Sourav" with Sourav in the
+    `{{voice_ids}}` list, it returned `voice: Adarsh` -- a plausible-looking
+    substitution that the handler then accepted (Adarsh is also in the
+    catalog). The user's own words are the authoritative choice; we scan the
+    raw utterance for any catalog voice id, and if the LLM op's voice is a
+    DIFFERENT catalog id, we rewrite it.
+
+    This runs POST `_llm_parse`, so it only trusts a name the user actually
+    typed. A name that is not in the catalog is left alone -- the handler
+    will refuse it with a plain error, which is the correct outcome.
+    """
+    try:
+        from backend.tts.voices import DEFAULT_INDIC_SPEAK
+    except Exception:
+        return ops
+    catalog = {v.voice for v in DEFAULT_INDIC_SPEAK}
+    # Case-insensitive scan over whole words in the user's text. Matches
+    # "voice of Sourav", "the Deepika voice", "Chinmay voice", etc. Picks
+    # the first catalog name the user named; a request that cites two is
+    # ambiguous and we leave the LLM's choice.
+    import re as _re
+    named: List[str] = []
+    for tok in _re.findall(r"\b[A-Z][a-z]{2,15}\b", nlq):
+        if tok in catalog and tok not in named:
+            named.append(tok)
+    if len(named) != 1:
+        return ops
+    user_voice = named[0]
+    out: List[EditOp] = []
+    for o in ops:
+        if o.op in ("create_speaker", "set_voice"):
+            llm_voice = str(o.params.get("voice") or "").strip()
+            if llm_voice and llm_voice.lower() != user_voice.lower():
+                log.warning(
+                    "parse: LLM returned voice=%r but user named %r; "
+                    "overriding to the user's choice", llm_voice, user_voice)
+                new_params = dict(o.params)
+                new_params["voice"] = user_voice
+                out.append(EditOp(op=o.op, scope=o.scope,
+                                  params=new_params, note=o.note))
+                continue
+        out.append(o)
+    return out
+
 
 def _dedup_create_speaker_set_voice(ops: List[EditOp]) -> List[EditOp]:
     """Strip set_voice from LLM output when a create_speaker is present.
@@ -1468,6 +1517,10 @@ def rerun(plan: EditPlan, *, device: Optional[str] = None,
         mix_sample_rate=nsget("mix_sample_rate", 48000),
         mix_tts_gain_db=nsget("mix_tts_gain_db", 3.0),
         mix_me_gain_db=nsget("mix_me_gain_db", -3.0),
+        mix_duck_enabled=nsget("mix_duck", True),
+        mix_duck_db=nsget("mix_duck_db", -6.0),
+        mix_duck_attack_s=nsget("mix_duck_attack", 0.08),
+        mix_duck_release_s=nsget("mix_duck_release", 0.25),
         mix_strategy=(setup.mix_strategy if setup is not None
                       else nsget("mix_strategy", "global_tempo")),
         mix_tempo_cap=(setup.mix_tempo_cap if setup is not None

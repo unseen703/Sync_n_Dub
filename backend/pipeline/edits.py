@@ -1895,6 +1895,59 @@ def _h_create_speaker(data, seg_ids, op, applied, ctx, res):
     next_num = (max(used_nums) + 1) if used_nums else 0
     new_id = f"SPK_{next_num:02d}"
 
+    # Auto-split when the WINDOW sits strictly inside one existing cue.
+    # "create a new speaker for 0:33 to 0:35" on a cue that runs 33.09-40.90
+    # must affect ONLY that 2s slice, not the whole 7.8s cue. Without this
+    # the overlap-based scope would move all of SEG_0007 to the new speaker
+    # and the operator's "new speaker for a stretch" becomes "new speaker
+    # for the whole surrounding sentence" -- the exact failure the UI shows
+    # as "why did it create a speaker but not split".
+    #
+    # Trigger strictly: both edges of the user's window must sit AT LEAST
+    # MIN_HALF seconds inside the SAME single cue, which is also what the
+    # split handler requires. If the window straddles cues or hugs an edge,
+    # the historical behaviour (reassign every overlapping cue) stands.
+    MIN_HALF = 0.15
+    wstart = _as_time(op.scope.start_s)
+    wend = _as_time(op.scope.end_s)
+    did_auto_split = False
+    if (wstart is not None and wend is not None
+            and wstart + MIN_HALF <= wend and len(seg_ids) == 1
+            and not op.scope.segments and not op.scope.speaker
+            and not op.scope.all):
+        host = next((s for s in data.get("segments", [])
+                     if str(s.get("id")) == seg_ids[0]), None)
+        if host is not None:
+            hs, he = _seg_start(host), _seg_end(host)
+            # Clamp the user's window to the host; "0:33 to 0:35" against a
+            # cue that actually starts at 33.09 is clearly meant as "the
+            # start of that cue to 0:35", not refused on a 90ms technicality.
+            lo = max(wstart, hs)
+            hi = min(wend, he)
+            need_left_split = lo >= hs + MIN_HALF   # a real left slice to carve off
+            need_right_split = hi <= he - MIN_HALF  # a real right slice to carve off
+            if (need_left_split or need_right_split) and hi >= lo + MIN_HALF:
+                # Order matters: split at the RIGHT edge first so the host's
+                # id still names the still-undivided left+middle span, then
+                # split at the LEFT edge so the middle slice emerges as the
+                # NEW cue the second call returns. If only one edge needs
+                # splitting, we take exactly one call and the middle is
+                # whichever of host / new_id covers the clamped window.
+                if need_right_split:
+                    _split_cue_at(data, host, hi, res=res,
+                                   ctx=ctx, source="create_speaker")
+                if need_left_split:
+                    middle_id = _split_cue_at(data, host, lo, res=res,
+                                               ctx=ctx, source="create_speaker")
+                    seg_ids = [middle_id]
+                else:
+                    # No left split -- host IS the middle slice now.
+                    seg_ids = [str(host.get("id"))]
+                did_auto_split = True
+                applied.changes.append(
+                    f"auto-split to isolate the {hi-lo:.2f}s window "
+                    f"({lo:.2f}-{hi:.2f}s) for the new speaker")
+
     by_id = {str(s.get("id")): s for s in data.get("segments", [])}
     moved = 0
     for sid in seg_ids:
@@ -2385,6 +2438,119 @@ def _h_merge_cues(data, seg_ids, op, applied, ctx, res):
         f"(end={end_b:.2f}s)")
     applied.warnings.append(
         f"{sid_b} was removed from the cue list; use mt/versions/ to revert")
+
+
+def _split_cue_at(
+    data: Dict[str, Any],
+    host: Dict[str, Any],
+    at_s: float,
+    *,
+    res: "EditResult",
+    ctx: "EditContext",
+    source: str = "split",
+) -> str:
+    """Cut `host` into two at `at_s`; return the new right-half seg id.
+
+    Pure structural split: left half keeps the host's id, speaker and voice
+    pins; right half gets a fresh SEG_NNNN with the parent's speaker. The
+    caller decides what to do with either half afterwards -- this helper
+    makes no speaker policy choices.
+
+    Factored out of `_h_split_cue` so `_h_create_speaker` can auto-split a
+    cue when the user names a sub-window of it ("new speaker for 0:33 to
+    0:35" on a cue running 33.09-40.90). Both paths share the same word /
+    translation split rules so the result is identical regardless of which
+    op the planner picked.
+    """
+    segs = data.get("segments") or []
+    hid = str(host.get("id"))
+    i_a = next((i for i, s in enumerate(segs) if str(s.get("id")) == hid), -1)
+    if i_a < 0:
+        raise EditError(f"split: {hid!r} is not in the segments list")
+    s0, s1 = _seg_start(host), _seg_end(host)
+    MIN_HALF = 0.15
+    if not (s0 + MIN_HALF <= at_s <= s1 - MIN_HALF):
+        raise EditError(
+            f"split: at_s={at_s:.3f}s must sit at least "
+            f"{MIN_HALF:.2f}s inside {hid} ({s0:.2f}-{s1:.2f}s)")
+
+    orig_speaker = str(host.get("speaker") or "") or ""
+
+    # Word-timing partition identical to `_h_split_cue`'s rule.
+    words = list(host.get("words") or [])
+    if words:
+        left_words = [w for w in words if _as_time(w.get("end")) is not None
+                      and float(w["end"]) <= at_s + 1e-6]
+        right_words = words[len(left_words):]
+        left_text = " ".join((w.get("text") or "").strip()
+                             for w in left_words).strip()
+        right_text = " ".join((w.get("text") or "").strip()
+                              for w in right_words).strip()
+        if not left_text or not right_text:
+            left_words, right_words = [], []
+            left_text, right_text = _split_text_proportional(
+                str(host.get("text") or ""),
+                (at_s - s0) / max(1e-6, (s1 - s0)))
+    else:
+        left_text, right_text = _split_text_proportional(
+            str(host.get("text") or ""),
+            (at_s - s0) / max(1e-6, (s1 - s0)))
+        left_words, right_words = [], []
+
+    seg_nums: List[int] = []
+    for s in segs:
+        m = re.match(r"SEG[_ ]?(\d+)$", str(s.get("id") or ""), re.I)
+        if m:
+            seg_nums.append(int(m.group(1)))
+    new_seg_id = f"SEG_{(max(seg_nums) + 1) if seg_nums else 0:04d}"
+
+    for key in ("end", "end_s", "text", "words", "mt_text", "final_text",
+                "target_duration_s", "est_duration_s", "candidates", "qc"):
+        if key in host:
+            _backup(host, key)
+
+    parent_mt = str(host.get("mt_text") or "")
+    parent_final = str(host.get("final_text") or parent_mt or "")
+    left_frac = max(0.05, min(0.95, (at_s - s0) / max(1e-6, (s1 - s0))))
+    left_mt, right_mt = _split_text_proportional(parent_mt, left_frac)
+    left_final, right_final = _split_text_proportional(parent_final, left_frac)
+
+    new_seg: Dict[str, Any] = {
+        "id": new_seg_id,
+        "start": at_s,
+        "end": s1,
+        "text": right_text,
+        "speaker": orig_speaker,
+        "language": host.get("language"),
+        "mt_text": right_mt,
+        "final_text": right_final,
+    }
+    if "end_s" in host:
+        new_seg["end_s"] = s1
+    if "start_s" in host:
+        new_seg["start_s"] = at_s
+    if right_words:
+        new_seg["words"] = right_words
+    for carry in ("mt_target_language", "mt_target_script",
+                  "tts_style", "tts_engine"):
+        if carry in host:
+            new_seg[carry] = host[carry]
+
+    host["end"] = at_s
+    if "end_s" in host:
+        host["end_s"] = at_s
+    if left_text:
+        _set_segment_text(host, left_text)
+        host["text"] = left_text
+    if left_words:
+        host["words"] = left_words
+    for key in ("target_duration_s", "est_duration_s", "candidates", "qc"):
+        host.pop(key, None)
+    host["mt_text"] = left_mt
+    host["final_text"] = left_final
+
+    segs.insert(i_a + 1, new_seg)
+    return new_seg_id
 
 
 def _mint_speaker_id(data: Dict[str, Any]) -> str:
